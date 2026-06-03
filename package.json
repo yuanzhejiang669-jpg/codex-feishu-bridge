@@ -1,0 +1,13 @@
+{
+  "name": "codex-feishu-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Private Windows bridge that connects a Feishu bot to local Codex.",
+  "scripts": {
+    "check": "node --check codex-feishu-bridge.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

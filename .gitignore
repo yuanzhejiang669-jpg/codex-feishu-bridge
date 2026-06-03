@@ -1,0 +1,49 @@
+node_modules/
+.env
+.env.*
+!.env.example
+
+# Local Feishu/Codex secrets and state
+.lark-cli/
+.codex/
+auth.json
+config.toml
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# Bridge runtime state and logs
+state/
+logs/
+*.log
+bridge.pid
+bridge.stop
+seen-events.json
+sessions.json
+watchdog.lock
+watchdog-last-restart.txt
+
+# Codex runtime output
+.codex-feishu-runtime/
+codex-output/
+codex-prompts/
+.codex-feishu-attachments/
+
+# Local workspace contents are intentionally not versioned.
+workspace/*
+!workspace/.gitkeep
+
+# Backups and temp files
+*.bak
+*.backup
+*.tmp
+*.old
+*.orig
+*.rej
+
+# OS/editor
+Thumbs.db
+Desktop.ini
+.DS_Store
+.vscode/
+.idea/
