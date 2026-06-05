@@ -323,13 +323,9 @@ async function startBridge({ name, profile, workspace, options }) {
   if (options.enableMcp) args.push("-EnableMcp");
 
   console.log("Starting bridge...");
-  const child = spawn("powershell.exe", args, {
-    cwd: ROOT,
-    detached: true,
-    stdio: "ignore",
-    windowsHide: true,
-  });
-  child.unref();
+  const result = await runRaw("powershell.exe", args, { timeoutMs: 60_000 });
+  process.stdout.write(result.stdout);
+  process.stderr.write(result.stderr);
 
   await waitForBridgeRunning(name, 30_000);
   console.log(`Bridge started: ${name}`);

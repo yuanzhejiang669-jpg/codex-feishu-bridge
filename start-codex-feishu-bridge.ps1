@@ -127,7 +127,7 @@ if ($Foreground) {
 
 $process = Start-Process `
   -FilePath "node" `
-  -ArgumentList @($script) `
+  -ArgumentList ('"' + ($script -replace '"', '\"') + '"') `
   -WorkingDirectory $PSScriptRoot `
   -RedirectStandardOutput $stdoutLog `
   -RedirectStandardError $stderrLog `
