@@ -97,13 +97,33 @@ function Test-LarkConsumer {
   }
   $statusArgs += "--json"
 
-  $output = & $larkCli @statusArgs 2>&1
-  if ($LASTEXITCODE -ne 0) {
-    return @{ Ok = $false; Reason = "lark-cli status failed: $($output -join ' ')" }
+  $tempBase = Join-Path $env:TEMP ("codex-feishu-lark-status-{0}-{1}" -f $PID, ([guid]::NewGuid().ToString("N")))
+  $stdoutPath = "$tempBase.out"
+  $stderrPath = "$tempBase.err"
+  try {
+    $process = Start-Process `
+      -FilePath $larkCli `
+      -ArgumentList $statusArgs `
+      -RedirectStandardOutput $stdoutPath `
+      -RedirectStandardError $stderrPath `
+      -WindowStyle Hidden `
+      -PassThru
+    if (-not $process.WaitForExit(15000)) {
+      Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+      return @{ Ok = $false; Reason = "lark-cli status timed out" }
+    }
+    $stdout = if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath -Raw -ErrorAction SilentlyContinue } else { "" }
+    $stderr = if (Test-Path -LiteralPath $stderrPath) { Get-Content -LiteralPath $stderrPath -Raw -ErrorAction SilentlyContinue } else { "" }
+    if ($process.ExitCode -ne 0) {
+      return @{ Ok = $false; Reason = "lark-cli status failed: $($stdout.Trim()) $($stderr.Trim())".Trim() }
+    }
+    $outputText = $stdout
+  } finally {
+    Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
   }
 
   try {
-    $status = ($output -join "`n") | ConvertFrom-Json
+    $status = $outputText | ConvertFrom-Json
   } catch {
     return @{ Ok = $false; Reason = "lark-cli status returned invalid json" }
   }
