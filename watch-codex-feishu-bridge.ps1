@@ -74,11 +74,18 @@ function Get-BridgeProcess {
 }
 
 function Get-LarkCliCommand {
+  $npmLarkExe = Join-Path $env:APPDATA "npm\node_modules\@larksuite\cli\bin\lark-cli.exe"
+  if (Test-Path -LiteralPath $npmLarkExe) { return $npmLarkExe }
   $cmd = Get-Command "lark-cli.cmd" -ErrorAction SilentlyContinue
   if ($cmd) { return $cmd.Source }
   $npmLark = Join-Path $env:APPDATA "npm\lark-cli.cmd"
   if (Test-Path -LiteralPath $npmLark) { return $npmLark }
   return $null
+}
+
+function ConvertTo-CmdArgument {
+  param([string]$Value)
+  return '"' + ($Value -replace '"', '""') + '"'
 }
 
 function Test-LarkConsumer {
@@ -101,9 +108,16 @@ function Test-LarkConsumer {
   $stdoutPath = "$tempBase.out"
   $stderrPath = "$tempBase.err"
   try {
+    $processFile = $larkCli
+    $processArgs = $statusArgs
+    if ($larkCli -match '\.(cmd|bat)$') {
+      $cmdLine = (ConvertTo-CmdArgument $larkCli) + " " + (($statusArgs | ForEach-Object { ConvertTo-CmdArgument $_ }) -join " ")
+      $processFile = "cmd.exe"
+      $processArgs = "/d /s /c `"$cmdLine`""
+    }
     $process = Start-Process `
-      -FilePath $larkCli `
-      -ArgumentList $statusArgs `
+      -FilePath $processFile `
+      -ArgumentList $processArgs `
       -RedirectStandardOutput $stdoutPath `
       -RedirectStandardError $stderrPath `
       -WindowStyle Hidden `
