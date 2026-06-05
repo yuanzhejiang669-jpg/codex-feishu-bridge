@@ -88,6 +88,42 @@ function ConvertTo-CmdArgument {
   return '"' + ($Value -replace '"', '""') + '"'
 }
 
+function ConvertTo-ProcessArgument {
+  param([string]$Value)
+  if ($Value -notmatch '[\s"]') { return $Value }
+  return '"' + ($Value -replace '\\', '\\' -replace '"', '\"') + '"'
+}
+
+function Invoke-ProcessWithTimeout {
+  param(
+    [string]$FilePath,
+    [string[]]$Arguments,
+    [int]$TimeoutMs = 15000
+  )
+
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = $FilePath
+  $psi.Arguments = (($Arguments | ForEach-Object { ConvertTo-ProcessArgument $_ }) -join " ")
+  $psi.RedirectStandardOutput = $true
+  $psi.RedirectStandardError = $true
+  $psi.UseShellExecute = $false
+  $psi.CreateNoWindow = $true
+
+  $process = New-Object System.Diagnostics.Process
+  $process.StartInfo = $psi
+  [void]$process.Start()
+  if (-not $process.WaitForExit($TimeoutMs)) {
+    try { $process.Kill() } catch {}
+    return @{ ExitCode = -1; Stdout = ""; Stderr = ""; TimedOut = $true }
+  }
+  return @{
+    ExitCode = $process.ExitCode
+    Stdout = $process.StandardOutput.ReadToEnd()
+    Stderr = $process.StandardError.ReadToEnd()
+    TimedOut = $false
+  }
+}
+
 function Test-LarkConsumer {
   $larkCli = Get-LarkCliCommand
   if (-not $larkCli) {
@@ -104,47 +140,23 @@ function Test-LarkConsumer {
   }
   $statusArgs += "--json"
 
-  $tempBase = Join-Path $env:TEMP ("codex-feishu-lark-status-{0}-{1}" -f $PID, ([guid]::NewGuid().ToString("N")))
-  $stdoutPath = "$tempBase.out"
-  $stderrPath = "$tempBase.err"
-  try {
-    $processFile = $larkCli
-    $processArgs = $statusArgs
-    if ($larkCli -match '\.(cmd|bat)$') {
-      $cmdLine = (ConvertTo-CmdArgument $larkCli) + " " + (($statusArgs | ForEach-Object { ConvertTo-CmdArgument $_ }) -join " ")
-      $processFile = "cmd.exe"
-      $processArgs = "/d /s /c `"$cmdLine`""
-    }
-    $process = Start-Process `
-      -FilePath $processFile `
-      -ArgumentList $processArgs `
-      -RedirectStandardOutput $stdoutPath `
-      -RedirectStandardError $stderrPath `
-      -WindowStyle Hidden `
-      -PassThru
-    if (-not $process.WaitForExit(15000)) {
-      Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-      return @{ Ok = $false; Reason = "lark-cli status timed out" }
-    }
-    if (Test-Path -LiteralPath $stdoutPath) {
-      $stdout = [string](Get-Content -LiteralPath $stdoutPath -Raw -ErrorAction SilentlyContinue)
-    } else {
-      $stdout = ""
-    }
-    if (Test-Path -LiteralPath $stderrPath) {
-      $stderr = [string](Get-Content -LiteralPath $stderrPath -Raw -ErrorAction SilentlyContinue)
-    } else {
-      $stderr = ""
-    }
-    if ($null -eq $stdout) { $stdout = "" }
-    if ($null -eq $stderr) { $stderr = "" }
-    if ($process.ExitCode -ne 0) {
-      return @{ Ok = $false; Reason = "lark-cli status failed: $($stdout.Trim()) $($stderr.Trim())".Trim() }
-    }
-    $outputText = $stdout
-  } finally {
-    Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
+  $processFile = $larkCli
+  $processArgs = $statusArgs
+  if ($larkCli -match '\.(cmd|bat)$') {
+    $cmdLine = (ConvertTo-CmdArgument $larkCli) + " " + (($statusArgs | ForEach-Object { ConvertTo-CmdArgument $_ }) -join " ")
+    $processFile = "cmd.exe"
+    $processArgs = @("/d", "/s", "/c", $cmdLine)
   }
+  $result = Invoke-ProcessWithTimeout -FilePath $processFile -Arguments ([string[]]$processArgs) -TimeoutMs 15000
+  if ($result.TimedOut) {
+    return @{ Ok = $false; Reason = "lark-cli status timed out" }
+  }
+  $stdout = [string]$result.Stdout
+  $stderr = [string]$result.Stderr
+  if ($result.ExitCode -ne 0) {
+    return @{ Ok = $false; Reason = "lark-cli status failed: $($stdout.Trim()) $($stderr.Trim())".Trim() }
+  }
+  $outputText = $stdout
 
   try {
     $status = $outputText | ConvertFrom-Json
