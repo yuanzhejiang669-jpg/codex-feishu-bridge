@@ -1,5 +1,7 @@
 param(
-  [string]$Workspace = (Get-Location).Path,
+  [string]$Name = "",
+  [string]$LarkProfile = "",
+  [string]$Workspace = "",
   [string]$Sandbox = "danger-full-access",
   [ValidateSet("app-server", "auto", "exec")]
   [string]$RunMode = "app-server",
@@ -22,14 +24,36 @@ param(
 $ErrorActionPreference = "Stop"
 
 $script = Join-Path $PSScriptRoot "codex-feishu-bridge.mjs"
-$dataRoot = Join-Path $env:LOCALAPPDATA "CodexFeishuBridge"
+function Get-SafeInstanceName([string]$RawName) {
+  $safe = ($RawName.Trim() -replace '[^A-Za-z0-9_.-]', '-').Trim('-')
+  if (-not $safe) {
+    throw "Instance name contains no usable characters: $RawName"
+  }
+  return $safe
+}
+
+$baseDataRoot = Join-Path $env:LOCALAPPDATA "CodexFeishuBridge"
+if ($Name.Trim()) {
+  $safeName = Get-SafeInstanceName $Name
+  $dataRoot = Join-Path (Join-Path $baseDataRoot "instances") $safeName
+  if (-not $Workspace.Trim()) {
+    $Workspace = Join-Path (Join-Path $env:USERPROFILE "Documents\Codex\workspaces") ("feishu-bridge-" + $safeName)
+  }
+} else {
+  $safeName = ""
+  $dataRoot = $baseDataRoot
+  if (-not $Workspace.Trim()) {
+    $Workspace = (Get-Location).Path
+  }
+}
+
 $stateDir = Join-Path $dataRoot "state"
 $logDir = Join-Path $dataRoot "logs"
 $pidFile = Join-Path $stateDir "bridge.pid"
 $stdoutLog = Join-Path $logDir "bridge.stdout.log"
 $stderrLog = Join-Path $logDir "bridge.stderr.log"
 
-New-Item -ItemType Directory -Force -Path $stateDir, $logDir | Out-Null
+New-Item -ItemType Directory -Force -Path $stateDir, $logDir, $Workspace | Out-Null
 
 function Resolve-CodexCliBin {
   if ($env:CODEX_CLI_BIN) {
@@ -44,16 +68,9 @@ function Resolve-CodexCliBin {
     return $pathCandidate.Source
   }
 
-  $windowsAppsRoot = Join-Path $env:ProgramFiles "WindowsApps"
-  if (Test-Path -LiteralPath $windowsAppsRoot) {
-    $desktopCandidate = Get-ChildItem -LiteralPath $windowsAppsRoot -Directory -Filter "OpenAI.Codex_*" -ErrorAction SilentlyContinue |
-      Sort-Object LastWriteTime -Descending |
-      ForEach-Object { Join-Path $_.FullName "app\resources\codex.exe" } |
-      Where-Object { Test-Path -LiteralPath $_ } |
-      Select-Object -First 1
-    if ($desktopCandidate) {
-      return (Resolve-Path -LiteralPath $desktopCandidate).Path
-    }
+  $cmdCandidate = Get-Command "codex.cmd" -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($cmdCandidate) {
+    return $cmdCandidate.Source
   }
 
   return $null
@@ -73,6 +90,12 @@ if (Test-Path $pidFile) {
 }
 
 $env:CODEX_FEISHU_WORKSPACE = (Resolve-Path -LiteralPath $Workspace).Path
+$env:CODEX_FEISHU_INSTANCE_NAME = if ($safeName) { $safeName } else { "default" }
+if ($LarkProfile.Trim()) {
+  $env:CODEX_FEISHU_LARK_PROFILE = $LarkProfile.Trim()
+} else {
+  Remove-Item Env:CODEX_FEISHU_LARK_PROFILE -ErrorAction SilentlyContinue
+}
 $env:CODEX_FEISHU_SANDBOX = $Sandbox
 $env:CODEX_FEISHU_RUN_MODE = $RunMode
 if ($Reasoning.Trim()) {
@@ -119,6 +142,8 @@ if (Test-Path $pidFile) {
 }
 
 Write-Host "Codex Feishu Bridge started. PID: $bridgePid"
+Write-Host "Instance: $($env:CODEX_FEISHU_INSTANCE_NAME)"
+Write-Host "Lark profile: $(if ($env:CODEX_FEISHU_LARK_PROFILE) { $env:CODEX_FEISHU_LARK_PROFILE } else { 'default/current' })"
 Write-Host "Workspace: $($env:CODEX_FEISHU_WORKSPACE)"
 Write-Host "Codex CLI: $($env:CODEX_CLI_BIN)"
 Write-Host "Run mode: $($env:CODEX_FEISHU_RUN_MODE)"

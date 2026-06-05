@@ -1,71 +1,66 @@
 # Feishu Bot Setup
 
-Use one Feishu custom app/bot per Windows device.
+推荐每台 Windows 设备使用一个独立飞书自建应用/机器人，例如：
 
-Example naming:
+- 第一台：`codex-assistant-1`
+- 第二台：`codex-assistant-2`
 
-- First device: `Codex 助手`
-- Second device: `Codex 助手一`
+不要让两台设备同时消费同一个 app/bot 的事件，否则回复可能重复、竞争或丢失。
 
-Both can be created under the same Feishu user account. The important part is that each device should use its own app profile in `lark-cli`.
+## 推荐：自动注册
 
-## Feishu Developer Console Checklist
-
-In Feishu Open Platform:
-
-1. Create a self-built app.
-2. Set app/bot name, for example `Codex 助手一`.
-3. Enable the bot capability.
-4. Install or publish the app to your tenant/workplace as required by Feishu.
-5. Add the bot to the target chat.
-6. Subscribe to event:
-   - `im.message.receive_v1`
-7. Grant/approve message permissions needed by the bridge:
-   - Receive messages.
-   - Read message details.
-   - Send messages as bot.
-   - Reply to messages as bot.
-   - Download message resources/images if you want image support.
-   - Create/update interactive cards if you want dynamic progress cards.
-
-Exact permission names may vary in the Feishu console and CLI versions. Use `lark-cli doctor`, `lark-cli auth scopes`, and the error message from the bridge to identify missing scopes.
-
-## Configure The App Locally
-
-After the app exists, configure `lark-cli` on the Windows device:
+优先使用仓库里的注册脚本：
 
 ```powershell
-lark-cli config init --brand feishu --name codex-helper-1
-lark-cli profile use codex-helper-1
-lark-cli doctor
+.\register-codex-feishu-bot.ps1 -Name codex-assistant-1 -InstallStartup
 ```
 
-To configure non-interactively:
+它会打开二维码页面，扫码后自动创建 lark-cli profile，并启动桥接器。
+
+## 手动配置清单
+
+如果你在飞书开放平台手动创建应用，需要确认：
+
+1. 已启用机器人能力。
+2. 应用已安装/发布到目标租户。
+3. 机器人已加入目标聊天。
+4. 已订阅事件：`im.message.receive_v1`。
+5. 已授予并发布必要权限：
+   - 接收消息。
+   - 读取消息详情。
+   - 以机器人身份发送消息。
+   - 回复消息。
+   - 下载消息资源/图片。
+   - 创建或更新交互卡片。
+
+权限名称会随飞书控制台变化；缺权限时优先看桥接器日志和 lark-cli 报错。
+
+## 手动写入 lark-cli profile
 
 ```powershell
-$secret = Read-Host "Feishu App Secret" -AsSecureString
-$plain = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
-  [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secret)
-)
-$plain | lark-cli config init --brand feishu --name codex-helper-1 --app-id "YOUR_FEISHU_APP_ID" --app-secret-stdin
+$profile = "codex-assistant-1"
+$appId = "cli_xxxxxxxxxxxxx"
+$appSecret = Read-Host "Feishu App Secret"
+
+$appSecret | lark-cli profile add `
+  --name $profile `
+  --app-id $appId `
+  --brand feishu `
+  --app-secret-stdin
+
+lark-cli profile list
 ```
 
-Do not commit the local `lark-cli` config. It usually lives under:
+不要提交本机 lark-cli 配置。它通常在：
 
 ```text
-C:\Users\<you>\.lark-cli\config.json
+%USERPROFILE%\.lark-cli\config.json
 ```
 
-## Test The Bot
+## 事件测试
 
 ```powershell
 lark-cli event consume im.message.receive_v1 --as bot --timeout 60s
 ```
 
-Send a message to the bot in Feishu. If the event appears, the bot event path works.
-
-Then start the bridge:
-
-```powershell
-.\start-codex-feishu-bridge.ps1 -Workspace "$PWD\workspace"
-```
+向机器人发消息。如果终端出现 JSON 事件，说明飞书事件路径正常。

@@ -1,5 +1,7 @@
 param(
-  [string]$Workspace = (Join-Path $PSScriptRoot "workspace"),
+  [string]$Name = "",
+  [string]$LarkProfile = "",
+  [string]$Workspace = "",
   [string]$StartScript = (Join-Path $PSScriptRoot "start-codex-feishu-bridge.ps1"),
   [string]$StopScript = (Join-Path $PSScriptRoot "stop-codex-feishu-bridge.ps1"),
   [string]$Sandbox = "danger-full-access",
@@ -13,7 +15,28 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$dataRoot = Join-Path $env:LOCALAPPDATA "CodexFeishuBridge"
+function Get-SafeInstanceName([string]$RawName) {
+  $safe = ($RawName.Trim() -replace '[^A-Za-z0-9_.-]', '-').Trim('-')
+  if (-not $safe) {
+    throw "Instance name contains no usable characters: $RawName"
+  }
+  return $safe
+}
+
+$baseDataRoot = Join-Path $env:LOCALAPPDATA "CodexFeishuBridge"
+if ($Name.Trim()) {
+  $safeName = Get-SafeInstanceName $Name
+  $dataRoot = Join-Path (Join-Path $baseDataRoot "instances") $safeName
+  if (-not $Workspace.Trim()) {
+    $Workspace = Join-Path (Join-Path $env:USERPROFILE "Documents\Codex\workspaces") ("feishu-bridge-" + $safeName)
+  }
+} else {
+  $safeName = ""
+  $dataRoot = $baseDataRoot
+  if (-not $Workspace.Trim()) {
+    $Workspace = Join-Path (Join-Path $env:USERPROFILE "Documents\Codex\workspaces") "feishu-bridge"
+  }
+}
 $stateDir = Join-Path $dataRoot "state"
 $logDir = Join-Path $dataRoot "logs"
 $pidFile = Join-Path $stateDir "bridge.pid"
@@ -64,7 +87,17 @@ function Test-LarkConsumer {
     return @{ Ok = $false; Reason = "lark-cli not found" }
   }
 
-  $output = & $larkCli event status --json 2>&1
+  $statusArgs = @()
+  if ($LarkProfile.Trim()) {
+    $statusArgs += @("--profile", $LarkProfile.Trim())
+  }
+  $statusArgs += @("event", "status")
+  if ($LarkProfile.Trim()) {
+    $statusArgs += "--current"
+  }
+  $statusArgs += "--json"
+
+  $output = & $larkCli @statusArgs 2>&1
   if ($LASTEXITCODE -ne 0) {
     return @{ Ok = $false; Reason = "lark-cli status failed: $($output -join ' ')" }
   }
@@ -109,7 +142,15 @@ function Restart-Bridge {
   Set-Content -LiteralPath $lastRestartFile -Value (Get-Date).ToString("o") -Encoding UTF8
 
   try {
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $StopScript | ForEach-Object {
+    $stopArgs = @(
+      "-NoProfile",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File",
+      $StopScript
+    )
+    if ($safeName) { $stopArgs += @("-Name", $safeName) }
+    & powershell.exe @stopArgs | ForEach-Object {
       Write-WatchdogLog "stop: $_"
     }
   } catch {
@@ -125,8 +166,6 @@ function Restart-Bridge {
       "Bypass",
       "-File",
       $StartScript,
-      "-Workspace",
-      $Workspace,
       "-Sandbox",
       $Sandbox,
       "-RunMode",
@@ -136,6 +175,9 @@ function Restart-Bridge {
       "-CodexTimeoutSeconds",
       $CodexTimeoutSeconds
     )
+    if ($safeName) { $startArgs += @("-Name", $safeName) }
+    if ($LarkProfile.Trim()) { $startArgs += @("-LarkProfile", $LarkProfile.Trim()) }
+    if ($Workspace.Trim()) { $startArgs += @("-Workspace", $Workspace) }
     if ($DisableMcp) { $startArgs += "-DisableMcp" }
     & powershell.exe @startArgs | ForEach-Object {
       Write-WatchdogLog "start: $_"

@@ -3,11 +3,19 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Private Windows bridge that connects a Feishu bot to local Codex.",
+  "description": "Windows bridge that connects a Feishu bot to local Codex.",
   "scripts": {
-    "check": "node --check codex-feishu-bridge.mjs"
+    "check": "node --check codex-feishu-bridge.mjs && node --check register-codex-feishu-bot.mjs",
+    "register": "node register-codex-feishu-bot.mjs"
   },
   "engines": {
     "node": ">=20"
+  },
+  "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.66.1",
+    "qrcode": "^1.5.4"
+  },
+  "overrides": {
+    "axios": "^1.17.0"
   }
 }

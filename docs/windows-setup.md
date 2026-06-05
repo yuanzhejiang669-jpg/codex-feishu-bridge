@@ -1,153 +1,84 @@
 # Windows Setup
 
-This guide is for setting up the bridge on another Windows device, using the same Feishu account but a different bot name such as `Codex 助手一`.
+本页是 README 的拆分版部署清单。完整安装说明和“发给旧设备 Codex 的提示词”以仓库根目录 `README.md` 为准。
 
-## 1. Install Prerequisites
-
-Install these on the second Windows device:
-
-- Git for Windows.
-- Node.js 20 or newer.
-- Codex CLI or Codex Desktop.
-- Feishu desktop app.
-- Feishu/Lark CLI.
-
-Install Feishu/Lark CLI:
+## 1. 安装依赖
 
 ```powershell
+node -v
+npm -v
+git --version
+codex --version
 npm install -g @larksuite/cli
 lark-cli --version
 ```
 
-Check Codex:
+如果 `codex --version` 不可用，先定位 `codex.exe` 或 `codex.cmd`，再设置：
 
 ```powershell
-codex --version
-codex exec --help
+$env:CODEX_CLI_BIN = "C:\Path\To\codex.exe"
 ```
 
-If Codex cannot read `C:\Users\<you>\.codex\config.toml`, fix that first. For current Codex CLI versions, `service_tier` should be `fast` or `flex`, not `priority`.
-
-## 2. Clone The Private Repository
+## 2. 克隆仓库
 
 ```powershell
-git clone https://github.com/<your-account>/codex-feishu-bridge.git
-cd codex-feishu-bridge
+New-Item -ItemType Directory -Force "$env:USERPROFILE\Documents\Codex\tools" | Out-Null
+git clone <REPO_URL> "$env:USERPROFILE\Documents\Codex\tools\codex-feishu-bridge"
+Set-Location "$env:USERPROFILE\Documents\Codex\tools\codex-feishu-bridge"
+npm install
+npm run check
 ```
 
-Create a workspace for Feishu-triggered Codex runs:
+## 3. 推荐注册方式
 
 ```powershell
-New-Item -ItemType Directory -Force -Path .\workspace | Out-Null
+.\register-codex-feishu-bot.ps1 `
+  -Name codex-assistant-1 `
+  -DisplayName "Codex Assistant 1" `
+  -Workspace "$env:USERPROFILE\Documents\Codex\workspaces\feishu-bridge-codex-assistant-1" `
+  -RunMode app-server `
+  -Reasoning xhigh `
+  -CodexTimeoutSeconds 7200 `
+  -InstallStartup
 ```
 
-## 3. Create Or Configure The Feishu Bot
-
-Recommended setup for a second device:
-
-- Use the same Feishu user account.
-- Create a separate Feishu custom app/bot for this device.
-- Name it `Codex 助手一`.
-- Keep the first machine's bot as `Codex 助手`.
-
-Why use a separate bot: if two machines consume events from the same app/bot, replies can duplicate, compete, or route unpredictably. One bot/app per device is simpler and safer.
-
-See [feishu-bot.md](feishu-bot.md) for the app-console checklist.
-
-## 4. Configure lark-cli
-
-Interactive setup:
-
-```powershell
-lark-cli config init --brand feishu --name codex-helper-1
-lark-cli profile use codex-helper-1
-lark-cli doctor
-```
-
-If you already have the App ID and App Secret:
-
-```powershell
-$secret = Read-Host "Feishu App Secret" -AsSecureString
-$plain = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
-  [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secret)
-)
-$plain | lark-cli config init --brand feishu --name codex-helper-1 --app-id "YOUR_FEISHU_APP_ID" --app-secret-stdin
-lark-cli profile use codex-helper-1
-lark-cli doctor
-```
-
-Optional user authorization, useful if you later let Codex call Feishu APIs as the user:
-
-```powershell
-lark-cli auth login --domain im,event,drive,docs
-lark-cli auth list
-```
-
-The bridge itself sends replies as `bot`.
-
-## 5. Test Event Consumption
-
-Run this in a terminal:
-
-```powershell
-lark-cli event consume im.message.receive_v1 --as bot --timeout 60s
-```
-
-Send a message to the bot in Feishu. You should see a JSON event in the terminal. Stop the command after the test.
-
-If no event arrives, check:
-
-- The bot is enabled and installed.
-- The bot is added to the chat.
-- The app has subscribed to `im.message.receive_v1`.
-- App permissions are approved/published in the Feishu developer console.
-
-## 6. Start The Bridge
-
-```powershell
-.\start-codex-feishu-bridge.ps1 -Workspace "$PWD\workspace"
-```
-
-Foreground debugging:
-
-```powershell
-.\start-codex-feishu-bridge.ps1 -Workspace "$PWD\workspace" -Foreground
-```
-
-Stop:
-
-```powershell
-.\stop-codex-feishu-bridge.ps1
-```
-
-Status:
-
-```powershell
-lark-cli event status --json
-Get-Content "$env:LOCALAPPDATA\CodexFeishuBridge\state\bridge.pid"
-Get-Content "$env:LOCALAPPDATA\CodexFeishuBridge\logs\codex-feishu-bridge.log" -Tail 80
-```
-
-## 7. Optional Autostart
-
-Install a watchdog scheduled task:
-
-```powershell
-.\install-codex-feishu-watchdog.ps1 -Workspace "$PWD\workspace"
-```
-
-If Task Scheduler refuses due to permissions, use the hidden VBS launcher manually or place a shortcut to `watch-codex-feishu-bridge-hidden.vbs` in:
+扫码完成后，在飞书发送：
 
 ```text
-%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup
+/status
 ```
 
-## 8. Verify End To End
+再发送普通消息验证。普通任务不要以 `/` 开头。
 
-In Feishu, send:
+## 4. 手动启动
 
-```text
-你好
+```powershell
+.\start-codex-feishu-bridge.ps1 `
+  -Name codex-assistant-1 `
+  -LarkProfile codex-assistant-1 `
+  -Workspace "$env:USERPROFILE\Documents\Codex\workspaces\feishu-bridge-codex-assistant-1" `
+  -RunMode app-server `
+  -Reasoning xhigh `
+  -CodexTimeoutSeconds 7200
 ```
 
-Do not send `/你好`; that is interpreted as a slash command. Use `/help` only when you want bridge commands.
+停止：
+
+```powershell
+.\stop-codex-feishu-bridge.ps1 -Name codex-assistant-1
+```
+
+## 5. 看门狗
+
+```powershell
+.\install-codex-feishu-watchdog.ps1 `
+  -Name codex-assistant-1 `
+  -LarkProfile codex-assistant-1 `
+  -Workspace "$env:USERPROFILE\Documents\Codex\workspaces\feishu-bridge-codex-assistant-1"
+```
+
+卸载：
+
+```powershell
+.\install-codex-feishu-watchdog.ps1 -Name codex-assistant-1 -Uninstall
+```

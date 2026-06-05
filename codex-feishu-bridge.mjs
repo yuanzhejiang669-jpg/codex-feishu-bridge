@@ -10,11 +10,13 @@ import { fileURLToPath } from "node:url";
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_TOOLS = resolveDefaultTools();
 const DEFAULT_DATA_ROOT = resolveDefaultDataRoot();
+const LARK_PROFILE = String(process.env.CODEX_FEISHU_LARK_PROFILE || process.env.LARK_CLI_PROFILE || "").trim();
 
 const CONFIG = {
   workspace: process.env.CODEX_FEISHU_WORKSPACE || process.cwd(),
   eventKey: process.env.CODEX_FEISHU_EVENT_KEY || "im.message.receive_v1",
-  larkCli: parseToolEnv("LARK_CLI_BIN", DEFAULT_TOOLS.larkCli),
+  larkProfile: LARK_PROFILE,
+  larkCli: withLarkProfile(parseToolEnv("LARK_CLI_BIN", DEFAULT_TOOLS.larkCli), LARK_PROFILE),
   codexCli: parseToolEnv("CODEX_CLI_BIN", DEFAULT_TOOLS.codexCli),
   runMode: normalizeRunMode(process.env.CODEX_FEISHU_RUN_MODE || "app-server"),
   codexSandbox: process.env.CODEX_FEISHU_SANDBOX || "danger-full-access",
@@ -24,6 +26,7 @@ const CONFIG = {
   disableMcp: (process.env.CODEX_FEISHU_DISABLE_MCP || "0") !== "0",
   maxConcurrent: Number(process.env.CODEX_FEISHU_MAX_CONCURRENT || "1"),
   maxReplyChars: Number(process.env.CODEX_FEISHU_MAX_REPLY_CHARS || "6000"),
+  listLimit: Number(process.env.CODEX_FEISHU_LIST_LIMIT || "30"),
   useCards: (process.env.CODEX_FEISHU_CARD_MODE || "1") !== "0",
   cardThrottleMs: Number(process.env.CODEX_FEISHU_CARD_THROTTLE_MS || "400"),
   debugCards: (process.env.CODEX_FEISHU_CARD_DEBUG || "0") === "1",
@@ -38,6 +41,8 @@ const CONFIG = {
   ),
   attachmentPendingTtlMs: Number(process.env.CODEX_FEISHU_ATTACHMENT_PENDING_TTL_MS || `${30 * 60_000}`),
   maxPendingAttachments: Number(process.env.CODEX_FEISHU_MAX_PENDING_ATTACHMENTS || "12"),
+  maxFileAttachmentBytes: Number(process.env.CODEX_FEISHU_MAX_FILE_ATTACHMENT_BYTES || `${50 * 1024 * 1024}`),
+  deleteConfirmTtlMs: Number(process.env.CODEX_FEISHU_DELETE_CONFIRM_TTL_MS || `${5 * 60_000}`),
   syncSidebar: (process.env.CODEX_FEISHU_SYNC_SIDEBAR || "0") !== "0",
   syncSessionsFromCodex: (process.env.CODEX_FEISHU_SYNC_SESSIONS_FROM_CODEX || "1") !== "0",
   keepEmptySessionMs: Number(process.env.CODEX_FEISHU_KEEP_EMPTY_SESSION_MS || `${10 * 60_000}`),
@@ -71,6 +76,7 @@ const shutdownCallbacks = new Set();
 const activeChildren = new Map();
 const activeCodexJobs = new Map();
 const pendingAttachmentsByChat = new Map();
+const pendingDeleteConfirmations = new Map();
 const stoppedJobs = new Set();
 let shuttingDown = false;
 let activeJobs = 0;
@@ -129,6 +135,12 @@ function parseToolEnv(envName, fallback) {
   const value = process.env[envName];
   if (!value) return fallback;
   return { command: value, argsPrefix: [] };
+}
+
+function withLarkProfile(tool, profile) {
+  const name = String(profile || "").trim();
+  if (!name) return tool;
+  return { ...tool, argsPrefix: [...(tool.argsPrefix || []), "--profile", name] };
 }
 
 function normalizeRunMode(value) {
@@ -439,12 +451,54 @@ function listChatSessions(chatId) {
   return chatState.sessions;
 }
 
-async function loadVisibleCodexThreadIds() {
+function boundedListLimit(value = CONFIG.listLimit) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return 30;
+  return Math.max(1, Math.min(200, Math.floor(number)));
+}
+
+function codexThreadLink(threadId) {
+  const id = String(threadId || "").trim();
+  return id ? `codex://threads/${id}` : "未创建 thread";
+}
+
+function cleanCodexThreadTitle(value) {
+  let text = String(value || "").replace(/\r\n/g, "\n").trim();
+  if (!text) return "";
+  text = text.split(/\n---\n来源：飞书消息/)[0];
+  text = text.split(/\n---\n来源: 飞书消息/)[0];
+  text = text.replace(/^飞书：[0-9a-f]{8}\s*·\s*/i, "");
+  return shorten(text, 80);
+}
+
+function codexThreadTime(row, field) {
+  const ms = Number(row?.[`${field}_at_ms`]);
+  if (Number.isFinite(ms) && ms > 0) return ms;
+  const seconds = Number(row?.[`${field}_at`]);
+  if (Number.isFinite(seconds) && seconds > 0) return seconds * 1000;
+  return 0;
+}
+
+async function loadVisibleCodexThreads(limit = CONFIG.listLimit) {
   if (!CONFIG.syncSessionsFromCodex || !fs.existsSync(codexStateDbPath)) return null;
-  const rows = await sqliteJson(
+  const safeLimit = boundedListLimit(limit);
+  return await sqliteJson(
     codexStateDbPath,
-    "select id from threads where coalesce(archived, 0) = 0;",
+    [
+      "select id, title, first_user_message, preview, rollout_path,",
+      "created_at, updated_at, created_at_ms, updated_at_ms,",
+      "tokens_used, source, model_provider, thread_source",
+      "from threads",
+      "where coalesce(archived, 0) = 0",
+      "order by coalesce(updated_at_ms, updated_at * 1000, created_at_ms, created_at * 1000, 0) desc",
+      `limit ${safeLimit};`,
+    ].join(" "),
   );
+}
+
+async function loadVisibleCodexThreadIds() {
+  const rows = await loadVisibleCodexThreads(200);
+  if (!rows) return null;
   return new Set(rows.map((row) => String(row.id || "").trim()).filter(Boolean));
 }
 
@@ -493,28 +547,172 @@ async function syncChatSessionsWithCodex(chatId, options = {}) {
   return chatState.sessions;
 }
 
-async function listChatSessionsSynced(chatId) {
-  await syncChatSessionsWithCodex(chatId);
-  const chatState = sessions.chats[chatId];
-  if (!chatState || !Array.isArray(chatState.sessions)) return [];
-  chatState.sessions = dedupeSessions(chatState.sessions.map(normalizeSessionData)).slice(0, 20);
-  saveSessions();
-  return chatState.sessions;
+function titleFromCodexThread(row) {
+  return cleanCodexThreadTitle(row?.title)
+    || cleanCodexThreadTitle(row?.first_user_message)
+    || cleanCodexThreadTitle(row?.preview)
+    || "未命名会话";
 }
 
-function switchSession(chatId, target) {
+function sessionEntryFromCodexThread(row) {
+  const threadId = String(row?.id || "").trim();
+  const createdAt = codexThreadTime(row, "created") || Date.now();
+  const updatedAt = codexThreadTime(row, "updated") || createdAt;
+  return {
+    ...normalizeSessionData({
+      id: threadId.slice(0, 8),
+      title: titleFromCodexThread(row),
+      createdAt,
+      updatedAt,
+      messages: [],
+      codexThreadId: threadId,
+    }),
+    _codexOnly: true,
+    _sourceChatId: "",
+    _rank: 3,
+    _isCurrent: false,
+  };
+}
+
+function bridgeSessionEntries(chatId, visibleThreadIds = null) {
+  const entries = [];
+  const chatIds = Object.keys(sessions.chats || {}).sort((a, b) => {
+    if (a === chatId && b !== chatId) return -1;
+    if (b === chatId && a !== chatId) return 1;
+    return a.localeCompare(b);
+  });
+
+  if (!chatIds.includes(chatId)) chatIds.unshift(chatId);
+
+  for (const sourceChatId of chatIds) {
+    const chatState = sourceChatId === chatId ? getChatState(chatId) : sessions.chats[sourceChatId];
+    if (!chatState || !Array.isArray(chatState.sessions)) continue;
+
+    const normalized = dedupeSessions(chatState.sessions.map(normalizeSessionData)).slice(0, 20);
+    if (sourceChatId === chatId) chatState.sessions = normalized;
+
+    for (const session of normalized) {
+      const threadId = String(session.codexThreadId || "").trim();
+      if (threadId && visibleThreadIds && !visibleThreadIds.has(threadId)) continue;
+      if (!threadId && !(sourceChatId === chatId && shouldKeepEmptyCurrentSession(session, chatState))) continue;
+
+      const isCurrent = sourceChatId === chatId && session.id === chatState.currentSessionId;
+      entries.push({
+        ...session,
+        _codexOnly: false,
+        _sourceChatId: sourceChatId,
+        _rank: sourceChatId === chatId ? (isCurrent ? 0 : 1) : 2,
+        _isCurrent: isCurrent,
+      });
+    }
+  }
+
+  return entries;
+}
+
+async function mergedSessionEntries(chatId) {
+  const codexThreads = await loadVisibleCodexThreads();
+  const visibleThreadIds = codexThreads
+    ? new Set(codexThreads.map((row) => String(row.id || "").trim()).filter(Boolean))
+    : null;
+  const entries = bridgeSessionEntries(chatId, visibleThreadIds);
+  const seenThreads = new Set(entries.map((session) => String(session.codexThreadId || "").trim()).filter(Boolean));
+  const seenSessionKeys = new Set(entries.map((session) => `${session._sourceChatId}:${session.id}`));
+
+  if (Array.isArray(codexThreads)) {
+    for (const row of codexThreads) {
+      const threadId = String(row?.id || "").trim();
+      if (!threadId || seenThreads.has(threadId)) continue;
+      const entry = sessionEntryFromCodexThread(row);
+      const key = `${entry._sourceChatId}:${entry.id}`;
+      if (seenSessionKeys.has(key)) continue;
+      seenThreads.add(threadId);
+      seenSessionKeys.add(key);
+      entries.push(entry);
+    }
+  }
+
+  return entries
+    .sort((a, b) => (a._rank - b._rank) || Number(b.updatedAt || 0) - Number(a.updatedAt || 0))
+    .slice(0, boundedListLimit());
+}
+
+async function listChatSessionsSynced(chatId) {
+  await syncChatSessionsWithCodex(chatId);
   const chatState = getChatState(chatId);
-  const sessionsList = listChatSessions(chatId);
+  chatState.sessions = dedupeSessions(chatState.sessions.map(normalizeSessionData)).slice(0, 20);
+  saveSessions();
+  return await mergedSessionEntries(chatId);
+}
+
+async function findSessionEntry(chatId, target) {
+  const sessionsList = await listChatSessionsSynced(chatId);
   const raw = String(target || "").trim();
   const index = Number(raw);
-  const match = Number.isInteger(index) && index >= 1 && index <= sessionsList.length
-    ? sessionsList[index - 1]
-    : sessionsList.find((item) => item.id === raw || item.id.startsWith(raw));
-  if (!match) return null;
+  const matchIndex = Number.isInteger(index) && index >= 1 && index <= sessionsList.length
+    ? index - 1
+    : sessionsList.findIndex((item) => (
+        item.id === raw
+        || item.id.startsWith(raw)
+        || item.codexThreadId === raw
+        || item.codexThreadId?.startsWith(raw)
+        || codexThreadLink(item.codexThreadId) === raw
+      ));
+  if (matchIndex < 0) return null;
+  return {
+    entry: sessionsList[matchIndex],
+    index: matchIndex + 1,
+    list: sessionsList,
+  };
+}
+
+function uniqueSessionId(chatState, preferred = "") {
+  const existing = new Set((chatState.sessions || []).map((session) => session.id));
+  const normalized = String(preferred || "").replace(/[^a-f0-9]/gi, "").slice(0, 8).toLowerCase();
+  if (normalized.length === 8 && !existing.has(normalized)) return normalized;
+  for (;;) {
+    const id = crypto.randomBytes(4).toString("hex");
+    if (!existing.has(id)) return id;
+  }
+}
+
+function materializeSessionForChat(chatId, entry) {
+  const chatState = getChatState(chatId);
+  let match = null;
+  if (entry?._sourceChatId === chatId && entry.id) {
+    match = chatState.sessions.find((session) => session.id === entry.id);
+  }
+  if (!match && entry?.codexThreadId) {
+    match = chatState.sessions.find((session) => session.codexThreadId === entry.codexThreadId);
+  }
+  if (!match) {
+    match = normalizeSessionData({
+      id: uniqueSessionId(chatState, entry?.id || String(entry?.codexThreadId || "").slice(0, 8)),
+      title: entry?.title || "未命名会话",
+      createdAt: Number(entry?.createdAt) || Date.now(),
+      updatedAt: Date.now(),
+      messages: [],
+      codexThreadId: entry?.codexThreadId || "",
+      lastTokenUsage: entry?.lastTokenUsage || null,
+      lastContextUsage: entry?.lastContextUsage || null,
+      lastContextPeakUsage: entry?.lastContextPeakUsage || null,
+      lastCompactedAt: entry?.lastCompactedAt || null,
+      lastThreadStatus: entry?.lastThreadStatus || "",
+    });
+    chatState.sessions.unshift(match);
+  }
+
   chatState.currentSessionId = match.id;
   match.updatedAt = Date.now();
+  chatState.sessions = dedupeSessions(chatState.sessions).slice(0, 20);
   saveSessions();
   return match;
+}
+
+async function switchSession(chatId, target) {
+  const match = await findSessionEntry(chatId, target);
+  if (!match) return null;
+  return materializeSessionForChat(chatId, match.entry);
 }
 
 function createSessionData(title) {
@@ -1719,7 +1917,6 @@ function renderDoneMeta(state) {
   const peak = renderContextUsage(state.meta.contextPeakUsage, "曾达");
   if (peak && isContextUsageHigher(state.meta.contextPeakUsage, state.meta.contextUsage)) parts.push(peak);
   parts.push(state.meta.compactedAt ? `上次压缩 ${formatTime(state.meta.compactedAt)}` : "未压缩");
-  if (state.meta.totalTokens) parts.push(`累计处理 ${formatNumber(state.meta.totalTokens)} tokens`);
   return parts.length ? parts.join(" · ") : "已完成";
 }
 
@@ -1866,26 +2063,85 @@ function imageKeysFromContent(content) {
   return [...keys];
 }
 
+function decodeXmlAttribute(value) {
+  return String(value || "")
+    .replace(/&quot;/g, "\"")
+    .replace(/&apos;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
+}
+
+function xmlAttribute(tag, name) {
+  const match = String(tag || "").match(new RegExp(`${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`, "i"));
+  return match ? decodeXmlAttribute(match[1] ?? match[2] ?? "") : "";
+}
+
+function addFileEntry(entries, seen, fileKey, fileName = "") {
+  const key = String(fileKey || "").trim();
+  if (!key || seen.has(key)) return;
+  seen.add(key);
+  entries.push({
+    fileKey: key,
+    fileName: String(fileName || "").trim() || key,
+  });
+}
+
+function fileEntriesFromContent(content) {
+  const entries = [];
+  const seen = new Set();
+  const visit = (value) => {
+    if (value == null) return;
+    if (typeof value === "string") {
+      const parsed = parseMessageContentJson(value);
+      if (parsed && parsed !== value) visit(parsed);
+      for (const match of value.matchAll(/<file\b[^>]*\/?>/gi)) {
+        const tag = match[0];
+        addFileEntry(entries, seen, xmlAttribute(tag, "key"), xmlAttribute(tag, "name"));
+      }
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item);
+      return;
+    }
+    if (typeof value !== "object") return;
+    const fileKey = value.file_key || value.fileKey;
+    const fileName = value.file_name || value.fileName || value.name;
+    addFileEntry(entries, seen, fileKey, fileName);
+    if (value.content) visit(value.content);
+    if (value.file) visit(value.file);
+    if (value.files) visit(value.files);
+  };
+  visit(content);
+  return entries;
+}
+
 function userTextFromContent(content) {
   const parsed = parseMessageContentJson(content);
   if (typeof parsed?.text === "string") return normalizeUserContent(parsed.text);
   if (parsed?.image_key && Object.keys(parsed).every((key) => key === "image_key")) return "";
+  if (fileEntriesFromContent(content).length && parsed && !parsed.text && !parsed.content) {
+    return "";
+  }
 
   let text = normalizeUserContent(content);
   text = text.replace(/^\s*\[Image:\s+img_[^\]]+\]\s*/gmi, "");
   text = text.replace(/^\s*\[File:\s+file_[^\]]+\]\s*/gmi, "");
+  text = text.replace(/<file\b[^>]*\/?>/gi, "");
   if (parsed?.image_key && !text.includes(parsed.image_key)) return text.trim();
   if (parsed?.image_key && text === JSON.stringify(parsed)) return "";
   return text.trim();
 }
 
-function relAttachmentPath(messageId, fileKey, index) {
+function relAttachmentPath(messageId, fileKey, index, fileName = "") {
   const date = new Date().toISOString().slice(0, 10);
+  const namePart = safeFilePart(fileName || fileKey) || safeFilePart(fileKey);
   return path.posix.join(
     CONFIG.attachmentRelDir.replace(/\\/g, "/"),
     date,
     safeFilePart(messageId),
-    `${String(index + 1).padStart(2, "0")}-${safeFilePart(fileKey)}`,
+    `${String(index + 1).padStart(2, "0")}-${namePart}`,
   );
 }
 
@@ -1944,6 +2200,110 @@ async function downloadImageAttachments(event) {
   return attachments;
 }
 
+async function downloadFileAttachments(event) {
+  const messageId = event.message_id || event.id;
+  const entries = fileEntriesFromContent(event.content);
+  if (!messageId || !entries.length) return [];
+
+  const attachments = [];
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index];
+    const relOutput = relAttachmentPath(messageId, entry.fileKey, index, entry.fileName);
+    const result = await runLark([
+      "im",
+      "+messages-resources-download",
+      "--as",
+      "bot",
+      "--message-id",
+      messageId,
+      "--file-key",
+      entry.fileKey,
+      "--type",
+      "file",
+      "--output",
+      relOutput,
+    ], { timeoutMs: 180_000, attempts: 2 });
+
+    if (result.code !== 0) {
+      log("WARN", "file download failed", {
+        messageId,
+        fileKey: entry.fileKey,
+        fileName: entry.fileName,
+        error: (result.stderr || result.stdout).slice(0, 1200),
+      });
+      continue;
+    }
+
+    const payload = parseJsonLoose(result.stdout);
+    const savedPath = payload?.data?.saved_path || path.join(CONFIG.workspace, relOutput);
+    let sizeBytes = Number(payload?.data?.size_bytes || 0);
+    if (!sizeBytes) {
+      try {
+        sizeBytes = fs.statSync(savedPath).size;
+      } catch {
+        sizeBytes = 0;
+      }
+    }
+    if (sizeBytes > CONFIG.maxFileAttachmentBytes) {
+      try {
+        fs.rmSync(savedPath, { force: true });
+      } catch {}
+      log("WARN", "file attachment skipped because it is too large", {
+        messageId,
+        fileKey: entry.fileKey,
+        fileName: entry.fileName,
+        sizeBytes,
+        maxBytes: CONFIG.maxFileAttachmentBytes,
+      });
+      continue;
+    }
+
+    attachments.push({
+      type: "file",
+      fileKey: entry.fileKey,
+      fileName: entry.fileName,
+      messageId,
+      path: savedPath,
+      sizeBytes,
+      receivedAt: Date.now(),
+    });
+  }
+
+  if (attachments.length) {
+    log("INFO", "file attachments downloaded", {
+      messageId,
+      count: attachments.length,
+      paths: attachments.map((item) => item.path),
+    });
+  }
+  return attachments;
+}
+
+function attachmentCounts(attachments) {
+  const counts = { image: 0, file: 0 };
+  for (const attachment of attachments || []) {
+    if (attachment?.type === "image") counts.image += 1;
+    else if (attachment?.type === "file") counts.file += 1;
+  }
+  return counts;
+}
+
+function formatAttachmentCounts(attachments) {
+  const counts = attachmentCounts(attachments);
+  const parts = [];
+  if (counts.image) parts.push(`${counts.image} 张图片`);
+  if (counts.file) parts.push(`${counts.file} 个文件`);
+  return parts.join("和") || "附件";
+}
+
+function formatBytes(bytes) {
+  const value = Number(bytes || 0);
+  if (!Number.isFinite(value) || value <= 0) return "";
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / 1024 / 1024).toFixed(1)} MB`;
+}
+
 function addPendingAttachments(chatId, attachments) {
   if (!chatId || !attachments.length) return;
   cleanupPendingAttachments(chatId);
@@ -1985,12 +2345,43 @@ function parseCommand(content) {
   };
 }
 
+function attachmentPromptBlock(attachments) {
+  const items = Array.isArray(attachments) ? attachments : [];
+  const imageLines = items
+    .filter((item) => item?.type === "image" && item.path)
+    .map((item, index) => `${index + 1}. ${item.path}`);
+  const fileLines = items
+    .filter((item) => item?.type === "file" && item.path)
+    .map((item, index) => {
+      const label = item.fileName || path.basename(item.path);
+      const size = formatBytes(item.sizeBytes);
+      return `${index + 1}. ${label}: ${item.path}${size ? ` (${size})` : ""}`;
+    });
+
+  return [
+    imageLines.length
+      ? [
+          "Local image attachments:",
+          ...imageLines,
+          "",
+          "Use the attached images directly. The image files above were already downloaded locally.",
+        ].join("\n")
+      : "Local image attachments: none",
+    "",
+    fileLines.length
+      ? [
+          "Local file attachments:",
+          ...fileLines,
+          "",
+          "The files above were already downloaded locally. Read these local paths with filesystem tools when needed.",
+        ].join("\n")
+      : "Local file attachments: none",
+  ].join("\n");
+}
+
 function buildPrompt(event, session) {
   const content = userTextFromContent(event.content);
   const attachments = Array.isArray(event.attachments) ? event.attachments : [];
-  const attachmentLines = attachments
-    .filter((item) => item?.type === "image" && item.path)
-    .map((item, index) => `${index + 1}. ${item.path}`);
   const history = session.messages
     .slice(-12)
     .map((msg) => `${msg.role === "user" ? "用户" : "助手"}：${msg.content}`)
@@ -2027,17 +2418,10 @@ function buildPrompt(event, session) {
     `- message_id: ${event.message_id || event.id || ""}`,
     `- message_type: ${event.message_type || ""}`,
     "",
-    attachmentLines.length
-      ? [
-          "Local image attachments:",
-          ...attachmentLines,
-          "",
-          "Use the attached images directly. The image files above were already downloaded locally.",
-        ].join("\n")
-      : "Local image attachments: none",
+    attachmentPromptBlock(attachments),
     "",
     "用户消息：",
-    content || "(image attachment only)",
+    content || (attachments.length ? "(attachment only)" : "(empty message)"),
   ].join("\n");
 }
 
@@ -2057,7 +2441,7 @@ function shorten(value, max = 120) {
 
 function feishuSidebarTitle(event, session) {
   const content = userTextFromContent(event.content);
-  const body = content || (event.attachments?.length ? "图片消息" : "飞书消息");
+  const body = content || (event.attachments?.length ? "附件消息" : "飞书消息");
   return shorten(`飞书：${session.id} · ${body}`, 120);
 }
 
@@ -2097,6 +2481,156 @@ async function sqliteExec(dbPath, sql) {
     { stdin: sql, timeoutMs: 10_000, attempts: 1 },
   );
   return result.code === 0;
+}
+
+async function sqliteExecChecked(dbPath, sql) {
+  if (!fs.existsSync(dbPath)) throw new Error(`SQLite database not found: ${dbPath}`);
+  const result = await runTool(
+    { command: "sqlite3", argsPrefix: [] },
+    [dbPath],
+    { stdin: sql, timeoutMs: 10_000, attempts: 1 },
+  );
+  if (result.code !== 0) {
+    throw new Error(`sqlite3 failed (${result.code}): ${result.stderr || result.stdout}`);
+  }
+  return result;
+}
+
+async function loadCodexThreadRecord(threadId) {
+  const rows = await sqliteJson(
+    codexStateDbPath,
+    [
+      "select id, title, rollout_path, cwd, model_provider, archived,",
+      "created_at, updated_at, created_at_ms, updated_at_ms",
+      "from threads",
+      `where id = ${shellQuote(threadId)}`,
+      "limit 1;",
+    ].join(" "),
+  );
+  return rows[0] || null;
+}
+
+async function codexTableSet() {
+  const rows = await sqliteJson(
+    codexStateDbPath,
+    "select name from sqlite_master where type = 'table';",
+  );
+  return new Set(rows.map((row) => String(row.name || "")).filter(Boolean));
+}
+
+async function sqliteTableColumns(tableName) {
+  const safeName = String(tableName || "").replace(/"/g, "\"\"");
+  const rows = await sqliteJson(codexStateDbPath, `PRAGMA table_info("${safeName}");`);
+  return new Set(rows.map((row) => String(row.name || "")).filter(Boolean));
+}
+
+async function deleteByThreadIdIfPossible(statements, tables, tableName) {
+  if (!tables.has(tableName)) return;
+  const columns = await sqliteTableColumns(tableName);
+  if (columns.has("thread_id")) {
+    statements.push(`DELETE FROM ${tableName} WHERE thread_id = ?1;`);
+  } else if (columns.has("id")) {
+    statements.push(`DELETE FROM ${tableName} WHERE id = ?1;`);
+  }
+}
+
+function stripWindowsLongPathPrefix(value) {
+  let text = String(value || "");
+  if (process.platform === "win32") {
+    text = text.replace(/^\\\\\?\\UNC\\/i, "\\\\");
+    text = text.replace(/^\\\\\?\\/i, "");
+  }
+  return text;
+}
+
+function resolveSafeCodexRolloutPath(rolloutPath, threadId) {
+  const raw = stripWindowsLongPathPrefix(rolloutPath);
+  if (!raw || !path.isAbsolute(raw)) throw new Error(`invalid rollout_path: ${rolloutPath || ""}`);
+
+  const sessionsRoot = fs.realpathSync.native(path.join(CONFIG.codexHome, "sessions"));
+  const resolved = fs.existsSync(raw) ? fs.realpathSync.native(raw) : path.resolve(raw);
+  const relative = path.relative(sessionsRoot, resolved);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new Error(`refusing to delete rollout outside Codex sessions: ${resolved}`);
+  }
+  if (!path.basename(resolved).includes(threadId)) {
+    throw new Error(`refusing to delete rollout without matching thread id: ${resolved}`);
+  }
+  return resolved;
+}
+
+async function deleteCodexLocalThread(threadId) {
+  const id = String(threadId || "").trim();
+  if (!id) throw new Error("thread id is required");
+  if (!fs.existsSync(codexStateDbPath)) throw new Error(`Codex state database not found: ${codexStateDbPath}`);
+
+  const record = await loadCodexThreadRecord(id);
+  if (!record) throw new Error(`Thread not found in local storage: ${id}`);
+
+  const tables = await codexTableSet();
+  if (!tables.has("threads")) throw new Error("Unsupported local storage schema: missing threads table");
+  const statements = [
+    "PRAGMA busy_timeout = 5000;",
+    "BEGIN IMMEDIATE;",
+  ];
+
+  if (tables.has("thread_dynamic_tools")) {
+    statements.push("DELETE FROM thread_dynamic_tools WHERE thread_id = ?1;");
+  }
+  await deleteByThreadIdIfPossible(statements, tables, "thread_goals");
+  await deleteByThreadIdIfPossible(statements, tables, "thread_goal");
+  if (tables.has("thread_spawn_edges")) {
+    statements.push("DELETE FROM thread_spawn_edges WHERE parent_thread_id = ?1 OR child_thread_id = ?1;");
+  }
+  await deleteByThreadIdIfPossible(statements, tables, "stage1_outputs");
+  if (tables.has("agent_job_items")) {
+    statements.push("UPDATE agent_job_items SET assigned_thread_id = NULL WHERE assigned_thread_id = ?1;");
+  }
+  if (tables.has("messages")) {
+    statements.push("DELETE FROM messages WHERE session_id = ?1;");
+  }
+  if (tables.has("sessions")) {
+    statements.push("DELETE FROM sessions WHERE id = ?1;");
+  }
+  if (tables.has("threads")) {
+    statements.push("DELETE FROM threads WHERE id = ?1;");
+  }
+  statements.push("COMMIT;");
+
+  await sqliteExecChecked(
+    codexStateDbPath,
+    statements.join("\n").replace(/\?1/g, shellQuote(id)),
+  );
+  const afterDelete = await loadCodexThreadRecord(id);
+  if (afterDelete) throw new Error(`Thread delete did not remove local row: ${id}`);
+
+  let rolloutDeleted = false;
+  let rolloutMissing = false;
+  let rolloutError = "";
+  let rolloutPath = "";
+  if (record.rollout_path) {
+    try {
+      rolloutPath = resolveSafeCodexRolloutPath(record.rollout_path, id);
+      if (fs.existsSync(rolloutPath)) {
+        fs.rmSync(rolloutPath, { force: true });
+        rolloutDeleted = true;
+      } else {
+        rolloutMissing = true;
+      }
+    } catch (error) {
+      rolloutError = String(error.message || error);
+      log("ERROR", "codex rollout delete failed after db delete", { threadId: id, rolloutPath: record.rollout_path, error: rolloutError });
+    }
+  }
+
+  return {
+    threadId: id,
+    title: record.title || "",
+    rolloutPath: rolloutPath || record.rollout_path || "",
+    rolloutDeleted,
+    rolloutMissing,
+    rolloutError,
+  };
 }
 
 async function findCodexThreadIdForPrompt(promptFile, stdoutRaw) {
@@ -2452,7 +2986,7 @@ function appServerTurnParams(threadId, event, userContent) {
       input.push({ type: "localImage", path: attachment.path });
     }
   }
-  if (!input.length) input.push({ type: "text", text: "(image attachment only)", text_elements: [] });
+  if (!input.length) input.push({ type: "text", text: "(attachment only)", text_elements: [] });
 
   const params = {
     threadId,
@@ -2468,14 +3002,19 @@ function appServerTurnParams(threadId, event, userContent) {
 
 function appServerUserText(event, userContent) {
   const text = String(userContent || userTextFromContent(event.content) || "").trim();
-  if (!text) return "";
+  const attachments = Array.isArray(event.attachments) ? event.attachments : [];
+  if (!text && !attachments.length) return "";
   const marker = [
     "",
     "---",
     "来源：飞书消息。请直接按用户意图完成任务，最终回复适合发回飞书；不要调用 lark-cli 或飞书 API 发送最终答案。",
     `message_id: ${event.message_id || event.id || ""}`,
   ].join("\n");
-  return `${text}${marker}`;
+  const parts = [];
+  if (text) parts.push(text);
+  if (attachments.length) parts.push(attachmentPromptBlock(attachments));
+  parts.push(marker.trimStart());
+  return parts.join("\n\n");
 }
 
 function resultTextFromState(state) {
@@ -3011,23 +3550,44 @@ async function handleEvent(rawEvent) {
     return;
   }
 
-  const downloadedAttachments = await downloadImageAttachments(event);
+  const downloadedAttachments = [
+    ...(await downloadImageAttachments(event)),
+    ...(await downloadFileAttachments(event)),
+  ];
 
   if (event.message_type === "image" && !userContent) {
-    if (!downloadedAttachments.length) {
+    const imageAttachments = downloadedAttachments.filter((item) => item?.type === "image");
+    if (!imageAttachments.length) {
       await sendText(chatId, "收到图片消息，但图片下载失败；我还拿不到图片本体。", "image-download-failed", messageId);
       return;
     }
     addPendingAttachments(chatId, downloadedAttachments);
-    const total = cleanupPendingAttachments(chatId).length;
-    await sendText(chatId, `已收到 ${total} 张图片，请继续发送文字消息来触发处理。`, "image-received", messageId);
+    const total = cleanupPendingAttachments(chatId);
+    await sendText(chatId, `已收到 ${formatAttachmentCounts(total)}，请继续发送文字消息来触发处理。`, "attachment-received", messageId);
+    return;
+  }
+
+  if (event.message_type === "file" && !userContent) {
+    const fileAttachments = downloadedAttachments.filter((item) => item?.type === "file");
+    if (!fileAttachments.length) {
+      await sendText(
+        chatId,
+        `收到文件消息，但文件下载失败或超过 ${formatBytes(CONFIG.maxFileAttachmentBytes)} 限制；我还拿不到文件本体。`,
+        "file-download-failed",
+        messageId,
+      );
+      return;
+    }
+    addPendingAttachments(chatId, downloadedAttachments);
+    const total = cleanupPendingAttachments(chatId);
+    await sendText(chatId, `已收到 ${formatAttachmentCounts(total)}，请继续发送文字消息来触发处理。`, "attachment-received", messageId);
     return;
   }
 
   if (downloadedAttachments.length && !userContent) {
     addPendingAttachments(chatId, downloadedAttachments);
-    const total = cleanupPendingAttachments(chatId).length;
-    await sendText(chatId, `已收到 ${total} 张图片，请继续发送文字消息来触发处理。`, "image-received", messageId);
+    const total = cleanupPendingAttachments(chatId);
+    await sendText(chatId, `已收到 ${formatAttachmentCounts(total)}，请继续发送文字消息来触发处理。`, "attachment-received", messageId);
     return;
   }
 
@@ -3090,7 +3650,7 @@ async function handleEvent(rawEvent) {
 
   try {
     const result = await runCodex(event, session, card ? cardState : null, updateCard);
-    appendHistory(session, "user", userContent || `${event.attachments?.length || 0} image attachment(s)`);
+    appendHistory(session, "user", userContent || `${event.attachments?.length || 0} attachment(s)`);
     appendHistory(session, "assistant", result.text);
     stats.answered += 1;
     if (!card || !finalCardFlushOk) {
@@ -3185,6 +3745,14 @@ async function handleCommand(event, command) {
     case "/list":
       await sendMarkdown(chatId, await sessionsMarkdown(chatId), "sessions", messageId);
       return;
+    case "/delete":
+    case "/del":
+    case "/rm":
+      await handleDeleteCommand(chatId, command.rest, messageId);
+      return;
+    case "/confirm":
+      await handleConfirmCommand(chatId, command.rest, messageId);
+      return;
     case "/switch":
       await handleSwitchCommand(chatId, command.rest, messageId);
       return;
@@ -3209,12 +3777,213 @@ async function handleSwitchCommand(chatId, target, messageId) {
     return;
   }
   await syncChatSessionsWithCodex(chatId);
-  const session = switchSession(chatId, target);
+  const session = await switchSession(chatId, target);
   if (!session) {
     await sendText(chatId, "没有找到这个会话。发送 /sessions 查看可切换的会话。", "switch-miss", messageId);
     return;
   }
   await sendText(chatId, `已切换到：${session.title || "未命名会话"} (${session.id})`, "switch", messageId);
+}
+
+function cleanupPendingDeleteConfirmations() {
+  const now = Date.now();
+  for (const [token, pending] of pendingDeleteConfirmations) {
+    if (!pending?.expiresAt || pending.expiresAt <= now) pendingDeleteConfirmations.delete(token);
+  }
+}
+
+function deleteConfirmationToken() {
+  cleanupPendingDeleteConfirmations();
+  for (;;) {
+    const token = crypto.randomBytes(3).toString("hex");
+    if (!pendingDeleteConfirmations.has(token)) return token;
+  }
+}
+
+function forgetDeleteConfirmationsForThread(threadId) {
+  const id = String(threadId || "").trim();
+  for (const [token, pending] of pendingDeleteConfirmations) {
+    if (pending?.threadId === id) pendingDeleteConfirmations.delete(token);
+  }
+}
+
+function activeJobUsesThread(threadId) {
+  const id = String(threadId || "").trim();
+  if (!id) return false;
+  for (const [jobChatId, job] of activeCodexJobs) {
+    if (job?.threadId === id) return true;
+    const chatState = sessions.chats[jobChatId];
+    const jobSession = chatState?.sessions?.find((session) => session.id === job?.sessionId);
+    if (String(jobSession?.codexThreadId || "").trim() === id) return true;
+  }
+  return false;
+}
+
+function removeThreadFromBridgeSessions(threadId) {
+  const id = String(threadId || "").trim();
+  let removed = 0;
+  let changed = false;
+  for (const chatState of Object.values(sessions.chats || {})) {
+    if (!chatState || !Array.isArray(chatState.sessions)) continue;
+    const before = chatState.sessions.length;
+    chatState.sessions = chatState.sessions.filter((session) => String(session.codexThreadId || "").trim() !== id);
+    removed += before - chatState.sessions.length;
+    if (!chatState.sessions.some((session) => session.id === chatState.currentSessionId)) {
+      chatState.currentSessionId = chatState.sessions[0]?.id || "";
+    }
+    if (before !== chatState.sessions.length) changed = true;
+  }
+  if (changed) saveSessions();
+  return removed;
+}
+
+function deletePreviewMarkdown({ token, entry, record, index, expiresAt }) {
+  const threadId = String(entry.codexThreadId || record.id || "").trim();
+  return [
+    "**Codex 会话删除确认**",
+    "",
+    "这会执行 Codex++ 等价的本地删除：删除 Codex 本地索引记录、清理关联表、删除 rollout 会话文件，并移除飞书绑定。",
+    "",
+    `序号：${index}`,
+    `标题：${entry.title || record.title || "未命名会话"}`,
+    `Thread：${codexThreadLink(threadId)}`,
+    `本地会话：${entry.id || ""}`,
+    `Rollout：\`${record.rollout_path || "未记录"}\``,
+    `确认有效期：${formatTime(expiresAt)}`,
+    "",
+    `确认删除请输入：\`/confirm delete ${token}\``,
+  ].join("\n");
+}
+
+async function handleDeleteCommand(chatId, target, messageId) {
+  if (!target) {
+    await sendText(chatId, "用法：/delete <序号或ID>。先发送 /list 查看会话；删除需要二次确认。", "delete-usage", messageId);
+    return;
+  }
+
+  await syncChatSessionsWithCodex(chatId);
+  const match = await findSessionEntry(chatId, target);
+  if (!match) {
+    await sendText(chatId, "没有找到这个会话。发送 /list 查看可删除的会话。", "delete-miss", messageId);
+    return;
+  }
+
+  const entry = match.entry;
+  const threadId = String(entry.codexThreadId || "").trim();
+  if (!threadId) {
+    await sendText(chatId, "这个条目还没有 Codex 原生 thread，不能执行 Codex++ 等价删除。", "delete-no-thread", messageId);
+    return;
+  }
+  if (activeJobUsesThread(threadId)) {
+    await sendText(chatId, "这个会话正在运行中，先 /stop 或等待任务结束后再删除。", "delete-busy", messageId);
+    return;
+  }
+
+  const record = await loadCodexThreadRecord(threadId);
+  if (!record) {
+    removeThreadFromBridgeSessions(threadId);
+    await sendText(chatId, "Codex 本地库里已经找不到这个 thread，已清理飞书侧绑定。", "delete-missing-thread", messageId);
+    return;
+  }
+
+  const token = deleteConfirmationToken();
+  const expiresAt = Date.now() + CONFIG.deleteConfirmTtlMs;
+  pendingDeleteConfirmations.set(token, {
+    chatId,
+    threadId,
+    sessionId: entry.id || "",
+    index: match.index,
+    title: entry.title || record.title || "",
+    rolloutPath: record.rollout_path || "",
+    createdAt: Date.now(),
+    expiresAt,
+  });
+
+  await sendMarkdown(
+    chatId,
+    deletePreviewMarkdown({ token, entry, record, index: match.index, expiresAt }),
+    "delete-preview",
+    messageId,
+  );
+}
+
+async function handleConfirmCommand(chatId, rest, messageId) {
+  const [actionRaw, tokenRaw] = String(rest || "").trim().split(/\s+/);
+  const action = String(actionRaw || "").toLowerCase();
+  const token = String(tokenRaw || "").trim();
+  if (action !== "delete" || !token) {
+    await sendText(chatId, "用法：/confirm delete <token>。先用 /delete <序号或ID> 发起删除确认。", "confirm-usage", messageId);
+    return;
+  }
+
+  cleanupPendingDeleteConfirmations();
+  const pending = pendingDeleteConfirmations.get(token);
+  if (!pending || pending.chatId !== chatId) {
+    await sendText(chatId, "删除确认不存在或已过期。请重新发送 /delete <序号或ID>。", "confirm-miss", messageId);
+    return;
+  }
+
+  const currentMatch = await findSessionEntry(chatId, String(pending.index));
+  if (!currentMatch || String(currentMatch.entry.codexThreadId || "").trim() !== pending.threadId) {
+    pendingDeleteConfirmations.delete(token);
+    await sendText(chatId, "会话列表顺序已经变化，为避免删错，请重新发送 /list 和 /delete。", "confirm-list-changed", messageId);
+    return;
+  }
+
+  if (activeJobUsesThread(pending.threadId)) {
+    await sendText(chatId, "这个会话正在运行中，先 /stop 或等待任务结束后再删除。", "confirm-busy", messageId);
+    return;
+  }
+
+  let result;
+  try {
+    result = await deleteCodexLocalThread(pending.threadId);
+  } catch (error) {
+    pendingDeleteConfirmations.delete(token);
+    await sendMarkdown(
+      chatId,
+      [
+        "**Codex 会话删除失败**",
+        "",
+        `Thread：${codexThreadLink(pending.threadId)}`,
+        "",
+        "```",
+        String(error.message || error).slice(0, 1500),
+        "```",
+      ].join("\n"),
+      "delete-error",
+      messageId,
+    );
+    return;
+  }
+
+  const bridgeRemoved = removeThreadFromBridgeSessions(pending.threadId);
+  forgetDeleteConfirmationsForThread(pending.threadId);
+  log("INFO", "codex local thread deleted", {
+    chatId,
+    threadId: pending.threadId,
+    rolloutDeleted: result.rolloutDeleted,
+    rolloutMissing: result.rolloutMissing,
+    rolloutError: result.rolloutError,
+    bridgeRemoved,
+  });
+
+  const status = result.rolloutError ? "Codex 会话已从本地库删除，但 rollout 文件删除失败" : "Codex 会话已删除";
+  await sendMarkdown(
+    chatId,
+    [
+      `**${status}**`,
+      "",
+      `标题：${pending.title || result.title || "未命名会话"}`,
+      `Thread：${codexThreadLink(pending.threadId)}`,
+      `飞书绑定清理：${bridgeRemoved} 条`,
+      `Rollout：${result.rolloutDeleted ? "已删除" : result.rolloutMissing ? "原本不存在" : result.rolloutError ? "删除失败" : "未记录"}`,
+      result.rolloutPath ? `路径：\`${result.rolloutPath}\`` : "",
+      result.rolloutError ? ["", "```", result.rolloutError.slice(0, 1200), "```"].join("\n") : "",
+    ].filter(Boolean).join("\n"),
+    "delete-done",
+    messageId,
+  );
 }
 
 async function stopCurrentJob(chatId, messageId) {
@@ -3298,8 +4067,9 @@ function helpMarkdown() {
     "`/how` — 同 `/now`",
     "`/context` — 查看当前 Codex 原生 thread、token 和压缩状态",
     "`/compact` — 触发当前原生 thread 的上下文压缩",
-    "`/sessions` — 列出当前飞书聊天的 Codex 会话",
+    "`/sessions` — 列出飞书会话和 Codex 侧边栏可见会话",
     "`/switch <序号或ID>` — 切换到已有 Codex 会话",
+    "`/delete <序号或ID>` — 删除 Codex 本地会话，需 `/confirm delete <token>` 确认",
     "`/reset` — 清空当前会话上下文",
     "`/stop` — 停止当前 Codex 任务",
     "`/list` — 同 `/sessions`",
@@ -3465,15 +4235,15 @@ async function sessionsMarkdown(chatId) {
     return "还没有记录过 Codex 会话。直接发送普通消息会自动创建。";
   }
   const lines = ["**Codex 会话列表**", ""];
-  list.slice(0, 10).forEach((session, index) => {
-    const marker = session.id === currentId ? " ← 当前" : "";
-    const thread = session.codexThreadId ? `thread ${session.codexThreadId.slice(0, 8)}` : "未创建 thread";
+  list.forEach((session, index) => {
+    const marker = session._isCurrent || session.id === currentId ? " ← 当前" : "";
+    const thread = codexThreadLink(session.codexThreadId);
     lines.push(
       `${index + 1}. ${session.title || "未命名会话"} (${session.id}) · ${thread} · ${sessionContextSummary(session)} · ${formatTime(session.updatedAt)} · ${session.messages.length} 条${marker}`,
     );
   });
   lines.push("");
-  lines.push("使用 `/switch <序号或ID>` 切换会话，使用 `/new [标题]` 创建新会话。");
+  lines.push("使用 `/switch <序号或ID>` 切换会话，使用 `/delete <序号或ID>` 删除会话，使用 `/new [标题]` 创建新会话。");
   return lines.join("\n");
 }
 
@@ -3518,6 +4288,7 @@ function startConsumer() {
   log("INFO", "starting bridge", {
     workspace: CONFIG.workspace,
     eventKey: CONFIG.eventKey,
+    larkProfile: CONFIG.larkProfile || "default",
     larkCli: toolLabel(CONFIG.larkCli),
     codexCli: toolLabel(CONFIG.codexCli),
     runMode: CONFIG.runMode,
