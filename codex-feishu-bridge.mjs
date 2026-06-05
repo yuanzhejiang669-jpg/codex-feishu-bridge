@@ -134,6 +134,18 @@ function resolveDefaultDataRoot() {
 function parseToolEnv(envName, fallback) {
   const value = process.env[envName];
   if (!value) return fallback;
+  if (process.platform === "win32") {
+    const lower = value.toLowerCase();
+    if (lower.endsWith(".cmd") || lower.endsWith(".bat")) {
+      return { command: "cmd.exe", argsPrefix: ["/d", "/s", "/c", value] };
+    }
+    if (lower.endsWith(".ps1")) {
+      return {
+        command: "powershell.exe",
+        argsPrefix: ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", value],
+      };
+    }
+  }
   return { command: value, argsPrefix: [] };
 }
 
