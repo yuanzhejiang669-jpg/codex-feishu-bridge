@@ -80,7 +80,8 @@
 4. Git。
 5. 已登录可用的 Codex CLI 或 Codex Desktop 对应的 `codex` 命令。
 6. `lark-cli`。
-7. 可以扫码管理飞书自建应用的飞书账号。
+7. Python 3 或 `sqlite3` CLI。用于读取 Codex 本地 `state_5.sqlite`，从而让 `/list` 显示本机 Codex 侧边栏已有会话。
+8. 可以扫码管理飞书自建应用的飞书账号。
 
 检查命令：
 
@@ -90,6 +91,7 @@ npm -v
 git --version
 powershell -NoProfile -Command "$PSVersionTable.PSVersion"
 codex --version
+python --version
 ```
 
 安装 lark-cli：
@@ -106,6 +108,8 @@ $env:CODEX_CLI_BIN = "C:\Path\To\codex.exe"
 ```
 
 也可以把这行写进用户环境变量，之后重新打开 PowerShell。
+
+如果 `python --version` 不可用，也可以安装 `sqlite3` CLI。二者有一个可用即可；桥接器会优先调用 `sqlite3`，没有时自动 fallback 到 Python 标准库 `sqlite3`。
 
 ## 安装仓库
 
@@ -331,6 +335,7 @@ lark-cli event status --json
 | 飞书没回复 | 先发 `/status`；再看 `bridge.stderr.log` 和 `lark-cli event status --json` |
 | `lark-cli not found` | 重新执行 `npm install -g @larksuite/cli`，并确认新 PowerShell 能找到 `lark-cli` |
 | `codex` 找不到 | 设置 `CODEX_CLI_BIN`，或把 `codex.exe`/`codex.cmd` 加入 PATH |
+| `/list` 只显示默认会话 | 确认 `%USERPROFILE%\.codex\state_5.sqlite` 存在，并确认 `python --version` 或 `sqlite3 --version` 至少一个可用 |
 | 机器人收到消息但 Codex 不动 | 检查 Codex 登录状态、`%USERPROFILE%\.codex\auth.json`、workspace 是否可信 |
 | 以 `/你好` 开头没有正常回答 | 这是命令解析；普通任务不要用 `/` 开头 |
 | watchdog 反复重启 | 看 `watchdog.log` 里 consumer 或 bridge 失败原因 |

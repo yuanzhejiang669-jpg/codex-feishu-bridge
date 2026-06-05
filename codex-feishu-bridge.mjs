@@ -2458,42 +2458,122 @@ function extractCodexThreadId(stdoutRaw) {
   return "";
 }
 
+const SQLITE3_TOOL = { command: "sqlite3", argsPrefix: [] };
+const PYTHON_SQLITE_JSON_SCRIPT = `
+import json
+import sqlite3
+import sys
+
+db_path = sys.argv[1]
+sql = sys.stdin.read()
+conn = sqlite3.connect(db_path)
+conn.row_factory = sqlite3.Row
+try:
+    rows = conn.execute(sql).fetchall()
+    print(json.dumps([dict(row) for row in rows]))
+finally:
+    conn.close()
+`.trim();
+const PYTHON_SQLITE_EXEC_SCRIPT = `
+import sqlite3
+import sys
+
+db_path = sys.argv[1]
+sql = sys.stdin.read()
+conn = sqlite3.connect(db_path)
+try:
+    conn.executescript(sql)
+    conn.commit()
+finally:
+    conn.close()
+`.trim();
+
+function pythonSqliteTools() {
+  const tools = process.platform === "win32"
+    ? [
+        { command: "py", argsPrefix: ["-3"] },
+        { command: "python", argsPrefix: [] },
+        { command: "python3", argsPrefix: [] },
+      ]
+    : [
+        { command: "python3", argsPrefix: [] },
+        { command: "python", argsPrefix: [] },
+      ];
+  return tools;
+}
+
+function sqliteFailureText(tool, errorOrResult) {
+  const label = toolLabel(tool);
+  if (errorOrResult instanceof Error) return `${label}: ${errorOrResult.message}`;
+  const code = errorOrResult?.code ?? "unknown";
+  const text = String(errorOrResult?.stderr || errorOrResult?.stdout || "").trim();
+  return `${label}: exit ${code}${text ? `; ${text.slice(0, 500)}` : ""}`;
+}
+
+async function runSqliteJsonTool(tool, dbPath, sql) {
+  const args = tool === SQLITE3_TOOL
+    ? ["-json", dbPath, sql]
+    : ["-c", PYTHON_SQLITE_JSON_SCRIPT, dbPath];
+  const options = tool === SQLITE3_TOOL
+    ? { timeoutMs: 10_000, attempts: 1 }
+    : { stdin: sql, timeoutMs: 10_000, attempts: 1 };
+  return await runTool(tool, args, options);
+}
+
+async function runSqliteExecTool(tool, dbPath, sql) {
+  const args = tool === SQLITE3_TOOL
+    ? [dbPath]
+    : ["-c", PYTHON_SQLITE_EXEC_SCRIPT, dbPath];
+  return await runTool(tool, args, { stdin: sql, timeoutMs: 10_000, attempts: 1 });
+}
+
 async function sqliteJson(dbPath, sql) {
   if (!fs.existsSync(dbPath)) return [];
-  try {
-    const result = await runTool(
-      { command: "sqlite3", argsPrefix: [] },
-      ["-json", dbPath, sql],
-      { timeoutMs: 10_000, attempts: 1 },
-    );
-    if (result.code !== 0 || !result.stdout.trim()) return [];
-    return JSON.parse(result.stdout);
-  } catch {
-    return [];
+  const tools = [SQLITE3_TOOL, ...pythonSqliteTools()];
+  const failures = [];
+  for (const tool of tools) {
+    try {
+      const result = await runSqliteJsonTool(tool, dbPath, sql);
+      if (result.code !== 0) {
+        failures.push(sqliteFailureText(tool, result));
+        continue;
+      }
+      const output = result.stdout.trim();
+      return output ? JSON.parse(output) : [];
+    } catch (error) {
+      failures.push(sqliteFailureText(tool, error));
+    }
   }
+  log("WARN", "sqlite json query failed", { dbPath, failures: failures.slice(0, 5) });
+  return [];
+}
+
+async function runSqliteExec(dbPath, sql) {
+  if (!fs.existsSync(dbPath)) return { ok: false, error: `SQLite database not found: ${dbPath}` };
+  const tools = [SQLITE3_TOOL, ...pythonSqliteTools()];
+  const failures = [];
+  for (const tool of tools) {
+    try {
+      const result = await runSqliteExecTool(tool, dbPath, sql);
+      if (result.code === 0) return { ok: true, result };
+      failures.push(sqliteFailureText(tool, result));
+    } catch (error) {
+      failures.push(sqliteFailureText(tool, error));
+    }
+  }
+  return { ok: false, error: failures.join(" | ") };
 }
 
 async function sqliteExec(dbPath, sql) {
-  if (!fs.existsSync(dbPath)) return false;
-  const result = await runTool(
-    { command: "sqlite3", argsPrefix: [] },
-    [dbPath],
-    { stdin: sql, timeoutMs: 10_000, attempts: 1 },
-  );
-  return result.code === 0;
+  const result = await runSqliteExec(dbPath, sql);
+  if (!result.ok) log("WARN", "sqlite exec failed", { dbPath, error: result.error });
+  return result.ok;
 }
 
 async function sqliteExecChecked(dbPath, sql) {
-  if (!fs.existsSync(dbPath)) throw new Error(`SQLite database not found: ${dbPath}`);
-  const result = await runTool(
-    { command: "sqlite3", argsPrefix: [] },
-    [dbPath],
-    { stdin: sql, timeoutMs: 10_000, attempts: 1 },
-  );
-  if (result.code !== 0) {
-    throw new Error(`sqlite3 failed (${result.code}): ${result.stderr || result.stdout}`);
-  }
-  return result;
+  const result = await runSqliteExec(dbPath, sql);
+  if (!result.ok) throw new Error(result.error);
+  return result.result;
 }
 
 async function loadCodexThreadRecord(threadId) {

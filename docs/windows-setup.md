@@ -9,6 +9,7 @@ node -v
 npm -v
 git --version
 codex --version
+python --version
 npm install -g @larksuite/cli
 lark-cli --version
 ```
@@ -18,6 +19,8 @@ lark-cli --version
 ```powershell
 $env:CODEX_CLI_BIN = "C:\Path\To\codex.exe"
 ```
+
+`/list` 要显示本机 Codex 侧边栏已有会话，需要能读取 `%USERPROFILE%\.codex\state_5.sqlite`。桥接器优先使用 `sqlite3` CLI；没有 `sqlite3` 时会自动使用 Python 3 标准库。
 
 ## 2. 克隆仓库
 

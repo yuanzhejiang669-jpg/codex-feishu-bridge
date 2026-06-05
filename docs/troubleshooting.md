@@ -42,6 +42,20 @@ Get-Command codex.cmd
 $env:CODEX_CLI_BIN = "C:\Path\To\codex.exe"
 ```
 
+## `/list` 只显示默认会话
+
+这通常不是飞书问题，而是桥接器没有读到 Codex 本地状态库。
+
+检查：
+
+```powershell
+Test-Path "$env:USERPROFILE\.codex\state_5.sqlite"
+python --version
+sqlite3 --version
+```
+
+`python` 或 `sqlite3` 至少一个可用即可。桥接器会优先使用 `sqlite3`，没有时自动 fallback 到 Python 3 标准库。
+
 ## 机器人收不到事件
 
 检查：
