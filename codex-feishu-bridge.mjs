@@ -3807,6 +3807,7 @@ async function handleEvent(rawEvent) {
 async function handleCommand(event, command) {
   const chatId = event.chat_id;
   const messageId = event.message_id || event.id || chatId;
+  log("INFO", "command received", { messageId, chatId, command: command.name });
 
   switch (command.name) {
     case "/help":
@@ -3834,9 +3835,13 @@ async function handleCommand(event, command) {
       await stopCurrentJob(chatId, messageId);
       return;
     case "/sessions":
-    case "/list":
-      await sendMarkdown(chatId, await sessionsMarkdown(chatId), "sessions", messageId);
+    case "/list": {
+      const markdown = await sessionsMarkdown(chatId);
+      log("INFO", "sessions command rendered", { messageId, chatId, chars: markdown.length });
+      await sendMarkdown(chatId, markdown, "sessions", messageId);
+      log("INFO", "sessions command sent", { messageId, chatId });
       return;
+    }
     case "/delete":
     case "/del":
     case "/rm":
