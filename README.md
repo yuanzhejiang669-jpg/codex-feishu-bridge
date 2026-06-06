@@ -101,7 +101,7 @@ npm install -g @larksuite/cli
 lark-cli --version
 ```
 
-启动脚本默认会优先自动查找官方 Microsoft Store 版 `OpenAI.Codex`，并使用其 `app\resources\codex.exe`。这样 Codex 自动更新、版本目录变化后，桥接器仍会使用当前官方版本。
+启动脚本默认会优先自动查找官方 Microsoft Store 版 `OpenAI.Codex`。由于 WindowsApps 保护目录下的内部 CLI 不能被 Node 直接 `spawn`，脚本会把 `app\resources\codex.exe` 同步到 `%LOCALAPPDATA%\CodexFeishuBridge\official-codex-cli\...`，再从这个本地缓存副本启动。这样 Codex 自动更新、版本目录变化后，桥接器仍会使用当前官方版本。
 
 如果要显式指定其他 Codex CLI，例如测试版、Codex++ 或 Rebuild，再设置 `CODEX_CLI_BIN`：
 

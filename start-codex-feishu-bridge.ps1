@@ -63,7 +63,16 @@ function Resolve-OfficialCodexCliBin {
     }
     $candidate = Join-Path $package.InstallLocation "app\resources\codex.exe"
     if (Test-Path -LiteralPath $candidate) {
-      return (Resolve-Path -LiteralPath $candidate).Path
+      $cacheRoot = Join-Path $env:LOCALAPPDATA "CodexFeishuBridge\official-codex-cli"
+      $cacheDir = Join-Path $cacheRoot $package.PackageFullName
+      $cacheCandidate = Join-Path $cacheDir "codex.exe"
+      New-Item -ItemType Directory -Force -Path $cacheDir | Out-Null
+      $sourceItem = Get-Item -LiteralPath $candidate
+      $cacheItem = Get-Item -LiteralPath $cacheCandidate -ErrorAction SilentlyContinue
+      if (-not $cacheItem -or $cacheItem.Length -ne $sourceItem.Length -or $cacheItem.LastWriteTimeUtc -lt $sourceItem.LastWriteTimeUtc) {
+        Copy-Item -LiteralPath $candidate -Destination $cacheCandidate -Force
+      }
+      return (Resolve-Path -LiteralPath $cacheCandidate).Path
     }
   }
 
