@@ -55,12 +55,32 @@ $stderrLog = Join-Path $logDir "bridge.stderr.log"
 
 New-Item -ItemType Directory -Force -Path $stateDir, $logDir, $Workspace | Out-Null
 
+function Resolve-OfficialCodexCliBin {
+  $packages = @(Get-AppxPackage -Name "OpenAI.Codex" -ErrorAction SilentlyContinue)
+  foreach ($package in ($packages | Sort-Object Version -Descending)) {
+    if (-not $package.InstallLocation) {
+      continue
+    }
+    $candidate = Join-Path $package.InstallLocation "app\resources\codex.exe"
+    if (Test-Path -LiteralPath $candidate) {
+      return (Resolve-Path -LiteralPath $candidate).Path
+    }
+  }
+
+  return $null
+}
+
 function Resolve-CodexCliBin {
   if ($env:CODEX_CLI_BIN) {
     if (Test-Path -LiteralPath $env:CODEX_CLI_BIN) {
       return (Resolve-Path -LiteralPath $env:CODEX_CLI_BIN).Path
     }
     Write-Warning "CODEX_CLI_BIN is set but not found: $env:CODEX_CLI_BIN"
+  }
+
+  $officialCandidate = Resolve-OfficialCodexCliBin
+  if ($officialCandidate) {
+    return $officialCandidate
   }
 
   $pathCandidate = Get-Command "codex.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
