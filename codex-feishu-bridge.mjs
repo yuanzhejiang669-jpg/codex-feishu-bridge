@@ -3884,23 +3884,19 @@ async function handleSwitchCommand(chatId, target, messageId) {
 
 function cleanupPendingDeleteConfirmations() {
   const now = Date.now();
-  for (const [token, pending] of pendingDeleteConfirmations) {
-    if (!pending?.expiresAt || pending.expiresAt <= now) pendingDeleteConfirmations.delete(token);
+  for (const [key, pending] of pendingDeleteConfirmations) {
+    if (!pending?.expiresAt || pending.expiresAt <= now) pendingDeleteConfirmations.delete(key);
   }
 }
 
-function deleteConfirmationToken() {
-  cleanupPendingDeleteConfirmations();
-  for (;;) {
-    const token = crypto.randomBytes(3).toString("hex");
-    if (!pendingDeleteConfirmations.has(token)) return token;
-  }
+function deleteConfirmationKey(chatId, index) {
+  return `${String(chatId || "")}\n${String(index || "").trim()}`;
 }
 
 function forgetDeleteConfirmationsForThread(threadId) {
   const id = String(threadId || "").trim();
-  for (const [token, pending] of pendingDeleteConfirmations) {
-    if (pending?.threadId === id) pendingDeleteConfirmations.delete(token);
+  for (const [key, pending] of pendingDeleteConfirmations) {
+    if (pending?.threadId === id) pendingDeleteConfirmations.delete(key);
   }
 }
 
@@ -3934,7 +3930,7 @@ function removeThreadFromBridgeSessions(threadId) {
   return removed;
 }
 
-function deletePreviewMarkdown({ token, entry, record, index, expiresAt }) {
+function deletePreviewMarkdown({ entry, record, index, expiresAt }) {
   const threadId = String(entry.codexThreadId || record.id || "").trim();
   return [
     "**Codex 会话删除确认**",
@@ -3948,7 +3944,7 @@ function deletePreviewMarkdown({ token, entry, record, index, expiresAt }) {
     `Rollout：\`${record.rollout_path || "未记录"}\``,
     `确认有效期：${formatTime(expiresAt)}`,
     "",
-    `确认删除请输入：\`/confirm delete ${token}\``,
+    `确认删除请输入：\`/confirm delete ${index}\``,
   ].join("\n");
 }
 
@@ -3983,9 +3979,9 @@ async function handleDeleteCommand(chatId, target, messageId) {
     return;
   }
 
-  const token = deleteConfirmationToken();
+  cleanupPendingDeleteConfirmations();
   const expiresAt = Date.now() + CONFIG.deleteConfirmTtlMs;
-  pendingDeleteConfirmations.set(token, {
+  pendingDeleteConfirmations.set(deleteConfirmationKey(chatId, match.index), {
     chatId,
     threadId,
     sessionId: entry.id || "",
@@ -3998,23 +3994,25 @@ async function handleDeleteCommand(chatId, target, messageId) {
 
   await sendMarkdown(
     chatId,
-    deletePreviewMarkdown({ token, entry, record, index: match.index, expiresAt }),
+    deletePreviewMarkdown({ entry, record, index: match.index, expiresAt }),
     "delete-preview",
     messageId,
   );
 }
 
 async function handleConfirmCommand(chatId, rest, messageId) {
-  const [actionRaw, tokenRaw] = String(rest || "").trim().split(/\s+/);
+  const [actionRaw, indexRaw] = String(rest || "").trim().split(/\s+/);
   const action = String(actionRaw || "").toLowerCase();
-  const token = String(tokenRaw || "").trim();
-  if (action !== "delete" || !token) {
-    await sendText(chatId, "用法：/confirm delete <token>。先用 /delete <序号或ID> 发起删除确认。", "confirm-usage", messageId);
+  const indexText = String(indexRaw || "").trim();
+  const index = Number(indexText);
+  if (action !== "delete" || !Number.isInteger(index) || index < 1) {
+    await sendText(chatId, "用法：/confirm delete <序号>。先用 /delete <序号或ID> 发起删除确认。", "confirm-usage", messageId);
     return;
   }
 
   cleanupPendingDeleteConfirmations();
-  const pending = pendingDeleteConfirmations.get(token);
+  const key = deleteConfirmationKey(chatId, index);
+  const pending = pendingDeleteConfirmations.get(key);
   if (!pending || pending.chatId !== chatId) {
     await sendText(chatId, "删除确认不存在或已过期。请重新发送 /delete <序号或ID>。", "confirm-miss", messageId);
     return;
@@ -4022,7 +4020,7 @@ async function handleConfirmCommand(chatId, rest, messageId) {
 
   const currentMatch = await findSessionEntry(chatId, String(pending.index));
   if (!currentMatch || String(currentMatch.entry.codexThreadId || "").trim() !== pending.threadId) {
-    pendingDeleteConfirmations.delete(token);
+    pendingDeleteConfirmations.delete(key);
     await sendText(chatId, "会话列表顺序已经变化，为避免删错，请重新发送 /list 和 /delete。", "confirm-list-changed", messageId);
     return;
   }
@@ -4036,7 +4034,7 @@ async function handleConfirmCommand(chatId, rest, messageId) {
   try {
     result = await deleteCodexLocalThread(pending.threadId);
   } catch (error) {
-    pendingDeleteConfirmations.delete(token);
+    pendingDeleteConfirmations.delete(key);
     await sendMarkdown(
       chatId,
       [
@@ -4166,7 +4164,7 @@ function helpMarkdown() {
     "`/compact` — 触发当前原生 thread 的上下文压缩",
     "`/sessions` — 列出飞书会话和 Codex 侧边栏可见会话",
     "`/switch <序号或ID>` — 切换到已有 Codex 会话",
-    "`/delete <序号或ID>` — 删除 Codex 本地会话，需 `/confirm delete <token>` 确认",
+    "`/delete <序号或ID>` — 删除 Codex 本地会话，需 `/confirm delete <序号>` 确认",
     "`/reset` — 清空当前会话上下文",
     "`/stop` — 停止当前 Codex 任务",
     "`/list` — 同 `/sessions`",
@@ -4340,7 +4338,7 @@ async function sessionsMarkdown(chatId) {
     );
   });
   lines.push("");
-  lines.push("使用 `/switch <序号或ID>` 切换会话，使用 `/delete <序号或ID>` 删除会话，使用 `/new [标题]` 创建新会话。");
+  lines.push("使用 `/switch <序号或ID>` 切换会话，使用 `/delete <序号或ID>` 删除会话，删除需 `/confirm delete <序号>` 确认，使用 `/new [标题]` 创建新会话。");
   return lines.join("\n");
 }
 

@@ -259,7 +259,7 @@ lark-cli profile list
 | `/compact` | 压缩当前 Codex 原生 thread |
 | `/reset` | 清空当前桥接 session 绑定 |
 | `/delete <序号或id>` | 请求删除本地 Codex thread，需要二次确认 |
-| `/confirm delete <token>` | 确认删除 |
+| `/confirm delete <序号>` | 确认删除 |
 | `/stop` | 停止当前运行中的 Codex 任务 |
 
 ## 默认参数
