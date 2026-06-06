@@ -18,7 +18,7 @@
 - 动态卡片：任务运行中实时更新，完成后展示最终答案、耗时、token/context 信息。
 - 附件处理：支持飞书图片和文件下载到 workspace，再交给 Codex 读取。
 - 会话管理：支持新建、切换、列出、同步 Codex 可见线程。
-- 安全删除：删除本地 Codex thread 前需要二次确认 token。
+- 安全删除：删除本地 Codex thread 前需要按 `/confirm delete <序号>` 二次确认。
 - 多实例：同一台 Windows 机器可以跑多个机器人/profile/workspace。
 - 看门狗：Windows 计划任务定期检查桥进程和飞书 consumer，不健康时自动重启。
 
@@ -135,6 +135,42 @@ npm run check
 - 写入 lark-cli profile。
 - 启动桥接器。
 - 可选安装 watchdog。
+
+### PowerShell 直接注册并启动 Bot
+
+在目标 Windows 设备的 PowerShell 里复制下面这段。只需要改 `$BotName` 和 `$BotDisplayName`；脚本会生成飞书注册二维码，扫码后自动创建 profile、启动 bridge，并安装 watchdog。
+
+```powershell
+Set-Location "$env:USERPROFILE\Documents\Codex\tools\codex-feishu-bridge"
+
+$BotName = "codex-assistant-1"
+$BotDisplayName = "Codex Assistant 1"
+
+.\register-codex-feishu-bot.ps1 `
+  -Name $BotName `
+  -DisplayName $BotDisplayName `
+  -Workspace "$env:USERPROFILE\Documents\Codex\workspaces\feishu-bridge-$BotName" `
+  -RunMode app-server `
+  -Reasoning xhigh `
+  -CodexTimeoutSeconds 7200 `
+  -InstallStartup
+```
+
+例如第二个 Bot，把变量改成：
+
+```powershell
+$BotName = "codex-assistant-2"
+$BotDisplayName = "Codex Assistant 2"
+```
+
+旧设备上也一样，只是在旧设备本机 PowerShell 里运行；例如：
+
+```powershell
+$BotName = "codex-assistant-old3"
+$BotDisplayName = "Codex Assistant Old 3"
+```
+
+也可以直接写死参数：
 
 ```powershell
 Set-Location "$env:USERPROFILE\Documents\Codex\tools\codex-feishu-bridge"
