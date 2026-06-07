@@ -286,17 +286,21 @@ lark-cli profile list
 | 飞书命令 | 作用 |
 |---|---|
 | `/help` | 显示帮助 |
-| `/status` | 查看桥、飞书、Codex、workspace、当前 session 状态 |
+| `/status` | 查看桥、飞书、Codex、workspace、当前 session、goal、最近失败状态 |
 | `/now` 或 `/how` | 查看当前是否有任务运行 |
 | `/new [title]` | 新建本地桥接 session |
 | `/list` 或 `/sessions` | 列出 session 和可见 Codex threads |
 | `/switch <序号或id>` | 切换 session |
 | `/context` | 查看当前 Codex thread/context/token 状态 |
+| `/goal [目标]` | 查看或设置 Codex goal；支持 `/goal pause`、`/goal resume`、`/goal clear` |
+| `/provider [id]` | 查看或切换当前飞书会话的 Codex provider；`/provider save <id>` 写入用户级 `config.toml` |
+| `/model [模型ID] [推理强度]` | 查看或切换当前飞书会话的模型和 reasoning；`/model list` 列出模型 |
+| `/fast on/off/status` | 查看或切换 Codex Fast 速度模式；`/fast save on` 写入用户级 `config.toml` |
 | `/compact` | 压缩当前 Codex 原生 thread |
 | `/reset` | 清空当前桥接 session 绑定 |
 | `/delete <序号或id>` | 请求删除本地 Codex thread，需要二次确认 |
 | `/confirm delete <序号>` | 确认删除 |
-| `/stop` | 停止当前运行中的 Codex 任务 |
+| `/stop` | 停止当前运行中的 Codex 任务；app-server 模式优先使用原生 `turn/interrupt` |
 
 ## 默认参数
 
@@ -311,6 +315,9 @@ lark-cli profile list
 | MCP | 开启 | 需要关闭时传 `-DisableMcp` |
 | 附件大小 | 50 MB | 超过会跳过 |
 | 附件暂存 | 30 分钟 | 只发附件不发文字时，等待下一条文字触发处理 |
+| 断流恢复 | 开启，最多 1 次 | `CODEX_FEISHU_STREAM_RECOVERY=0` 可关闭；只对 Codex 流式连接断开续跑，不对额度/鉴权/限流续跑 |
+
+`/provider`、`/model`、`/fast` 默认只改当前飞书会话，适合手机端临时切换。加 `save` 才会通过 Codex app-server 写入用户级 `~/.codex/config.toml`。如果 provider 使用 `env_key`，环境变量必须对当前 Bridge 进程可见；如果是在 Windows 设置里刚新增的环境变量，需要重启对应 Bot/Bridge 后子进程才能继承。
 
 ## Runtime 位置
 
@@ -375,6 +382,7 @@ lark-cli event status --json
 | `codex` 找不到 | 优先确认官方 Microsoft Store 版 `OpenAI.Codex` 已安装；如需使用其他 CLI，再设置 `CODEX_CLI_BIN`，或把 `codex.exe`/`codex.cmd` 加入 PATH |
 | `/list` 只显示默认会话 | 确认 `%USERPROFILE%\.codex\state_5.sqlite` 存在，并确认 `python --version` 或 `sqlite3 --version` 至少一个可用 |
 | 机器人收到消息但 Codex 不动 | 检查 Codex 登录状态、`%USERPROFILE%\.codex\auth.json`、workspace 是否可信 |
+| 卡片显示 Codex 断流 | Bridge 会先等待 Codex 原生重连；最终仍失败时只对流式连接断开自动续跑一次。额度、鉴权、限流不会自动续跑 |
 | 以 `/你好` 开头没有正常回答 | 这是命令解析；普通任务不要用 `/` 开头 |
 | watchdog 反复重启 | 看 `watchdog.log` 里 consumer 或 bridge 失败原因 |
 

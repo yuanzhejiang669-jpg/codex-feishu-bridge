@@ -43,6 +43,8 @@ const CONFIG = {
   maxPendingAttachments: Number(process.env.CODEX_FEISHU_MAX_PENDING_ATTACHMENTS || "12"),
   maxFileAttachmentBytes: Number(process.env.CODEX_FEISHU_MAX_FILE_ATTACHMENT_BYTES || `${50 * 1024 * 1024}`),
   deleteConfirmTtlMs: Number(process.env.CODEX_FEISHU_DELETE_CONFIRM_TTL_MS || `${5 * 60_000}`),
+  streamRecoveryEnabled: (process.env.CODEX_FEISHU_STREAM_RECOVERY || "1") !== "0",
+  streamRecoveryMaxAttempts: Number(process.env.CODEX_FEISHU_STREAM_RECOVERY_MAX_ATTEMPTS || "1"),
   syncSidebar: (process.env.CODEX_FEISHU_SYNC_SIDEBAR || "0") !== "0",
   syncSessionsFromCodex: (process.env.CODEX_FEISHU_SYNC_SESSIONS_FROM_CODEX || "1") !== "0",
   keepEmptySessionMs: Number(process.env.CODEX_FEISHU_KEEP_EMPTY_SESSION_MS || `${10 * 60_000}`),
@@ -53,7 +55,9 @@ const logPath = path.join(CONFIG.logDir, "codex-feishu-bridge.log");
 const seenPath = path.join(CONFIG.stateDir, "seen-events.json");
 const sessionsPath = path.join(CONFIG.stateDir, "sessions.json");
 const pidPath = path.join(CONFIG.stateDir, "bridge.pid");
+const lockPath = path.join(CONFIG.stateDir, "bridge.lock.json");
 const stopPath = path.join(CONFIG.stateDir, "bridge.stop");
+const eventLocksDir = path.join(CONFIG.stateDir, "event-locks");
 const runtimeDir = path.join(CONFIG.workspace, ".codex-feishu-runtime");
 const outputDir = path.join(runtimeDir, "codex-output");
 const promptDir = path.join(runtimeDir, "codex-prompts");
@@ -64,9 +68,11 @@ const codexModelLabel = CONFIG.codexModel || resolveCodexConfigModel() || "默�
 
 fs.mkdirSync(CONFIG.logDir, { recursive: true });
 fs.mkdirSync(CONFIG.stateDir, { recursive: true });
+fs.mkdirSync(eventLocksDir, { recursive: true });
 fs.mkdirSync(outputDir, { recursive: true });
 fs.mkdirSync(promptDir, { recursive: true });
 fs.mkdirSync(attachmentDir, { recursive: true });
+acquireSingleInstanceLock();
 try {
   fs.rmSync(stopPath, { force: true });
 } catch {}
@@ -78,17 +84,23 @@ const activeCodexJobs = new Map();
 const pendingAttachmentsByChat = new Map();
 const pendingDeleteConfirmations = new Map();
 const stoppedJobs = new Set();
+const REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh"]);
+const FAST_SERVICE_TIER = "fast";
+const STANDARD_SERVICE_TIER = "standard";
 let shuttingDown = false;
 let activeJobs = 0;
 const pendingEvents = [];
 const seen = loadSeen();
 const sessions = loadSessions();
+cleanupOldEventLocks();
 const stats = {
   startedAt: Date.now(),
   events: 0,
   commands: 0,
   answered: 0,
   failed: 0,
+  recovered: 0,
+  failuresByKind: {},
 };
 
 function resolveDefaultTools() {
@@ -163,15 +175,146 @@ function normalizeRunMode(value) {
   return "app-server";
 }
 
-function resolveCodexConfigModel() {
-  const configPath = path.join(os.homedir(), ".codex", "config.toml");
+function codexUserConfigPath() {
+  return path.join(CONFIG.codexHome, "config.toml");
+}
+
+function readCodexConfigText() {
   try {
-    const text = fs.readFileSync(configPath, "utf8");
-    const match = text.match(/^\s*model\s*=\s*["']([^"']+)["']/m);
-    return match?.[1]?.trim() || "";
+    return fs.readFileSync(codexUserConfigPath(), "utf8");
   } catch {
     return "";
   }
+}
+
+function resolveCodexConfigModel() {
+  return resolveCodexConfigValue("model");
+}
+
+function resolveCodexConfigValue(key) {
+  const text = readCodexConfigText();
+  if (!text) return "";
+  const escaped = escapeRegExp(key);
+  const match = text.match(new RegExp(`^\\s*${escaped}\\s*=\\s*([\"'])(.*?)\\1\\s*(?:#.*)?$`, "m"));
+  return match?.[2]?.trim() || "";
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function compactProviderInfo(info) {
+  if (!info) return null;
+  const envKey = String(info.envKey || "").trim();
+  return {
+    id: String(info.id || "").trim(),
+    name: String(info.name || info.id || "").trim(),
+    baseUrl: String(info.baseUrl || "").trim(),
+    envKey,
+    requiresOpenaiAuth: Boolean(info.requiresOpenaiAuth),
+    envVisible: envKey ? Object.prototype.hasOwnProperty.call(process.env, envKey) : null,
+    builtIn: Boolean(info.builtIn),
+  };
+}
+
+function listCodexProviders() {
+  const providers = new Map();
+  const add = (info) => {
+    const item = compactProviderInfo(info);
+    if (item?.id) providers.set(item.id, item);
+  };
+  add({ id: "openai", name: "OpenAI", requiresOpenaiAuth: true, builtIn: true });
+  add({ id: "ollama", name: "Ollama", builtIn: true });
+  add({ id: "lmstudio", name: "LM Studio", builtIn: true });
+  add({ id: "amazon-bedrock", name: "Amazon Bedrock", builtIn: true });
+
+  const text = readCodexConfigText();
+  const tableRe = /^\s*\[model_providers\.([A-Za-z0-9_-]+)\]\s*$/gm;
+  const matches = [...text.matchAll(tableRe)];
+  for (let i = 0; i < matches.length; i += 1) {
+    const id = matches[i][1];
+    const start = matches[i].index + matches[i][0].length;
+    const end = i + 1 < matches.length ? matches[i + 1].index : text.length;
+    const body = text.slice(start, end);
+    add({
+      id,
+      name: tomlStringValue(body, "name") || id,
+      baseUrl: tomlStringValue(body, "base_url"),
+      envKey: tomlStringValue(body, "env_key"),
+      requiresOpenaiAuth: tomlBooleanValue(body, "requires_openai_auth"),
+      builtIn: false,
+    });
+  }
+  return [...providers.values()].sort((a, b) => a.id.localeCompare(b.id));
+}
+
+function findCodexProvider(id) {
+  const target = String(id || "").trim();
+  if (!target) return null;
+  return listCodexProviders().find((item) => item.id === target) || null;
+}
+
+function tomlStringValue(text, key) {
+  const match = String(text || "").match(new RegExp(`^\\s*${escapeRegExp(key)}\\s*=\\s*([\"'])(.*?)\\1\\s*(?:#.*)?$`, "m"));
+  return match?.[2]?.trim() || "";
+}
+
+function tomlBooleanValue(text, key) {
+  const match = String(text || "").match(new RegExp(`^\\s*${escapeRegExp(key)}\\s*=\\s*(true|false)\\s*(?:#.*)?$`, "mi"));
+  return match ? match[1].toLowerCase() === "true" : false;
+}
+
+function cleanOverride(value) {
+  const text = String(value || "").trim();
+  return text || "";
+}
+
+function effectiveSessionSettings(session) {
+  const model = cleanOverride(session?.modelOverride) || CONFIG.codexModel || resolveCodexConfigValue("model") || "";
+  const provider = cleanOverride(session?.providerOverride) || resolveCodexConfigValue("model_provider") || "openai";
+  const reasoning = cleanOverride(session?.reasoningOverride) || CONFIG.codexReasoning || resolveCodexConfigValue("model_reasoning_effort") || "";
+  const serviceTier = cleanOverride(session?.serviceTierOverride) || resolveCodexConfigValue("service_tier") || "";
+  return { model, provider, reasoning, serviceTier };
+}
+
+function settingsSummary(session) {
+  const settings = effectiveSessionSettings(session);
+  return [
+    `provider \`${settings.provider || "默认"}\``,
+    `model \`${settings.model || "默认"}\``,
+    `reasoning \`${settings.reasoning || "默认"}\``,
+    `speed \`${displayServiceTier(settings.serviceTier) || "默认"}\``,
+  ].join(" · ");
+}
+
+function displayServiceTier(value) {
+  const tier = cleanOverride(value);
+  if (!tier) return "";
+  if (tier === FAST_SERVICE_TIER || tier === "priority") return "fast";
+  if (tier === STANDARD_SERVICE_TIER) return "standard";
+  return tier;
+}
+
+function applySessionThreadOverrides(params, session) {
+  const settings = effectiveSessionSettings(session);
+  if (settings.model) params.model = settings.model;
+  if (settings.provider) params.modelProvider = settings.provider;
+  if (settings.serviceTier) params.serviceTier = settings.serviceTier;
+  return params;
+}
+
+function applySessionTurnOverrides(params, session) {
+  const settings = effectiveSessionSettings(session);
+  if (settings.model) params.model = settings.model;
+  if (settings.serviceTier) params.serviceTier = settings.serviceTier;
+  if (settings.reasoning) params.effort = settings.reasoning;
+  return params;
+}
+
+function setSessionOverride(session, key, value) {
+  session[key] = cleanOverride(value);
+  session.updatedAt = Date.now();
+  saveSessions();
 }
 
 function nowIso() {
@@ -219,6 +362,157 @@ function errorText(value, fallback = "Codex 运行失败") {
   return text || safeJson(value) || fallback;
 }
 
+function classifyCodexFailure(value, fallback = "Codex 运行失败") {
+  if (value?.codexFailure) return normalizeFailure(value.codexFailure);
+
+  const detail = errorText(value, fallback);
+  const lower = detail.toLowerCase();
+  const httpStatus = httpStatusFromText(detail);
+  const base = {
+    kind: "unknown",
+    label: "未知错误",
+    recoverable: false,
+    message: "Codex 运行失败，但 Bridge 无法明确判断原因。",
+    suggestion: "查看日志中的原始错误；如果是偶发问题，可以手动重试。",
+    detail,
+    at: Date.now(),
+  };
+
+  if (lower.includes("stopped by user") || lower.includes("已停止") || lower.includes("interrupted")) {
+    return { ...base, kind: "user_stop", label: "用户停止", message: "任务已被用户停止。", suggestion: "" };
+  }
+
+  if (
+    httpStatus === 401
+    || lower.includes("invalid_api_key")
+    || lower.includes("invalid api key")
+    || lower.includes("unauthorized")
+    || lower.includes("not logged in")
+    || lower.includes("authentication")
+  ) {
+    return {
+      ...base,
+      kind: "auth",
+      label: "Codex 鉴权失败",
+      message: "Codex 登录或 API Key 鉴权失败。",
+      suggestion: "这类失败不自动续跑；需要先修复 Codex 登录/API Key。",
+    };
+  }
+
+  if (
+    lower.includes("insufficient_quota")
+    || lower.includes("quota")
+    || lower.includes("billing")
+    || lower.includes("credit")
+    || lower.includes("usage limit")
+    || lower.includes("budget")
+  ) {
+    return {
+      ...base,
+      kind: "quota",
+      label: "Codex 额度不足",
+      message: "Codex 额度、账单或预算限制导致任务停止。",
+      suggestion: "这类失败不自动续跑；需要补充额度或调整账号限制后再继续。",
+    };
+  }
+
+  if (httpStatus === 429 || lower.includes("rate limit") || lower.includes("rate_limit") || lower.includes("too many requests")) {
+    return {
+      ...base,
+      kind: "rate_limit",
+      label: "Codex 限流",
+      message: "Codex 上游限流，当前不适合立即自动续跑。",
+      suggestion: "稍后手动重试，或降低并发。",
+    };
+  }
+
+  if (lower.includes("card update failed") || lower.includes("cardkit") || lower.includes("lark-cli failed")) {
+    return {
+      ...base,
+      kind: "feishu_card",
+      label: "飞书卡片更新失败",
+      message: "Codex 可能仍在运行，但飞书动态卡片刷新失败。",
+      suggestion: "这类问题应重试发卡或看日志，不应该重跑 Codex 任务。",
+    };
+  }
+
+  if (lower.includes("timed out")) {
+    return {
+      ...base,
+      kind: "timeout",
+      label: "Bridge 超时",
+      message: "Bridge 等待 Codex 任务超过配置时限。",
+      suggestion: "如果任务确实很长，可以调大超时；否则查看 Codex 是否卡住。",
+    };
+  }
+
+  if (
+    lower.includes("responsestreamdisconnected")
+    || lower.includes("responsesstreamdisconnected")
+    || lower.includes("stream disconnected before completion")
+    || lower.includes("transport error")
+    || lower.includes("network error")
+    || lower.includes("error decoding response body")
+  ) {
+    return {
+      ...base,
+      kind: "stream_disconnect",
+      label: "Codex 流式连接断开",
+      recoverable: true,
+      message: "Codex 原生输出流在完成前断开。",
+      suggestion: "Bridge 会等待原生重连；如果最终仍失败，仅对这类断流尝试一次断点续跑。",
+    };
+  }
+
+  if (lower.includes("ended before turn completed") || lower.includes("app-server exited")) {
+    return {
+      ...base,
+      kind: "app_server",
+      label: "Codex app-server 提前结束",
+      message: "Codex app-server 在 turn 完成前结束。",
+      suggestion: "查看 app-server stderr；如果前面出现过断流，可尝试手动继续。",
+    };
+  }
+
+  return base;
+}
+
+function httpStatusFromText(text) {
+  const value = String(text || "");
+  const match = value.match(/httpStatusCode["']?\s*[:=]\s*(\d{3})/i)
+    || value.match(/\b(\d{3})\s+(?:Unauthorized|Too Many Requests|Forbidden|Payment Required)\b/i);
+  return match ? Number(match[1]) : null;
+}
+
+function failureDetailText(failure) {
+  const item = normalizeFailure(failure) || classifyCodexFailure(failure);
+  const parts = [
+    `类型：${item.label}`,
+    item.message,
+    item.suggestion ? `建议：${item.suggestion}` : "",
+    "",
+    item.detail,
+  ].filter((line) => line !== "");
+  return parts.join("\n");
+}
+
+function failureShortText(failure) {
+  const item = normalizeFailure(failure) || classifyCodexFailure(failure);
+  return item.suggestion ? `${item.label}：${item.message} ${item.suggestion}` : `${item.label}：${item.message}`;
+}
+
+function errorFromFailure(failure) {
+  const item = normalizeFailure(failure) || classifyCodexFailure(failure);
+  const error = new Error(failureDetailText(item));
+  error.codexFailure = item;
+  return error;
+}
+
+function recordFailureStats(failure) {
+  const item = normalizeFailure(failure) || classifyCodexFailure(failure);
+  stats.failuresByKind[item.kind] = (stats.failuresByKind[item.kind] || 0) + 1;
+}
+
 function loadSeen() {
   try {
     const parsed = JSON.parse(fs.readFileSync(seenPath, "utf8"));
@@ -244,6 +538,116 @@ function remember(id) {
   }
   saveSeen();
   return false;
+}
+
+function eventLockPath(id) {
+  const hash = crypto.createHash("sha256").update(String(id || "")).digest("hex").slice(0, 32);
+  return path.join(eventLocksDir, `${hash}.json`);
+}
+
+function cleanupOldEventLocks() {
+  const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  try {
+    for (const entry of fs.readdirSync(eventLocksDir, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+      const file = path.join(eventLocksDir, entry.name);
+      const stat = fs.statSync(file);
+      if (stat.mtimeMs < cutoff) fs.rmSync(file, { force: true });
+    }
+  } catch (error) {
+    log("WARN", "event lock cleanup failed", { error: String(error.message || error) });
+  }
+}
+
+function rememberEvent(id, messageId = "") {
+  if (!id) return false;
+  if (seen.has(id)) return true;
+
+  const file = eventLockPath(id);
+  try {
+    const fd = fs.openSync(file, "wx");
+    fs.writeFileSync(fd, JSON.stringify({
+      id,
+      messageId,
+      pid: process.pid,
+      instance: process.env.CODEX_FEISHU_INSTANCE_NAME || "",
+      createdAt: Date.now(),
+    }, null, 2), "utf8");
+    fs.closeSync(fd);
+  } catch (error) {
+    if (error?.code === "EEXIST") return true;
+    log("WARN", "event lock failed; falling back to local dedupe", {
+      id,
+      messageId,
+      error: String(error.message || error),
+    });
+  }
+
+  remember(id);
+  return false;
+}
+
+function isProcessAlive(pid) {
+  const number = Number(pid);
+  if (!Number.isInteger(number) || number <= 0) return false;
+  try {
+    process.kill(number, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+
+function readJsonFile(file) {
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function acquireSingleInstanceLock() {
+  const owner = {
+    pid: process.pid,
+    instance: process.env.CODEX_FEISHU_INSTANCE_NAME || "",
+    workspace: CONFIG.workspace,
+    larkProfile: CONFIG.larkProfile || "default",
+    startedAt: Date.now(),
+  };
+
+  for (;;) {
+    try {
+      const fd = fs.openSync(lockPath, "wx");
+      fs.writeFileSync(fd, JSON.stringify(owner, null, 2), "utf8");
+      fs.closeSync(fd);
+      return;
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+      const current = readJsonFile(lockPath);
+      if (current?.pid && isProcessAlive(current.pid)) {
+        log("ERROR", "another bridge instance is already running for this state dir", {
+          currentPid: current.pid,
+          currentInstance: current.instance || "",
+          currentWorkspace: current.workspace || "",
+          pid: process.pid,
+          lockPath,
+        });
+        process.exit(0);
+      }
+      try {
+        fs.rmSync(lockPath, { force: true });
+      } catch {}
+    }
+  }
+}
+
+function releaseSingleInstanceLock() {
+  try {
+    const current = readJsonFile(lockPath);
+    if (String(current?.pid || "") === String(process.pid)) {
+      fs.rmSync(lockPath, { force: true });
+    }
+  } catch {}
 }
 
 function loadSessions() {
@@ -346,6 +750,50 @@ function normalizeSessionData(session) {
     lastContextPeakUsage: normalizeContextUsage(session?.lastContextPeakUsage),
     lastCompactedAt: Number(session?.lastCompactedAt) || null,
     lastThreadStatus: typeof session?.lastThreadStatus === "string" ? session.lastThreadStatus : "",
+    lastGoal: normalizeGoal(session?.lastGoal),
+    lastFailure: normalizeFailure(session?.lastFailure),
+    modelOverride: cleanOverride(session?.modelOverride),
+    reasoningOverride: cleanOverride(session?.reasoningOverride),
+    providerOverride: cleanOverride(session?.providerOverride),
+    serviceTierOverride: cleanOverride(session?.serviceTierOverride),
+  };
+}
+
+function normalizeGoal(value) {
+  if (!value || typeof value !== "object") return null;
+  const objective = String(value.objective || "").trim();
+  if (!objective) return null;
+  const status = String(value.status || "active");
+  return {
+    threadId: String(value.threadId || ""),
+    objective,
+    status,
+    tokenBudget: Number.isFinite(Number(value.tokenBudget)) ? Number(value.tokenBudget) : null,
+    tokensUsed: Number(value.tokensUsed) || 0,
+    timeUsedSeconds: Number(value.timeUsedSeconds) || 0,
+    createdAt: normalizeTimestamp(value.createdAt),
+    updatedAt: normalizeTimestamp(value.updatedAt) || Date.now(),
+  };
+}
+
+function normalizeTimestamp(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return null;
+  return number < 10_000_000_000 ? number * 1000 : number;
+}
+
+function normalizeFailure(value) {
+  if (!value || typeof value !== "object") return null;
+  const kind = String(value.kind || "").trim();
+  if (!kind) return null;
+  return {
+    kind,
+    label: String(value.label || kind),
+    recoverable: Boolean(value.recoverable),
+    message: String(value.message || ""),
+    suggestion: String(value.suggestion || ""),
+    detail: String(value.detail || ""),
+    at: Number(value.at) || Date.now(),
   };
 }
 
@@ -432,6 +880,30 @@ function updateSessionTokenUsage(session, tokenUsage) {
 function updateSessionThreadStatus(session, status) {
   if (!session) return;
   session.lastThreadStatus = String(status || "");
+  session.updatedAt = Date.now();
+  saveSessions();
+}
+
+function updateSessionGoal(session, goal) {
+  if (!session) return null;
+  session.lastGoal = normalizeGoal(goal);
+  session.updatedAt = Date.now();
+  saveSessions();
+  return session.lastGoal;
+}
+
+function updateSessionFailure(session, failure) {
+  if (!session) return null;
+  session.lastFailure = normalizeFailure(failure);
+  session.updatedAt = Date.now();
+  saveSessions();
+  return session.lastFailure;
+}
+
+function clearSessionFailure(session) {
+  if (!session) return;
+  if (!session.lastFailure) return;
+  session.lastFailure = null;
   session.updatedAt = Date.now();
   saveSessions();
 }
@@ -1075,6 +1547,7 @@ class ManagedCard {
 }
 
 function createRunState(session, event, userContent) {
+  const settings = effectiveSessionSettings(session);
   return {
     blocks: [],
     footer: "thinking",
@@ -1085,11 +1558,12 @@ function createRunState(session, event, userContent) {
     userContent,
     threadId: "",
     errorMsg: "",
+    failure: null,
     meta: {
       durationMs: undefined,
       inputTokens: undefined,
       outputTokens: undefined,
-      model: codexModelLabel,
+      model: settings.model || codexModelLabel,
       contextUsage: session.lastContextUsage || null,
       contextPeakUsage: session.lastContextPeakUsage || null,
       compactedAt: session.lastCompactedAt || null,
@@ -1265,6 +1739,18 @@ function reduceAppServerEvent(state, raw) {
     return true;
   }
 
+  if (method === "thread/goal/updated") {
+    if (params.threadId) state.threadId = params.threadId;
+    updateSessionGoal(state.session, params.goal || null);
+    return true;
+  }
+
+  if (method === "thread/goal/cleared") {
+    if (params.threadId) state.threadId = params.threadId;
+    updateSessionGoal(state.session, null);
+    return true;
+  }
+
   if (method === "turn/started") {
     if (params.threadId) state.threadId = params.threadId;
     state.footer = "thinking";
@@ -1364,10 +1850,19 @@ function reduceAppServerEvent(state, raw) {
   }
 
   if (method === "error") {
+    const failure = classifyCodexFailure(params, "Codex app-server 运行失败");
+    state.failure = failure;
+    state.errorMsg = failureDetailText(failure);
+    if (failure.recoverable && params.willRetry === true) {
+      closeStreamingBlocks(state);
+      state.footer = "reconnecting";
+      state.meta.durationMs = Date.now() - state.startedAt;
+      return true;
+    }
     closeStreamingBlocks(state);
     state.terminal = "error";
     state.footer = null;
-    state.errorMsg = errorText(params, "Codex app-server 运行失败");
+    updateSessionFailure(state.session, failure);
     state.meta.durationMs = Date.now() - state.startedAt;
     return true;
   }
@@ -1376,11 +1871,25 @@ function reduceAppServerEvent(state, raw) {
 }
 
 function markRunError(state, error) {
+  const failure = classifyCodexFailure(error);
   closeStreamingBlocks(state);
   state.terminal = "error";
   state.footer = null;
-  state.errorMsg = errorText(error).slice(0, 1500);
+  state.failure = failure;
+  state.errorMsg = failureDetailText(failure).slice(0, 1500);
   state.meta.durationMs = Date.now() - state.startedAt;
+  updateSessionFailure(state.session, failure);
+  return state;
+}
+
+function markRunRecovering(state, failure, attempt) {
+  closeStreamingBlocks(state);
+  state.terminal = "running";
+  state.footer = "recovering";
+  state.failure = normalizeFailure(failure);
+  state.errorMsg = failureDetailText(failure).slice(0, 1500);
+  state.meta.durationMs = Date.now() - state.startedAt;
+  state.meta.recoveryAttempt = attempt;
   return state;
 }
 
@@ -1389,6 +1898,15 @@ function markRunInterrupted(state) {
   state.terminal = "interrupted";
   state.footer = null;
   state.meta.durationMs = Date.now() - state.startedAt;
+  updateSessionFailure(state.session, {
+    kind: "user_stop",
+    label: "用户停止",
+    recoverable: false,
+    message: "任务已被用户停止。",
+    suggestion: "",
+    detail: "",
+    at: Date.now(),
+  });
   return state;
 }
 
@@ -1405,7 +1923,45 @@ function ensureRunDone(state, finalText = "") {
   state.terminal = "done";
   state.footer = null;
   state.meta.durationMs = Date.now() - state.startedAt;
+  clearSessionFailure(state.session);
   return state;
+}
+
+function shouldRecoverCodexRun(failure, attempt) {
+  const item = normalizeFailure(failure) || classifyCodexFailure(failure);
+  if (!CONFIG.streamRecoveryEnabled) return false;
+  if (!item.recoverable || item.kind !== "stream_disconnect") return false;
+  const maxAttempts = Math.max(0, Number(CONFIG.streamRecoveryMaxAttempts) || 0);
+  return Number(attempt || 0) < maxAttempts;
+}
+
+function recoveryEventFromFailure(event, state, failure, attempt) {
+  const original = String(state.userContent || userTextFromContent(event.content) || "").trim();
+  const partial = resultTextFromState(state);
+  const partialBlock = partial
+    ? [
+      "",
+      "上一轮已经输出过以下内容摘要/片段，请不要重复：",
+      "",
+      partial.slice(-3000),
+    ].join("\n")
+    : "";
+  const prompt = [
+    `上一轮 Codex 因「${failure.label}」在完成前中断。现在进行第 ${attempt} 次断点续跑。`,
+    "",
+    "请先根据当前 thread、工作区和已经完成的操作判断进度，然后从断点继续。",
+    "不要重复已经完成的文件修改、网页操作或已输出内容；如果无法安全继续，请直接说明原因并停止。",
+    partialBlock,
+    "",
+    "原始用户请求：",
+    "",
+    original || "(原始请求为空或只有附件)",
+  ].filter(Boolean).join("\n");
+  return {
+    ...event,
+    content: JSON.stringify({ text: prompt }),
+    attachments: [],
+  };
 }
 
 function renderRunCard(state) {
@@ -1429,7 +1985,9 @@ function renderRunCard(state) {
   } else if (state.terminal === "interrupted") {
     elements.push(noteMd(`已停止 · ${elapsed}`));
   } else if (state.terminal === "error") {
-    elements.push(noteMd(`处理失败 · ${elapsed}`));
+    const failure = state.failure || classifyCodexFailure(state.errorMsg);
+    elements.push(noteMd(`${failure.label} · ${elapsed}`));
+    elements.push(markdown(`**${failure.message}**${failure.suggestion ? `\n\n${failure.suggestion}` : ""}`));
     if (state.errorMsg) elements.push(markdown(`\`\`\`\n${truncateCardText(state.errorMsg, 1500)}\n\`\`\``));
   } else {
     elements.push(noteMd(renderDoneMeta(state)));
@@ -1917,6 +2475,8 @@ function truncateOneLine(text, max) {
 
 function renderFooterText(footer, elapsed) {
   if (footer === "compacting") return `正在压缩上下文 · ${elapsed}`;
+  if (footer === "recovering") return `正在从断流处继续 · ${elapsed}`;
+  if (footer === "reconnecting") return `Codex 连接中断，正在重连 · ${elapsed}`;
   if (footer === "tool_running") return `正在调用工具 · ${elapsed}`;
   if (footer === "streaming") return `正在输出 · ${elapsed}`;
   return `正在思考 · ${elapsed}`;
@@ -1962,9 +2522,11 @@ function isContextUsageHigher(candidate, baseline) {
 }
 
 function cardTitle(state) {
-  if (state.terminal === "error") return "Codex 处理失败";
+  if (state.terminal === "error") return state.failure?.label || "Codex 处理失败";
   if (state.terminal === "interrupted") return "Codex 已停止";
   if (state.terminal === "done") return "Codex 已完成";
+  if (state.footer === "recovering") return "Codex 正在续跑";
+  if (state.footer === "reconnecting") return "Codex 正在重连";
   if (state.footer === "tool_running") return "Codex 正在执行";
   if (state.footer === "streaming") return "Codex 正在回复";
   return "Codex 正在思考";
@@ -1972,8 +2534,10 @@ function cardTitle(state) {
 
 function cardSummary(state) {
   if (state.terminal === "interrupted") return "已停止";
-  if (state.terminal === "error") return "处理失败";
+  if (state.terminal === "error") return state.failure?.label || "处理失败";
   if (state.terminal === "done") return "已完成";
+  if (state.footer === "recovering") return "正在续跑";
+  if (state.footer === "reconnecting") return "正在重连";
   if (state.footer === "tool_running") return "正在调用工具";
   if (state.footer === "streaming") return "正在输出";
   return "正在处理";
@@ -3044,7 +3608,7 @@ function appServerThreadConfig() {
   return Object.keys(config).length ? config : null;
 }
 
-function appServerStartParams() {
+function appServerStartParams(session) {
   const params = {
     cwd: CONFIG.workspace,
     approvalPolicy: "never",
@@ -3053,23 +3617,21 @@ function appServerStartParams() {
     config: appServerThreadConfig(),
     serviceName: "codex-feishu-bridge",
   };
-  if (CONFIG.codexModel) params.model = CONFIG.codexModel;
-  return params;
+  return applySessionThreadOverrides(params, session);
 }
 
-function appServerResumeParams(threadId) {
+function appServerResumeParams(session) {
   const params = {
-    threadId,
+    threadId: session.codexThreadId,
     cwd: CONFIG.workspace,
     approvalPolicy: "never",
     sandbox: CONFIG.codexSandbox,
     config: appServerThreadConfig(),
   };
-  if (CONFIG.codexModel) params.model = CONFIG.codexModel;
-  return params;
+  return applySessionThreadOverrides(params, session);
 }
 
-function appServerTurnParams(threadId, event, userContent) {
+function appServerTurnParams(threadId, event, userContent, session) {
   const input = [];
   const text = appServerUserText(event, userContent);
   if (text) input.push({ type: "text", text, text_elements: [] });
@@ -3087,9 +3649,7 @@ function appServerTurnParams(threadId, event, userContent) {
     approvalPolicy: "never",
     sandboxPolicy: { type: "dangerFullAccess" },
   };
-  if (CONFIG.codexModel) params.model = CONFIG.codexModel;
-  if (CONFIG.codexReasoning) params.effort = CONFIG.codexReasoning;
-  return params;
+  return applySessionTurnOverrides(params, session);
 }
 
 function appServerUserText(event, userContent) {
@@ -3144,6 +3704,10 @@ function observeAppServerSessionEvent(session, message) {
     updateSessionThreadStatus(session, params.status?.type || "");
   } else if (message.method === "thread/tokenUsage/updated") {
     updateSessionTokenUsage(session, params.tokenUsage);
+  } else if (message.method === "thread/goal/updated") {
+    updateSessionGoal(session, params.goal || null);
+  } else if (message.method === "thread/goal/cleared") {
+    updateSessionGoal(session, null);
   }
 }
 
@@ -3157,7 +3721,7 @@ async function waitForAppServerNotification(client, predicate, timeoutMs) {
       continue;
     }
     if (message.method === "error") {
-      throw new Error(errorText(message.params, "codex app-server error"));
+      throw errorFromFailure(classifyCodexFailure(message.params, "codex app-server error"));
     }
     if (predicate(message)) return message;
   }
@@ -3182,7 +3746,7 @@ async function compactAppServerThread(session) {
     });
 
     await initializeAppServerClient(client);
-    const resumed = await client.request("thread/resume", appServerResumeParams(session.codexThreadId), 60_000);
+    const resumed = await client.request("thread/resume", appServerResumeParams(session), 60_000);
     const threadId = resumed?.thread?.id || session.codexThreadId;
     if (threadId && threadId !== session.codexThreadId) {
       session.codexThreadId = threadId;
@@ -3215,11 +3779,86 @@ async function compactAppServerThread(session) {
   }
 }
 
+async function withAppServerThread(session, { createIfMissing = true, timeoutMs = 60_000 } = {}, fn) {
+  if (CONFIG.runMode === "exec") {
+    throw new Error("当前 runMode=exec，没有可管理的 app-server 原生 thread。");
+  }
+  if (!createIfMissing && !session.codexThreadId) {
+    throw new Error("当前会话还没有创建 Codex 原生 thread。");
+  }
+
+  const client = new AppServerClient({ cwd: CONFIG.workspace }).start();
+  try {
+    await initializeAppServerClient(client);
+    const threadId = createIfMissing
+      ? await startOrResumeAppServerThread(client, session)
+      : (await client.request("thread/resume", appServerResumeParams(session), timeoutMs))?.thread?.id || session.codexThreadId;
+    if (threadId && threadId !== session.codexThreadId) {
+      session.codexThreadId = threadId;
+      session.updatedAt = Date.now();
+      saveSessions();
+    }
+    return await fn(client, threadId);
+  } finally {
+    await client.stop();
+  }
+}
+
+async function getAppServerGoal(session) {
+  if (!session.codexThreadId) return null;
+  return await withAppServerThread(session, { createIfMissing: false }, async (client, threadId) => {
+    const result = await client.request("thread/goal/get", { threadId }, 60_000);
+    updateSessionGoal(session, result?.goal || null);
+    return session.lastGoal;
+  });
+}
+
+async function setAppServerGoal(session, goalPatch) {
+  return await withAppServerThread(session, { createIfMissing: true }, async (client, threadId) => {
+    const result = await client.request("thread/goal/set", { threadId, ...goalPatch }, 60_000);
+    return updateSessionGoal(session, result?.goal || null);
+  });
+}
+
+async function clearAppServerGoal(session) {
+  if (!session.codexThreadId) return false;
+  return await withAppServerThread(session, { createIfMissing: false }, async (client, threadId) => {
+    const result = await client.request("thread/goal/clear", { threadId }, 60_000);
+    updateSessionGoal(session, null);
+    return Boolean(result?.cleared);
+  });
+}
+
+async function withConfigClient(fn) {
+  const client = new AppServerClient({ cwd: CONFIG.workspace }).start();
+  try {
+    await initializeAppServerClient(client);
+    return await fn(client);
+  } finally {
+    await client.stop();
+  }
+}
+
+async function writeCodexConfigValue(keyPath, value) {
+  return await withConfigClient(async (client) => client.request(
+    "config/value/write",
+    { keyPath, value, mergeStrategy: "upsert" },
+    60_000,
+  ));
+}
+
+async function listCodexModels() {
+  return await withConfigClient(async (client) => {
+    const result = await client.request("model/list", { includeHidden: false, limit: 50 }, 60_000);
+    return Array.isArray(result?.data) ? result.data : [];
+  });
+}
+
 async function startOrResumeAppServerThread(client, session) {
-  const params = appServerStartParams();
+  const params = appServerStartParams(session);
   if (session.codexThreadId) {
     try {
-      const resumed = await client.request("thread/resume", appServerResumeParams(session.codexThreadId), 60_000);
+      const resumed = await client.request("thread/resume", appServerResumeParams(session), 60_000);
       return resumed.thread.id;
     } catch (error) {
       log("WARN", "app-server thread resume failed; starting new thread", {
@@ -3239,20 +3878,26 @@ async function startOrResumeAppServerThread(client, session) {
   return started.thread.id;
 }
 
-async function runCodexAppServer(event, session, state = null, onState = null) {
+async function runCodexAppServer(event, session, state = null, onState = null, options = {}) {
   const chatId = event.chat_id;
   const messageId = event.message_id || event.id || crypto.randomUUID();
   const startedAt = Date.now();
+  const recoveryAttempt = Number(options.recoveryAttempt || 0);
   const userContent = userTextFromContent(event.content);
   const liveState = state || createRunState(session, event, userContent);
   const client = new AppServerClient({ cwd: CONFIG.workspace }).start();
-  activeCodexJobs.set(chatId, {
+  const activeJob = {
     pid: client.child.pid,
+    client,
     messageId,
+    rootMessageId: options.rootMessageId || messageId,
     startedAt,
     sessionId: session.id,
+    threadId: "",
+    turnId: "",
     mode: "app-server",
-  });
+  };
+  activeCodexJobs.set(chatId, activeJob);
 
   const flushState = async () => {
     if (state && onState) await onState(state);
@@ -3266,11 +3911,15 @@ async function runCodexAppServer(event, session, state = null, onState = null) {
   }, CONFIG.codexTimeoutMs);
 
   try {
+    const settings = effectiveSessionSettings(session);
     log("INFO", "starting codex app-server turn", {
       messageId,
       sessionId: session.id,
       existingThreadId: session.codexThreadId || "",
-      reasoning: codexReasoningLabel,
+      model: settings.model || "",
+      provider: settings.provider || "",
+      reasoning: settings.reasoning || "",
+      serviceTier: settings.serviceTier || "",
       timeoutMs: CONFIG.codexTimeoutMs,
       disableMcp: CONFIG.disableMcp,
     });
@@ -3280,12 +3929,14 @@ async function runCodexAppServer(event, session, state = null, onState = null) {
 
     const threadId = await startOrResumeAppServerThread(client, session);
     liveState.threadId = threadId;
+    activeJob.threadId = threadId;
     if (state) {
       await flushState();
     }
 
-    const turn = await client.request("turn/start", appServerTurnParams(threadId, event, userContent), 60_000);
+    const turn = await client.request("turn/start", appServerTurnParams(threadId, event, userContent, session), 60_000);
     const turnId = turn?.turn?.id || "";
+    activeJob.turnId = turnId;
 
     let completed = false;
     while (!completed && !timedOut) {
@@ -3299,12 +3950,29 @@ async function runCodexAppServer(event, session, state = null, onState = null) {
         completed = true;
       }
       if (message.method === "error") {
-        throw new Error(errorText(message.params, "codex app-server error"));
+        const failure = classifyCodexFailure(message.params, "codex app-server error");
+        if (failure.recoverable && message.params?.willRetry === true) {
+          log("WARN", "codex app-server transient error; waiting for native retry", {
+            messageId,
+            sessionId: session.id,
+            kind: failure.kind,
+            detail: failure.detail.slice(0, 1000),
+          });
+          continue;
+        }
+        throw errorFromFailure(failure);
       }
     }
 
     if (timedOut) throw new Error(`codex app-server timed out after ${Math.round(CONFIG.codexTimeoutMs / 1000)}s`);
-    if (!completed) throw new Error(`codex app-server ended before turn completed: ${client.stderrText().slice(-2000)}`);
+    if (!completed) {
+      const error = new Error(`codex app-server ended before turn completed: ${client.stderrText().slice(-2000)}`);
+      if (liveState.failure?.recoverable) error.codexFailure = liveState.failure;
+      throw error;
+    }
+    if (stoppedJobs.has(messageId) || stoppedJobs.has(activeJob.rootMessageId)) {
+      throw new Error("codex job stopped by user");
+    }
 
     const durationMs = Date.now() - startedAt;
     const finalText = resultTextFromState(liveState);
@@ -3321,9 +3989,27 @@ async function runCodexAppServer(event, session, state = null, onState = null) {
       threadId,
     };
   } catch (error) {
-    if (stoppedJobs.has(messageId)) {
+    if (stoppedJobs.has(messageId) || stoppedJobs.has(activeJob.rootMessageId)) {
       markRunInterrupted(liveState);
     } else {
+      const failure = classifyCodexFailure(error);
+      if (shouldRecoverCodexRun(failure, recoveryAttempt)) {
+        stats.recovered += 1;
+        markRunRecovering(liveState, failure, recoveryAttempt + 1);
+        if (state) await flushState();
+        log("WARN", "attempting codex stream recovery", {
+          messageId,
+          sessionId: session.id,
+          attempt: recoveryAttempt + 1,
+          kind: failure.kind,
+          detail: failure.detail.slice(0, 1000),
+        });
+        const recoveryEvent = recoveryEventFromFailure(event, liveState, failure, recoveryAttempt + 1);
+        return await runCodexAppServer(recoveryEvent, session, liveState, onState, {
+          recoveryAttempt: recoveryAttempt + 1,
+          rootMessageId: activeJob.rootMessageId,
+        });
+      }
       markRunError(liveState, error);
     }
     if (state) {
@@ -3344,6 +4030,8 @@ async function runCodex(event, session, state = null, onState = null) {
       return await runCodexAppServer(event, session, state, onState);
     } catch (error) {
       if (CONFIG.runMode !== "auto") throw error;
+      const failure = classifyCodexFailure(error);
+      if (["auth", "quota", "rate_limit", "user_stop"].includes(failure.kind)) throw error;
       log("WARN", "app-server mode failed; falling back to codex exec", {
         messageId: event.message_id || event.id,
         sessionId: session.id,
@@ -3371,6 +4059,7 @@ async function runCodex(event, session, state = null, onState = null) {
   const outFile = path.join(outputDir, `${Date.now()}-${safeFilePart(messageId)}.txt`);
   const promptFile = path.join(promptDir, `${Date.now()}-${safeFilePart(messageId)}.md`);
   fs.writeFileSync(promptFile, buildPrompt(event, session), "utf8");
+  const settings = effectiveSessionSettings(session);
 
   const args = [
     "exec",
@@ -3385,8 +4074,10 @@ async function runCodex(event, session, state = null, onState = null) {
     "--output-last-message",
     outFile,
   ];
-  if (CONFIG.codexModel) args.push("-m", CONFIG.codexModel);
-  if (CONFIG.codexReasoning) args.push("-c", `model_reasoning_effort="${CONFIG.codexReasoning}"`);
+  if (settings.model) args.push("-m", settings.model);
+  if (settings.provider) args.push("-c", `model_provider="${settings.provider}"`);
+  if (settings.reasoning) args.push("-c", `model_reasoning_effort="${settings.reasoning}"`);
+  if (settings.serviceTier) args.push("-c", `service_tier="${settings.serviceTier}"`);
   for (const attachment of Array.isArray(event.attachments) ? event.attachments : []) {
     if (attachment?.type === "image" && attachment.path && fs.existsSync(attachment.path)) {
       args.push("--image", attachment.path);
@@ -3402,7 +4093,10 @@ async function runCodex(event, session, state = null, onState = null) {
     sessionId: session.id,
     promptFile,
     outFile,
-    reasoning: codexReasoningLabel,
+    model: settings.model || "",
+    provider: settings.provider || "",
+    reasoning: settings.reasoning || "",
+    serviceTier: settings.serviceTier || "",
     timeoutMs: CONFIG.codexTimeoutMs,
     disableMcp: CONFIG.disableMcp,
   });
@@ -3557,7 +4251,7 @@ function enqueue(event) {
 }
 
 function isOutOfBandCommand(command) {
-  return command?.name === "/stop";
+  return ["/stop", "/goal", "/provider", "/model", "/fast"].includes(command?.name);
 }
 
 async function handleOutOfBandCommand(rawEvent, command) {
@@ -3567,7 +4261,7 @@ async function handleOutOfBandCommand(rawEvent, command) {
     log("WARN", "out-of-band command missing message_id", rawEvent);
     return;
   }
-  if (remember(dedupeId)) {
+  if (rememberEvent(dedupeId, messageId)) {
     log("INFO", "duplicate out-of-band command ignored", { dedupeId, messageId });
     return;
   }
@@ -3612,7 +4306,7 @@ async function handleEvent(rawEvent) {
     log("WARN", "event missing message_id", rawEvent);
     return;
   }
-  if (remember(dedupeId)) {
+  if (rememberEvent(dedupeId, messageId)) {
     log("INFO", "duplicate event ignored", { dedupeId, messageId });
     return;
   }
@@ -3720,7 +4414,7 @@ async function handleEvent(rawEvent) {
         "",
         `会话：\`${session.title}\` (${session.id})`,
         `工作区：\`${CONFIG.workspace}\``,
-        `模型：\`${CONFIG.codexModel || "默认"}\` · 推理：\`${codexReasoningLabel}\``,
+        `设置：${settingsSummary(session)}`,
       ].join("\n"),
       "ack",
       messageId,
@@ -3765,6 +4459,8 @@ async function handleEvent(rawEvent) {
       return;
     }
     stats.failed += 1;
+    const failure = classifyCodexFailure(error);
+    recordFailureStats(failure);
     if (card) {
       markRunError(cardState, error);
       await updateCard(cardState);
@@ -3776,8 +4472,10 @@ async function handleEvent(rawEvent) {
             "",
             "动态卡片最终刷新失败，以下是错误兜底：",
             "",
+            failureShortText(failure),
+            "",
             "```",
-            String(error.message || error).slice(0, 1500),
+            truncateCardText(errorText(error), 1500),
             "```",
           ].join("\n"),
           "error-fallback",
@@ -3790,10 +4488,10 @@ async function handleEvent(rawEvent) {
         [
           "**Codex 处理失败**",
           "",
-          "错误已经写入本地日志。",
+          failureShortText(failure),
           "",
           "```",
-          String(error.message || error).slice(0, 1500),
+          truncateCardText(errorText(error), 1500),
           "```",
         ].join("\n"),
         "error",
@@ -3827,6 +4525,18 @@ async function handleCommand(event, command) {
       return;
     case "/context":
       await sendMarkdown(chatId, await contextMarkdown(chatId), "context", messageId);
+      return;
+    case "/goal":
+      await handleGoalCommand(chatId, command.rest, messageId);
+      return;
+    case "/provider":
+      await handleProviderCommand(chatId, command.rest, messageId);
+      return;
+    case "/model":
+      await handleModelCommand(chatId, command.rest, messageId);
+      return;
+    case "/fast":
+      await handleFastCommand(chatId, command.rest, messageId);
       return;
     case "/compact":
       await handleCompactCommand(chatId, messageId);
@@ -4081,6 +4791,367 @@ async function handleConfirmCommand(chatId, rest, messageId) {
   );
 }
 
+async function handleGoalCommand(chatId, rest, messageId) {
+  await syncChatSessionsWithCodex(chatId);
+  const session = getSession(chatId);
+  const text = String(rest || "").trim();
+  const action = text.toLowerCase();
+
+  try {
+    if (!text || action === "status" || action === "view") {
+      const goal = await getAppServerGoal(session);
+      await sendMarkdown(chatId, goalMarkdown(session, goal), "goal-status", messageId);
+      return;
+    }
+
+    if (action === "clear" || action === "delete" || action === "remove") {
+      const cleared = await clearAppServerGoal(session);
+      await sendText(chatId, cleared ? "已清除当前 Codex goal。" : "当前会话没有可清除的 Codex goal。", "goal-clear", messageId);
+      return;
+    }
+
+    if (action === "pause") {
+      const current = await getAppServerGoal(session);
+      if (!current) {
+        await sendText(chatId, "当前会话还没有 Codex goal，先用 /goal <目标> 设置。", "goal-pause-none", messageId);
+        return;
+      }
+      const goal = await setAppServerGoal(session, { status: "paused" });
+      await sendMarkdown(chatId, goalMarkdown(session, goal, "已暂停 Codex goal"), "goal-pause", messageId);
+      return;
+    }
+
+    if (action === "resume") {
+      const current = await getAppServerGoal(session);
+      if (!current) {
+        await sendText(chatId, "当前会话还没有 Codex goal，先用 /goal <目标> 设置。", "goal-resume-none", messageId);
+        return;
+      }
+      const goal = await setAppServerGoal(session, { status: "active" });
+      await sendMarkdown(chatId, goalMarkdown(session, goal, "已恢复 Codex goal"), "goal-resume", messageId);
+      return;
+    }
+
+    if (text.length > 4000) {
+      await sendText(chatId, "Goal 目标最长 4000 字。更长说明请放到文件里，再在 goal 里引用文件路径。", "goal-too-long", messageId);
+      return;
+    }
+
+    const goal = await setAppServerGoal(session, { objective: text, status: "active" });
+    await sendMarkdown(chatId, goalMarkdown(session, goal, "已设置 Codex goal"), "goal-set", messageId);
+  } catch (error) {
+    const failure = classifyCodexFailure(error);
+    await sendMarkdown(
+      chatId,
+      [
+        "**Codex goal 操作失败**",
+        "",
+        failureShortText(failure),
+        "",
+        "```",
+        truncateCardText(errorText(error), 1500),
+        "```",
+      ].join("\n"),
+      "goal-error",
+      messageId,
+    );
+  }
+}
+
+function commandArgs(rest) {
+  return String(rest || "").trim().split(/\s+/).filter(Boolean);
+}
+
+async function handleProviderCommand(chatId, rest, messageId) {
+  await syncChatSessionsWithCodex(chatId);
+  const session = getSession(chatId);
+  const args = commandArgs(rest);
+  const action = String(args[0] || "").toLowerCase();
+
+  if (!args.length || action === "status" || action === "view" || action === "check") {
+    await sendMarkdown(chatId, providerStatusMarkdown(session), "provider-status", messageId);
+    return;
+  }
+
+  if (action === "list") {
+    await sendMarkdown(chatId, providerListMarkdown(session), "provider-list", messageId);
+    return;
+  }
+
+  if (["clear", "default", "reset"].includes(action)) {
+    setSessionOverride(session, "providerOverride", "");
+    await sendMarkdown(chatId, providerStatusMarkdown(session, "已清除当前会话的 provider 覆盖，后续使用 Codex 配置默认 provider。"), "provider-clear", messageId);
+    return;
+  }
+
+  const persist = action === "save";
+  const providerId = persist ? args[1] : args[0];
+  const provider = findCodexProvider(providerId);
+  if (!provider) {
+    await sendMarkdown(chatId, providerListMarkdown(session, `没有找到 provider：\`${providerId || ""}\``), "provider-miss", messageId);
+    return;
+  }
+
+  try {
+    if (persist) await writeCodexConfigValue("model_provider", provider.id);
+    setSessionOverride(session, "providerOverride", provider.id);
+    await sendMarkdown(
+      chatId,
+      providerStatusMarkdown(
+        session,
+        persist
+          ? `已切换并写入用户级 config.toml：\`${provider.id}\`。`
+          : `已切换当前飞书会话 provider：\`${provider.id}\`。`,
+      ),
+      "provider-set",
+      messageId,
+    );
+  } catch (error) {
+    await sendMarkdown(chatId, runtimeCommandErrorMarkdown("provider 操作失败", error), "provider-error", messageId);
+  }
+}
+
+function providerStatusMarkdown(session, title = "Codex provider") {
+  const settings = effectiveSessionSettings(session);
+  const provider = findCodexProvider(settings.provider);
+  const lines = [
+    `**${title}**`,
+    "",
+    `当前会话：\`${session.title || "未命名会话"}\` (${session.id})`,
+    `当前 provider：\`${settings.provider || "默认"}\`${session.providerOverride ? "（会话覆盖）" : "（配置默认）"}`,
+    provider ? providerDetailLine(provider) : "provider 未在当前 config.toml 中找到；如果它来自 profile 或外部配置，请确认 Bridge 启动参数也选择了对应配置。",
+    "",
+    `当前运行设置：${settingsSummary(session)}`,
+    "",
+    "用法：`/provider list`、`/provider <providerId>`、`/provider save <providerId>`、`/provider clear`",
+  ];
+  return lines.join("\n");
+}
+
+function providerListMarkdown(session, title = "Codex provider 列表") {
+  const settings = effectiveSessionSettings(session);
+  const providers = listCodexProviders();
+  const lines = [`**${title}**`, ""];
+  for (const provider of providers) {
+    const marker = provider.id === settings.provider ? " ← 当前" : "";
+    lines.push(`- \`${provider.id}\`${marker}：${provider.name || provider.id}；${providerDetailLine(provider)}`);
+  }
+  lines.push("");
+  lines.push("只切当前飞书会话：`/provider <providerId>`");
+  lines.push("同时写入用户级 config.toml：`/provider save <providerId>`");
+  return lines.join("\n");
+}
+
+function providerDetailLine(provider) {
+  if (!provider) return "";
+  const parts = [];
+  if (provider.baseUrl) parts.push(`base_url ${provider.baseUrl}`);
+  if (provider.requiresOpenaiAuth) parts.push("使用 OpenAI 登录/API key");
+  if (provider.envKey) {
+    parts.push(`${provider.envKey} ${provider.envVisible ? "当前 Bridge 进程可见" : "当前 Bridge 进程不可见，设置环境变量后需要重启 Bridge"}`);
+  } else if (!provider.requiresOpenaiAuth) {
+    parts.push("未配置 env_key");
+  }
+  if (provider.builtIn) parts.push("内置");
+  return parts.join("；") || "无额外信息";
+}
+
+async function handleModelCommand(chatId, rest, messageId) {
+  await syncChatSessionsWithCodex(chatId);
+  const session = getSession(chatId);
+  let args = commandArgs(rest);
+  const action = String(args[0] || "").toLowerCase();
+
+  if (!args.length || action === "status" || action === "view") {
+    await sendMarkdown(chatId, modelStatusMarkdown(session), "model-status", messageId);
+    return;
+  }
+
+  if (action === "list") {
+    try {
+      await sendMarkdown(chatId, await modelListMarkdown(session), "model-list", messageId);
+    } catch (error) {
+      await sendMarkdown(chatId, runtimeCommandErrorMarkdown("model/list 查询失败", error), "model-list-error", messageId);
+    }
+    return;
+  }
+
+  if (["clear", "default", "reset"].includes(action)) {
+    session.modelOverride = "";
+    session.reasoningOverride = "";
+    session.updatedAt = Date.now();
+    saveSessions();
+    await sendMarkdown(chatId, modelStatusMarkdown(session, "已清除当前会话的 model/reasoning 覆盖。"), "model-clear", messageId);
+    return;
+  }
+
+  const persist = action === "save";
+  if (persist) args = args.slice(1);
+  const first = String(args[0] || "").toLowerCase();
+
+  try {
+    if (first === "effort" || first === "reasoning") {
+      const effort = normalizeReasoningEffort(args[1]);
+      if (!effort) {
+        await sendText(chatId, "用法：`/model effort <none|minimal|low|medium|high|xhigh>`", "model-effort-usage", messageId);
+        return;
+      }
+      if (persist) await writeCodexConfigValue("model_reasoning_effort", effort);
+      setSessionOverride(session, "reasoningOverride", effort);
+      await sendMarkdown(chatId, modelStatusMarkdown(session, persist ? "已切换并保存 reasoning。" : "已切换当前会话 reasoning。"), "model-effort", messageId);
+      return;
+    }
+
+    const model = cleanOverride(args[0]);
+    const effort = normalizeReasoningEffort(args[1]);
+    if (!model) {
+      await sendText(chatId, "用法：`/model <模型ID> [推理强度]`，例如 `/model gpt-5.5 xhigh`。", "model-usage", messageId);
+      return;
+    }
+    if (args[1] && !effort) {
+      await sendText(chatId, "推理强度只能是：`none`、`minimal`、`low`、`medium`、`high`、`xhigh`。", "model-effort-invalid", messageId);
+      return;
+    }
+
+    if (model.toLowerCase() === "default") {
+      session.modelOverride = "";
+    } else {
+      session.modelOverride = model;
+      if (persist) await writeCodexConfigValue("model", model);
+    }
+    if (effort) {
+      session.reasoningOverride = effort;
+      if (persist) await writeCodexConfigValue("model_reasoning_effort", effort);
+    }
+    session.updatedAt = Date.now();
+    saveSessions();
+    await sendMarkdown(chatId, modelStatusMarkdown(session, persist ? "已切换并保存 model 设置。" : "已切换当前会话 model 设置。"), "model-set", messageId);
+  } catch (error) {
+    await sendMarkdown(chatId, runtimeCommandErrorMarkdown("model 操作失败", error), "model-error", messageId);
+  }
+}
+
+function normalizeReasoningEffort(value) {
+  const text = String(value || "").trim().toLowerCase();
+  return REASONING_EFFORTS.has(text) ? text : "";
+}
+
+function modelStatusMarkdown(session, title = "Codex model") {
+  const settings = effectiveSessionSettings(session);
+  return [
+    `**${title}**`,
+    "",
+    `当前会话：\`${session.title || "未命名会话"}\` (${session.id})`,
+    `模型：\`${settings.model || "默认"}\`${session.modelOverride ? "（会话覆盖）" : "（配置默认）"}`,
+    `推理强度：\`${settings.reasoning || "默认"}\`${session.reasoningOverride ? "（会话覆盖）" : "（配置默认）"}`,
+    `provider：\`${settings.provider || "默认"}\``,
+    `速度：\`${displayServiceTier(settings.serviceTier) || "默认"}\``,
+    "",
+    "用法：`/model list`、`/model <模型ID> [推理强度]`、`/model effort <强度>`、`/model save <模型ID> [强度]`、`/model clear`",
+  ].join("\n");
+}
+
+async function modelListMarkdown(session) {
+  const settings = effectiveSessionSettings(session);
+  const models = await listCodexModels();
+  const lines = ["**Codex model 列表**", ""];
+  for (const model of models.slice(0, 30)) {
+    const id = model.id || model.model || "";
+    if (!id) continue;
+    const marker = id === settings.model ? " ← 当前" : model.isDefault ? " ← 默认" : "";
+    const efforts = Array.isArray(model.supportedReasoningEfforts)
+      ? model.supportedReasoningEfforts.map((item) => item.reasoningEffort).filter(Boolean).join("/")
+      : "";
+    const fast = Array.isArray(model.serviceTiers) && model.serviceTiers.length
+      ? `；速度档：${model.serviceTiers.map((tier) => `${tier.name || tier.id}(${tier.id})`).join(", ")}`
+      : "";
+    lines.push(`- \`${id}\`${marker}：${model.displayName || id}${efforts ? `；推理 ${efforts}` : ""}${fast}`);
+  }
+  lines.push("");
+  lines.push("切当前会话：`/model <模型ID> [推理强度]`，例如 `/model gpt-5.5 xhigh`");
+  return lines.join("\n");
+}
+
+async function handleFastCommand(chatId, rest, messageId) {
+  await syncChatSessionsWithCodex(chatId);
+  const session = getSession(chatId);
+  const args = commandArgs(rest);
+  let action = String(args[0] || "").toLowerCase();
+  let persist = false;
+  if (action === "save") {
+    persist = true;
+    action = String(args[1] || "").toLowerCase();
+  }
+
+  if (!action || action === "status" || action === "view") {
+    await sendMarkdown(chatId, fastStatusMarkdown(session), "fast-status", messageId);
+    return;
+  }
+
+  try {
+    if (action === "on") {
+      if (persist) await writeCodexConfigValue("service_tier", FAST_SERVICE_TIER);
+      setSessionOverride(session, "serviceTierOverride", FAST_SERVICE_TIER);
+      await sendMarkdown(chatId, fastStatusMarkdown(session, persist ? "已开启并保存 Fast 模式。" : "已开启当前会话 Fast 模式。"), "fast-on", messageId);
+      return;
+    }
+
+    if (action === "off") {
+      if (persist) await writeCodexConfigValue("service_tier", STANDARD_SERVICE_TIER);
+      setSessionOverride(session, "serviceTierOverride", STANDARD_SERVICE_TIER);
+      await sendMarkdown(chatId, fastStatusMarkdown(session, persist ? "已关闭并保存 Fast 模式。" : "已关闭当前会话 Fast 模式。"), "fast-off", messageId);
+      return;
+    }
+
+    if (action === "clear" || action === "default" || action === "reset") {
+      setSessionOverride(session, "serviceTierOverride", "");
+      await sendMarkdown(chatId, fastStatusMarkdown(session, "已清除当前会话速度覆盖，后续使用 Codex 配置默认值。"), "fast-clear", messageId);
+      return;
+    }
+
+    if (action === "tier") {
+      const tier = cleanOverride(args[persist ? 2 : 1]);
+      if (!tier) {
+        await sendText(chatId, "用法：`/fast tier <serviceTier>`，例如 `/fast tier priority`。", "fast-tier-usage", messageId);
+        return;
+      }
+      setSessionOverride(session, "serviceTierOverride", tier);
+      await sendMarkdown(chatId, fastStatusMarkdown(session, `已切换当前会话 serviceTier：\`${tier}\`。`), "fast-tier", messageId);
+      return;
+    }
+
+    await sendText(chatId, "用法：`/fast on`、`/fast off`、`/fast status`、`/fast clear`。", "fast-usage", messageId);
+  } catch (error) {
+    await sendMarkdown(chatId, runtimeCommandErrorMarkdown("fast 操作失败", error), "fast-error", messageId);
+  }
+}
+
+function fastStatusMarkdown(session, title = "Codex Fast 模式") {
+  const settings = effectiveSessionSettings(session);
+  const tier = displayServiceTier(settings.serviceTier);
+  const fastOn = tier === "fast";
+  return [
+    `**${title}**`,
+    "",
+    `当前会话：\`${session.title || "未命名会话"}\` (${session.id})`,
+    `速度：\`${tier || "默认"}\`${session.serviceTierOverride ? "（会话覆盖）" : "（配置默认）"}`,
+    `状态：${fastOn ? "Fast 开启" : tier === "standard" ? "Standard 关闭 Fast" : "跟随 Codex 配置"}`,
+    "说明：Fast 是 Codex 官方 1.5x 速度模式，会消耗更多额度；API key provider 走标准 API 计费，不能使用 ChatGPT Fast credits。",
+    "",
+    "用法：`/fast on`、`/fast off`、`/fast status`、`/fast save on`、`/fast clear`",
+  ].join("\n");
+}
+
+function runtimeCommandErrorMarkdown(title, error) {
+  return [
+    `**${title}**`,
+    "",
+    "```",
+    truncateCardText(errorText(error), 1500),
+    "```",
+  ].join("\n");
+}
+
 async function stopCurrentJob(chatId, messageId) {
   const job = activeCodexJobs.get(chatId);
   if (!job) {
@@ -4088,6 +5159,28 @@ async function stopCurrentJob(chatId, messageId) {
     return;
   }
   stoppedJobs.add(job.messageId);
+  if (job.rootMessageId) stoppedJobs.add(job.rootMessageId);
+
+  if (job.mode === "app-server" && job.client && job.threadId && job.turnId) {
+    try {
+      await job.client.request("turn/interrupt", { threadId: job.threadId, turnId: job.turnId }, 15_000);
+      setTimeout(() => {
+        const current = activeCodexJobs.get(chatId);
+        if (current?.pid === job.pid) terminateProcessTree(job.pid, true);
+      }, 5000).unref?.();
+      await sendText(chatId, "已请求 Codex 原生停止当前任务；如果没有及时结束，Bridge 会自动兜底强制停止。", "stop", messageId);
+      return;
+    } catch (error) {
+      log("WARN", "codex turn interrupt failed; falling back to process termination", {
+        chatId,
+        pid: job.pid,
+        threadId: job.threadId,
+        turnId: job.turnId,
+        error: String(error.message || error).slice(0, 1000),
+      });
+    }
+  }
+
   terminateProcessTree(job.pid, false);
   setTimeout(() => terminateProcessTree(job.pid, true), 5000).unref?.();
   await sendText(chatId, "已停止当前 Codex 任务。", "stop", messageId);
@@ -4161,6 +5254,10 @@ function helpMarkdown() {
     "`/now` — 查看当前状态（工作区、会话、任务、队列）",
     "`/how` — 同 `/now`",
     "`/context` — 查看当前 Codex 原生 thread、token 和压缩状态",
+    "`/goal [目标]` — 查看或设置 Codex goal；支持 `/goal pause`、`/goal resume`、`/goal clear`",
+    "`/provider [id]` — 查看或切换当前会话 provider；`/provider list` 列出可用 provider",
+    "`/model [模型ID] [推理强度]` — 查看或切换当前会话模型；`/model list` 列出模型",
+    "`/fast on|off|status` — 切换或查看 Codex Fast 速度模式",
     "`/compact` — 触发当前原生 thread 的上下文压缩",
     "`/sessions` — 列出飞书会话和 Codex 侧边栏可见会话",
     "`/switch <序号或ID>` — 切换到已有 Codex 会话",
@@ -4171,6 +5268,56 @@ function helpMarkdown() {
     "",
     "直接发送文本会进入当前会话。群聊里可以 @codex助手 后发送文本。",
   ].join("\n");
+}
+
+function goalStatusLabel(status) {
+  switch (String(status || "")) {
+    case "active": return "进行中";
+    case "paused": return "已暂停";
+    case "blocked": return "受阻";
+    case "usageLimited": return "使用量受限";
+    case "budgetLimited": return "预算受限";
+    case "complete": return "已完成";
+    default: return status || "未知";
+  }
+}
+
+function goalSummary(goal) {
+  const item = normalizeGoal(goal);
+  if (!item) return "未设置";
+  const objective = item.objective.length > 80 ? `${item.objective.slice(0, 80)}...` : item.objective;
+  const budget = item.tokenBudget ? ` · 预算 ${formatNumber(item.tokenBudget)} tokens` : "";
+  const used = item.tokensUsed ? ` · 已用 ${formatNumber(item.tokensUsed)} tokens` : "";
+  return `${goalStatusLabel(item.status)} · ${objective}${used}${budget}`;
+}
+
+function goalMarkdown(session, goal, title = "Codex goal") {
+  const item = normalizeGoal(goal);
+  if (!item) {
+    return [
+      `**${title}**`,
+      "",
+      "当前会话还没有设置 Codex goal。",
+      "",
+      `会话：${session.title || "未命名会话"} (${session.id})`,
+      `原生 thread：${session.codexThreadId ? `\`${session.codexThreadId}\`` : "未创建"}`,
+      "",
+      "用法：`/goal <目标>`、`/goal pause`、`/goal resume`、`/goal clear`",
+    ].join("\n");
+  }
+
+  return [
+    `**${title}**`,
+    "",
+    `状态：${goalStatusLabel(item.status)}`,
+    `目标：${item.objective}`,
+    `原生 thread：\`${item.threadId || session.codexThreadId || ""}\``,
+    item.tokenBudget ? `预算：${formatNumber(item.tokenBudget)} tokens` : "",
+    item.tokensUsed ? `已用：${formatNumber(item.tokensUsed)} tokens` : "",
+    item.updatedAt ? `更新：${formatTime(item.updatedAt)}` : "",
+    "",
+    "可用操作：`/goal pause`、`/goal resume`、`/goal clear`",
+  ].filter(Boolean).join("\n");
 }
 
 async function statusMarkdown(chatId) {
@@ -4188,14 +5335,39 @@ async function statusMarkdown(chatId) {
     `登录授权：${authStatus}`,
     `当前聊天绑定：${session.title || "未命名会话"} (${session.id})`,
     `原生 thread：${session.codexThreadId ? `\`${session.codexThreadId}\`` : "未创建"}`,
+    `Goal：${goalSummary(session.lastGoal)}`,
     `上下文：${context}`,
     `运行中：${job ? `是，已运行 ${formatDuration(Date.now() - job.startedAt)}` : "否"}`,
     `队列：${pendingEvents.length}`,
+    `最近失败：${session.lastFailure ? `${session.lastFailure.label} (${formatTime(session.lastFailure.at)})` : "无"}`,
+    `失败统计：${failureStatsSummary()}`,
     "",
     `工作区：\`${CONFIG.workspace}\``,
-    `模型：\`${CONFIG.codexModel || "默认"}\` · 推理：\`${codexReasoningLabel}\``,
+    `设置：${settingsSummary(session)}`,
     `运行模式：\`${CONFIG.runMode}\` · 沙箱：\`${CONFIG.codexSandbox}\` · MCP：${CONFIG.disableMcp ? "禁用" : "启用"}`,
   ].join("\n");
+}
+
+function failureStatsSummary() {
+  const entries = Object.entries(stats.failuresByKind || {}).filter(([, count]) => Number(count) > 0);
+  if (!entries.length) return "无";
+  return entries
+    .map(([kind, count]) => `${failureKindLabel(kind)} ${count}`)
+    .join(" · ");
+}
+
+function failureKindLabel(kind) {
+  switch (kind) {
+    case "auth": return "鉴权";
+    case "quota": return "额度";
+    case "rate_limit": return "限流";
+    case "stream_disconnect": return "断流";
+    case "feishu_card": return "飞书卡片";
+    case "timeout": return "超时";
+    case "app_server": return "app-server";
+    case "user_stop": return "用户停止";
+    default: return kind || "未知";
+  }
 }
 
 function sessionContextSummary(session) {
@@ -4225,10 +5397,13 @@ function tokenUsageSummary(tokenUsage) {
 function contextStatusBlock(session) {
   return [
     `原生 thread：${session.codexThreadId ? `已绑定 (${compactThreadId(session.codexThreadId)})` : "未创建"}`,
+    `设置：${settingsSummary(session)}`,
     `模式：${CONFIG.runMode} · MCP：${CONFIG.disableMcp ? "禁用" : "启用"}`,
     `状态：${session.lastThreadStatus || "未知"}`,
+    `Goal：${goalSummary(session.lastGoal)}`,
     `上下文：${sessionContextSummary(session)}`,
     `token：${tokenUsageSummary(session.lastTokenUsage)}`,
+    `最近失败：${session.lastFailure ? `${session.lastFailure.label} (${formatTime(session.lastFailure.at)})` : "无"}`,
   ];
 }
 
@@ -4291,14 +5466,15 @@ async function nowMarkdown(chatId) {
     `工作区：\`${CONFIG.workspace}\``,
     `会话：\`${session.title}\` (${session.id})`,
     `原生 thread：${session.codexThreadId ? `\`${session.codexThreadId}\`` : "未创建"}`,
+    `Goal：${goalSummary(session.lastGoal)}`,
     `上下文：${sessionContextSummary(session)}`,
     `历史：${session.messages.length} 条`,
     `运行中：${job ? `是，已运行 ${formatDuration(Date.now() - job.startedAt)}` : "否"}`,
     `队列：${pendingEvents.length}`,
-    `模型：\`${CONFIG.codexModel || "默认"}\` · 推理：\`${codexReasoningLabel}\``,
+    `设置：${settingsSummary(session)}`,
     `运行模式：\`${CONFIG.runMode}\` · 沙箱：\`${CONFIG.codexSandbox}\` · MCP：${CONFIG.disableMcp ? "禁用" : "启用"}`,
     "",
-    `本轮启动后：事件 ${stats.events} · 命令 ${stats.commands} · 完成 ${stats.answered} · 失败 ${stats.failed}`,
+    `本轮启动后：事件 ${stats.events} · 命令 ${stats.commands} · 完成 ${stats.answered} · 失败 ${stats.failed} · 断流续跑 ${stats.recovered}`,
   ].join("\n");
 }
 
@@ -4343,12 +5519,15 @@ async function sessionsMarkdown(chatId) {
 }
 
 function formatAnswer(result, session) {
+  const settings = effectiveSessionSettings(session);
   const meta = [
     formatDuration(result.durationMs),
     result.tokens ? `${result.tokens} tokens` : "",
     result.mode ? `mode ${result.mode}` : "",
     result.threadId ? `thread ${result.threadId}` : "",
-    codexModelLabel,
+    settings.model || codexModelLabel,
+    settings.provider ? `provider ${settings.provider}` : "",
+    settings.serviceTier ? `speed ${displayServiceTier(settings.serviceTier)}` : "",
     `会话 ${session.id}`,
   ].filter(Boolean).join(" · ");
   return [
@@ -4491,6 +5670,7 @@ function shutdown(code = 0) {
   try {
     fs.rmSync(stopPath, { force: true });
   } catch {}
+  releaseSingleInstanceLock();
   setTimeout(() => process.exit(code), 500).unref?.();
 }
 
@@ -4513,6 +5693,7 @@ process.on("exit", () => {
   try {
     fs.rmSync(stopPath, { force: true });
   } catch {}
+  releaseSingleInstanceLock();
 });
 
 startConsumer();
