@@ -1,89 +1,87 @@
 # Codex Feishu Bridge
 
-把飞书机器人接到本机 Codex 的 Windows 桥接器。
+Codex Feishu Bridge connects a Feishu bot to a local Codex runtime. It receives Feishu messages, downloads supported attachments into a dedicated workspace, starts or continues a Codex task, and posts progress plus final responses back to Feishu.
 
-这个项目的目标很直接：在一台 Windows 电脑上运行本地 Codex，把飞书里的普通消息、图片和文件转成 Codex 任务，再把 Codex 的过程和最终回答回传到飞书。旧设备只要拿到这个仓库链接，按 README 配置一次，就可以复现同样的“飞书远程控制 Codex”效果。
+The `main` branch is the Windows deployment branch. It includes PowerShell startup scripts, Windows Scheduled Task watchdog support, QR-code based Feishu bot registration, multi-instance runtime isolation, queue controls, and operational diagnostics.
 
-## 适用场景
+## Contents
 
-- 在手机、平板或另一台电脑的飞书里远程调用家里/办公室 Windows 机器上的 Codex。
-- 给多个飞书机器人分别绑定不同 Codex workspace，例如 `codex-assistant-1`、`codex-assistant-2`。
-- 让 Codex 在一个稳定目录里处理飞书发来的文档、图片、代码和长任务。
-- 用飞书动态卡片查看 Codex 正在做什么，任务结束后折叠过程并保留最终答案。
+- [Architecture](#architecture)
+- [Capabilities](#capabilities)
+- [Repository Layout](#repository-layout)
+- [Prerequisites](#prerequisites)
+- [Feishu App Requirements](#feishu-app-requirements)
+- [Installation](#installation)
+- [Recommended Setup: QR Registration](#recommended-setup-qr-registration)
+- [Manual Setup With an Existing Feishu App](#manual-setup-with-an-existing-feishu-app)
+- [Watchdog and Startup](#watchdog-and-startup)
+- [Multi-Instance Deployment](#multi-instance-deployment)
+- [Feishu Commands](#feishu-commands)
+- [Configuration Reference](#configuration-reference)
+- [Runtime Files](#runtime-files)
+- [Logs and Troubleshooting](#logs-and-troubleshooting)
+- [Updating an Existing Deployment](#updating-an-existing-deployment)
+- [Security Notes](#security-notes)
+- [Pre-Publish Checklist](#pre-publish-checklist)
 
-## 当前能力
+## Architecture
 
-- 飞书事件消费：默认监听 `im.message.receive_v1`；可通过 `CODEX_FEISHU_EVENT_KEYS` 额外监听撤回事件。
-- Codex 运行模式：默认使用 `codex app-server --listen stdio://`，必要时可切到 `exec`。
-- 动态卡片：任务运行中实时更新，完成后展示最终答案、耗时、token/context 信息。
-- 附件处理：支持飞书图片和文件下载到 workspace，再交给 Codex 读取。
-- 会话管理：支持新建、切换、列出、同步 Codex 可见线程。
-- 安全删除：删除本地 Codex thread 前需要按 `/confirm delete <序号>` 二次确认。
-- 多实例：同一台 Windows 机器可以跑多个机器人/profile/workspace。
-- 看门狗：Windows 计划任务定期检查桥进程和飞书 consumer，不健康时自动重启。
+The bridge is designed for a local trusted machine:
 
-## 目录说明
+1. `lark-cli` subscribes to Feishu bot events.
+2. `codex-feishu-bridge.mjs` receives message events from `lark-cli`.
+3. The bridge downloads image/file attachments into a workspace.
+4. The bridge sends the user request to Codex, normally through `codex app-server --listen stdio://`.
+5. The bridge updates Feishu interactive cards while Codex is running.
+6. The bridge posts the final answer to Feishu and records session state locally.
+7. A Windows Scheduled Task watchdog checks the bridge and Feishu event consumer and restarts unhealthy instances.
 
-| 文件或目录 | 作用 |
+Each bot instance should use its own Feishu app/profile, workspace, state directory, log directory, and watchdog task.
+
+## Capabilities
+
+- Feishu message event consumption through `im.message.receive_v1`.
+- Optional multi-event subscription through `CODEX_FEISHU_EVENT_KEYS`.
+- Optional best-effort handling for recalled messages before queued messages execute.
+- Codex `app-server` mode by default, with `exec` fallback available.
+- Feishu interactive cards for running status, tool calls, elapsed time, context usage, and final answers.
+- Image and file attachment download into the active workspace.
+- Local bridge sessions with commands to create, switch, list, reset, compact, and delete sessions.
+- Queue visibility and cancellation commands for long-running or accidentally queued requests.
+- Multi-instance operation on the same Windows host.
+- Scheduled watchdog health checks and automatic restart.
+
+## Repository Layout
+
+| Path | Purpose |
 |---|---|
-| `codex-feishu-bridge.mjs` | 核心桥接器，负责飞书事件、附件、Codex app-server、动态卡片、会话、命令处理 |
-| `start-codex-feishu-bridge.ps1` | 启动桥接器，设置 workspace、profile、sandbox、reasoning、超时、卡片等参数 |
-| `stop-codex-feishu-bridge.ps1` | 停止桥接器，优先优雅退出，必要时结束进程 |
-| `watch-codex-feishu-bridge.ps1` | 看门狗健康检查和自动重启 |
-| `install-codex-feishu-watchdog.ps1` | 注册/卸载 Windows 计划任务 |
-| `register-codex-feishu-bot.mjs` | 通过飞书二维码注册新机器人，并写入 lark-cli profile |
-| `register-codex-feishu-bot.ps1` | 注册器的 PowerShell 包装，会自动安装 Node 依赖 |
-| `*-hidden.vbs` | 后台隐藏窗口启动器 |
-| `.env.example` | 可选环境变量示例，不要提交真实 `.env` |
-| `docs/` | 补充部署和故障文档 |
-| `workspace/` | 示例 workspace 占位目录，真实内容不会提交 |
+| `codex-feishu-bridge.mjs` | Main bridge process. Handles Feishu events, attachments, Codex execution, cards, sessions, queueing, and commands. |
+| `register-codex-feishu-bot.mjs` | QR-code based Feishu bot registration and `lark-cli` profile setup. |
+| `register-codex-feishu-bot.ps1` | PowerShell wrapper for bot registration; installs Node dependencies when needed. |
+| `start-codex-feishu-bridge.ps1` | Starts one bridge instance with workspace, profile, runtime, timeout, card, and MCP settings. |
+| `stop-codex-feishu-bridge.ps1` | Stops one bridge instance. It requests graceful shutdown first and force-stops only when needed. |
+| `watch-codex-feishu-bridge.ps1` | Watchdog health check and repair script. |
+| `install-codex-feishu-watchdog.ps1` | Installs or removes the Windows Scheduled Task watchdog. |
+| `start-codex-feishu-bridge-hidden.vbs` | Hidden-window bridge launcher used by background workflows. |
+| `watch-codex-feishu-bridge-hidden.vbs` | Hidden-window watchdog launcher used by Scheduled Tasks. |
+| `.env.example` | Optional environment variable reference. Do not commit a real `.env`. |
+| `docs/` | Supplementary deployment and troubleshooting documents. |
+| `workspace/` | Placeholder workspace directory. Real workspace data is not intended for source control. |
 
-## 不会提交的内容
+## Prerequisites
 
-这些内容必须只留在本机：
+Install and verify the following on the Windows host:
 
-- 飞书 App Secret、access token。
-- `%USERPROFILE%\.lark-cli\config.json`。
-- `%USERPROFILE%\.codex\auth.json`、`config.toml`、sessions、SQLite state。
-- `%LOCALAPPDATA%\CodexFeishuBridge` 下的日志、PID、sessions、二维码注册文件。
-- `.codex-feishu-runtime`、`.codex-feishu-attachments`、Codex 输出、飞书下载附件。
+1. Windows 10 or Windows 11.
+2. PowerShell 5 or newer.
+3. Node.js 20 or newer and npm.
+4. Git.
+5. A working Codex CLI or Microsoft Store Codex installation.
+6. `lark-cli`.
+7. Python 3 or `sqlite3` CLI. One of them is required for reading the local Codex SQLite state used by `/list`.
+8. A Feishu account that can create or authorize a custom Feishu app.
 
-## 旧设备给 Codex 的提示词
-
-把下面这段发给旧设备上的 Codex，并把 `<REPO_URL>` 换成真实 GitHub 地址：
-
-```text
-请在这台 Windows 设备上安装并配置 Codex Feishu Bridge。
-
-仓库地址：<REPO_URL>
-
-目标效果：
-1. 克隆仓库到 %USERPROFILE%\Documents\Codex\tools\codex-feishu-bridge。
-2. 按 README 检查 Node.js 20+、npm、PowerShell、Codex CLI、lark-cli。
-3. 使用 register-codex-feishu-bot.ps1 注册一个飞书机器人，实例名用 codex-assistant-1。
-4. workspace 使用 %USERPROFILE%\Documents\Codex\workspaces\feishu-bridge-codex-assistant-1。
-5. 默认使用 app-server、danger-full-access、reasoning=xhigh、Codex 总时长超时禁用、无进展超时 3600 秒、动态卡片开启、MCP 开启。
-6. 安装 watchdog 开机/解锁/每 5 分钟自动检查。
-7. 最后在飞书里发送 /status 和一条普通消息验证。
-
-不要提交或展示任何 app secret、token、.codex auth、.lark-cli config、日志、sessions 或附件内容。
-如果本机 codex 不在 PATH，请先定位 codex.exe 或 codex.cmd，然后设置 CODEX_CLI_BIN 再启动。
-```
-
-## 前置要求
-
-在目标 Windows 设备上准备：
-
-1. Windows 10/11。
-2. PowerShell 5+。
-3. Node.js 20+ 和 npm。
-4. Git。
-5. 已安装并登录可用的官方 Microsoft Store 版 Codex，或其他可用的 Codex CLI。
-6. `lark-cli`。
-7. Python 3 或 `sqlite3` CLI。用于读取 Codex 本地 `state_5.sqlite`，从而让 `/list` 显示本机 Codex 侧边栏已有会话。
-8. 可以扫码管理飞书自建应用的飞书账号。
-
-检查命令：
+Verify the local toolchain:
 
 ```powershell
 node -v
@@ -94,28 +92,53 @@ codex --version
 python --version
 ```
 
-安装 lark-cli：
+Install `lark-cli` if it is not already available:
 
 ```powershell
 npm install -g @larksuite/cli
 lark-cli --version
 ```
 
-启动脚本默认会优先自动查找官方 Microsoft Store 版 `OpenAI.Codex`。由于 WindowsApps 保护目录下的内部 CLI 不能被 Node 直接 `spawn`，脚本会把 `app\resources\codex.exe` 同步到 `%LOCALAPPDATA%\CodexFeishuBridge\official-codex-cli\...`，再从这个本地缓存副本启动。这样 Codex 自动更新、版本目录变化后，桥接器仍会使用当前官方版本。
-
-如果要显式指定其他 Codex CLI，例如测试版、Codex++ 或 Rebuild，再设置 `CODEX_CLI_BIN`：
+If `codex` is not on `PATH`, either add it to `PATH` or set `CODEX_CLI_BIN` before starting the bridge:
 
 ```powershell
 $env:CODEX_CLI_BIN = "C:\Path\To\codex.exe"
 ```
 
-也可以把这行写进用户环境变量，之后重新打开 PowerShell。`CODEX_CLI_BIN` 的优先级最高。
+The Windows scripts automatically try to locate the official Microsoft Store package `OpenAI.Codex`. Because WindowsApps package directories cannot always be spawned directly by Node, the script copies the internal `app\resources\codex.exe` into `%LOCALAPPDATA%\CodexFeishuBridge\official-codex-cli\...` and starts that local copy. Explicit `CODEX_CLI_BIN` still has the highest priority.
 
-如果 `python --version` 不可用，也可以安装 `sqlite3` CLI。二者有一个可用即可；桥接器会优先调用 `sqlite3`，没有时自动 fallback 到 Python 标准库 `sqlite3`。
+## Feishu App Requirements
 
-## 安装仓库
+The Feishu app used by the bot must have:
 
-推荐固定放到：
+- Bot capability enabled.
+- Event subscription for `im.message.receive_v1`.
+- Message receive/send permissions required by `lark-cli` and the Feishu Open Platform SDK.
+- Message resource download permissions when attachments are used.
+- Installation or release to the target Feishu tenant.
+
+For recalled-message handling:
+
+- The bridge contains optional support for `im.message.recalled_v1`.
+- The Feishu app must subscribe to `im.message.recalled_v1`.
+- The local `lark-cli` version must recognize that EventKey.
+- If the event is not available, the bridge still performs a best-effort message status check before executing queued messages.
+
+Keep the default event list unless both Feishu and local `lark-cli` support the additional event:
+
+```powershell
+-EventKeys "im.message.receive_v1"
+```
+
+Only enable recalled events when supported:
+
+```powershell
+-EventKeys "im.message.receive_v1,im.message.recalled_v1"
+```
+
+## Installation
+
+Clone the repository to a stable tools directory:
 
 ```powershell
 New-Item -ItemType Directory -Force "$env:USERPROFILE\Documents\Codex\tools" | Out-Null
@@ -125,31 +148,30 @@ npm install
 npm run check
 ```
 
-## 推荐方式：二维码自动注册机器人
+Use `main` for Windows deployments:
 
-这个方式最接近当前好用的效果。它会：
+```powershell
+git switch main
+git pull --ff-only
+```
 
-- 调用飞书开放平台 SDK 申请注册二维码。
-- 打开本机二维码 HTML。
-- 扫码后获得 app id 和 app secret。
-- 写入 lark-cli profile。
-- 启动桥接器。
-- 可选安装 watchdog。
+## Recommended Setup: QR Registration
 
-### PowerShell 直接注册并启动 Bot
+The QR registration script creates or authorizes a Feishu app through the Feishu Open Platform QR-code flow, writes a `lark-cli` profile, starts the bridge, and can install the watchdog.
 
-在目标 Windows 设备的 PowerShell 里复制下面这段。只需要改 `$BotName` 和 `$BotDisplayName`；脚本会生成飞书注册二维码，扫码后自动创建 profile、启动 bridge，并安装 watchdog。
+Choose an instance name and display name:
 
 ```powershell
 Set-Location "$env:USERPROFILE\Documents\Codex\tools\codex-feishu-bridge"
 
 $BotName = "codex-assistant-1"
 $BotDisplayName = "Codex Assistant 1"
+$Workspace = "$env:USERPROFILE\Documents\Codex\workspaces\feishu-bridge-$BotName"
 
 .\register-codex-feishu-bot.ps1 `
   -Name $BotName `
   -DisplayName $BotDisplayName `
-  -Workspace "$env:USERPROFILE\Documents\Codex\workspaces\feishu-bridge-$BotName" `
+  -Workspace $Workspace `
   -RunMode app-server `
   -Reasoning xhigh `
   -CodexTimeoutSeconds 0 `
@@ -157,63 +179,23 @@ $BotDisplayName = "Codex Assistant 1"
   -InstallStartup
 ```
 
-例如第二个 Bot，把变量改成：
-
-```powershell
-$BotName = "codex-assistant-2"
-$BotDisplayName = "Codex Assistant 2"
-```
-
-旧设备上也一样，只是在旧设备本机 PowerShell 里运行；例如：
-
-```powershell
-$BotName = "codex-assistant-old3"
-$BotDisplayName = "Codex Assistant Old 3"
-```
-
-也可以直接写死参数：
-
-```powershell
-Set-Location "$env:USERPROFILE\Documents\Codex\tools\codex-feishu-bridge"
-
-.\register-codex-feishu-bot.ps1 `
-  -Name codex-assistant-1 `
-  -DisplayName "Codex Assistant 1" `
-  -Workspace "$env:USERPROFILE\Documents\Codex\workspaces\feishu-bridge-codex-assistant-1" `
-  -RunMode app-server `
-  -Reasoning xhigh `
-  -CodexTimeoutSeconds 0 `
-  -CodexIdleTimeoutSeconds 3600 `
-  -InstallStartup
-```
-
-完成后在飞书里给机器人发送：
+After the QR flow completes, verify from Feishu:
 
 ```text
 /status
 ```
 
-再发送一条普通消息，例如：
+Then send a normal non-command message:
 
 ```text
-你是谁？请用一句话说明你现在连接的是本机 Codex。
+请用一句话说明你当前连接的是哪台本机 Codex。
 ```
 
-注意：普通任务不要以 `/` 开头。以 `/` 开头的文本会被桥接器当成命令。
+Messages beginning with `/` are interpreted as bridge commands. Ordinary Codex tasks should not start with `/`.
 
-## 手动方式：使用已有飞书应用
+## Manual Setup With an Existing Feishu App
 
-如果你已经在飞书开放平台有应用，可以手动配置。
-
-飞书应用侧至少需要：
-
-- 启用机器人能力。
-- 订阅事件：`im.message.receive_v1`。
-- 如需“撤回排队消息后不再执行”，飞书应用还应订阅 `im.message.recalled_v1`，并确保本机 `lark-cli event list` 能识别该 EventKey；否则 Bridge 只能在真正执行前 best-effort 重新检查消息状态。
-- 给机器人授予收消息、发消息、下载消息资源所需权限。
-- 发布或安装到对应企业/租户。
-
-然后写入 lark-cli profile：
+If the Feishu app already exists, add its credentials to a `lark-cli` profile:
 
 ```powershell
 $profile = "codex-assistant-1"
@@ -229,7 +211,7 @@ $appSecret | lark-cli profile add `
 lark-cli profile list
 ```
 
-启动桥接器：
+Start the bridge:
 
 ```powershell
 .\start-codex-feishu-bridge.ps1 `
@@ -242,193 +224,306 @@ lark-cli profile list
   -CodexIdleTimeoutSeconds 3600
 ```
 
-## 开机自启和看门狗
+## Watchdog and Startup
 
-安装：
+Install a watchdog for one instance:
 
 ```powershell
 .\install-codex-feishu-watchdog.ps1 `
   -Name codex-assistant-1 `
   -LarkProfile codex-assistant-1 `
-  -Workspace "$env:USERPROFILE\Documents\Codex\workspaces\feishu-bridge-codex-assistant-1"
+  -Workspace "$env:USERPROFILE\Documents\Codex\workspaces\feishu-bridge-codex-assistant-1" `
+  -CodexTimeoutSeconds 0 `
+  -CodexIdleTimeoutSeconds 3600 `
+  -WatchdogTimeoutSeconds 180
 ```
 
-卸载：
+The watchdog is registered as a Windows Scheduled Task. It runs at login, unlock, and periodically. It checks:
+
+- Whether the bridge PID exists.
+- Whether the PID command line matches the expected bridge instance.
+- Whether `lark-cli event status --json` reports the expected event consumer.
+- Whether another watchdog copy appears stuck beyond the configured watchdog timeout.
+
+Remove the watchdog:
 
 ```powershell
 .\install-codex-feishu-watchdog.ps1 -Name codex-assistant-1 -Uninstall
 ```
 
-看门狗会在登录、解锁、以及每 5 分钟触发一次。它会检查：
-
-- `bridge.pid` 对应进程是否存在。
-- 进程命令行是否像桥接器。
-- `lark-cli event status --json` 里是否存在运行中的 `im.message.receive_v1` consumer。
-
-## 多机器人
-
-每个机器人建议使用独立的：
-
-- `Name`
-- lark-cli profile
-- workspace
-- watchdog task
-- `%LOCALAPPDATA%\CodexFeishuBridge\instances\<Name>` 状态目录
-
-示例：
+Run one watchdog check manually:
 
 ```powershell
+.\watch-codex-feishu-bridge.ps1 `
+  -Name codex-assistant-1 `
+  -LarkProfile codex-assistant-1 `
+  -Workspace "$env:USERPROFILE\Documents\Codex\workspaces\feishu-bridge-codex-assistant-1"
+```
+
+## Multi-Instance Deployment
+
+Use a separate instance name, Feishu app/profile, workspace, and watchdog for each bot.
+
+Example naming:
+
+| Instance | Feishu display name | Workspace |
+|---|---|---|
+| `codex-assistant-1` | `Codex Assistant 1` | `%USERPROFILE%\Documents\Codex\workspaces\feishu-bridge-codex-assistant-1` |
+| `codex-assistant-2` | `Codex Assistant 2` | `%USERPROFILE%\Documents\Codex\workspaces\feishu-bridge-codex-assistant-2` |
+| `codex-assistant-lab1` | `Codex Assistant Lab 1` | `%USERPROFILE%\Documents\Codex\workspaces\feishu-bridge-codex-assistant-lab1` |
+
+Register another instance:
+
+```powershell
+$BotName = "codex-assistant-2"
+$BotDisplayName = "Codex Assistant 2"
+$Workspace = "$env:USERPROFILE\Documents\Codex\workspaces\feishu-bridge-$BotName"
+
 .\register-codex-feishu-bot.ps1 `
-  -Name codex-assistant-2 `
-  -DisplayName "Codex Assistant 2" `
-  -Workspace "$env:USERPROFILE\Documents\Codex\workspaces\feishu-bridge-codex-assistant-2" `
+  -Name $BotName `
+  -DisplayName $BotDisplayName `
+  -Workspace $Workspace `
+  -RunMode app-server `
+  -Reasoning xhigh `
+  -CodexTimeoutSeconds 0 `
+  -CodexIdleTimeoutSeconds 3600 `
   -InstallStartup
 ```
 
-## 常用命令
+## Feishu Commands
 
-| 飞书命令 | 作用 |
+| Command | Description |
 |---|---|
-| `/help` | 显示帮助 |
-| `/status` | 查看桥、飞书、Codex、workspace、当前 session、goal、最近失败状态 |
-| `/now` 或 `/how` | 查看当前是否有任务运行 |
-| `/new [title]` | 新建本地桥接 session |
-| `/list` 或 `/sessions` | 列出 session 和可见 Codex threads |
-| `/switch <序号或id>` | 切换 session |
-| `/context` | 查看当前 Codex thread/context/token 状态 |
-| `/goal [目标]` | 查看或设置 Codex goal；支持 `/goal pause`、`/goal resume`、`/goal clear` |
-| `/provider [id]` | 查看或切换当前飞书会话的 Codex provider；`/provider save <id>` 写入用户级 `config.toml` |
-| `/model [模型ID] [推理强度]` | 查看或切换当前飞书会话的模型和 reasoning；`/model list` 列出模型 |
-| `/fast on/off/status` | 查看或切换 Codex Fast 速度模式；`/fast save on` 写入用户级 `config.toml` |
-| `/compact` | 压缩当前 Codex 原生 thread |
-| `/reset` | 清空当前桥接 session 绑定 |
-| `/delete <序号或id>` | 请求删除本地 Codex thread，需要二次确认 |
-| `/confirm delete <序号>` | 确认删除 |
-| `/stop` | 停止当前运行中的 Codex 任务；app-server 模式优先使用原生 `turn/interrupt` |
-| `/stop queue` | 停止当前任务，并清空当前聊天等待队列 |
-| `/stop all` | 停止当前任务，并清空本 Bot 全部等待队列 |
-| `/queue` | 查看等待队列 |
-| `/clearqueue [all]` | 清空当前聊天或全部等待队列 |
+| `/help` | Show available commands. |
+| `/status` | Show bridge, Feishu, Codex, workspace, session, goal, queue, and recent failure status. |
+| `/now` or `/how` | Show whether a task is currently running. |
+| `/new [title]` | Create a local bridge session. |
+| `/list` or `/sessions` | List local bridge sessions and visible Codex threads. |
+| `/switch <index-or-id>` | Switch the current Feishu chat to another session. |
+| `/context` | Show current Codex thread/context/token state. |
+| `/goal [goal]` | View or set a Codex goal. Supports `/goal pause`, `/goal resume`, and `/goal clear`. |
+| `/provider [id]` | View or switch the Codex provider for the current Feishu chat. Use `/provider save <id>` to persist to the user Codex config. |
+| `/model [model-id] [reasoning]` | View or switch model and reasoning. Use `/model list` to list configured models. |
+| `/fast on/off/status` | View or switch Codex Fast mode. Use `/fast save on` to persist. |
+| `/compact` | Compact the current native Codex thread. |
+| `/reset` | Clear the current bridge session binding. |
+| `/delete <index-or-id>` | Request deletion of a local Codex thread. Requires confirmation. |
+| `/confirm delete <index>` | Confirm a pending delete request. |
+| `/stop` | Stop the currently running Codex task. In `app-server` mode the bridge first uses native `turn/interrupt`. |
+| `/queue` | Show queued messages that have not started yet. It does not show the currently running task. |
+| `/clearqueue` | Clear queued messages for the current Feishu chat. The current task is not stopped. |
+| `/clearqueue all` | Clear queued messages for all chats handled by this bot instance. |
+| `/stop queue` | Stop the current task and clear the current chat queue. |
+| `/stop all` | Stop the current task and clear all queues for this bot instance. |
 
-## 默认参数
+Queue behavior:
 
-| 参数 | 默认值 | 说明 |
+- A message sent while Codex is already running is queued.
+- `/queue` shows pending messages only, not the active task.
+- Recalled queued messages are skipped when the bridge can detect recall status.
+- Use `/clearqueue` for queued messages that should not run.
+- Use `/stop all` when both the active task and queued messages should be cancelled.
+
+## Configuration Reference
+
+### Script Parameters
+
+| Parameter | Default | Applies to | Description |
+|---|---|---|---|
+| `-Name` | empty/default instance | start, stop, watchdog, registration | Instance name. Named instances use isolated runtime directories. |
+| `-LarkProfile` | current/default profile | start, watchdog | `lark-cli` profile name. Usually the same as `-Name`. |
+| `-Workspace` | instance-specific default | start, watchdog, registration | Directory where Codex runs and attachments are stored. |
+| `-Sandbox` | `danger-full-access` | start, watchdog, registration | Codex sandbox mode. |
+| `-RunMode` | `app-server` | start, watchdog, registration | Codex runtime mode. |
+| `-Reasoning` | `xhigh` | start, watchdog, registration | Reasoning setting passed to Codex. |
+| `-EventKeys` | `im.message.receive_v1` | start, watchdog, registration | Comma-separated Feishu event keys. |
+| `-CodexTimeoutSeconds` | `0` | start, watchdog, registration | Hard total timeout. `0` disables the total timeout. |
+| `-CodexIdleTimeoutSeconds` | `3600` | start, watchdog, registration | Idle/no-progress timeout. |
+| `-WatchdogTimeoutSeconds` | `180` | watchdog install/check | Timeout used to clean stuck watchdog processes. |
+| `-DisableMcp` | off | start, watchdog, registration | Disables Codex MCP loading for spawned Codex processes. |
+| `-InstallStartup` | off | registration | Installs watchdog after QR registration. |
+
+### Environment Variables
+
+| Variable | Default | Description |
 |---|---|---|
-| `RunMode` | `app-server` | 使用 Codex app-server 原生线程 |
-| `Sandbox` | `danger-full-access` | 本机私有桥默认全权限，依靠私有机器人和专用 workspace 做边界 |
-| `Reasoning` | `xhigh` | 传给 Codex 的推理强度 |
-| `CodexTimeoutSeconds` | `0` | 禁用总时长硬超时；Codex 正常持续工作时不主动中断 |
-| `CodexIdleTimeoutSeconds` | `3600` | 默认 1 小时无进展才判定卡住 |
-| `CODEX_FEISHU_EVENT_KEYS` | `im.message.receive_v1` | 逗号分隔的事件列表；额外启用撤回实时处理时可设为 `im.message.receive_v1,im.message.recalled_v1` |
-| `MaxConcurrent` | `1` | 同实例串行处理 |
-| 动态卡片 | 开启 | 用飞书卡片显示过程和结果 |
-| MCP | 开启 | 需要关闭时传 `-DisableMcp` |
-| 附件大小 | 50 MB | 超过会跳过 |
-| 附件暂存 | 30 分钟 | 只发附件不发文字时，等待下一条文字触发处理 |
-| 断流恢复 | 开启，最多 1 次 | `CODEX_FEISHU_STREAM_RECOVERY=0` 可关闭；只对 Codex 流式连接断开续跑，不对额度/鉴权/限流续跑 |
+| `CODEX_FEISHU_WORKSPACE` | current directory or script workspace | Codex workspace. |
+| `CODEX_FEISHU_INSTANCE_NAME` | `default` | Runtime instance name. |
+| `CODEX_FEISHU_LARK_PROFILE` | empty | `lark-cli` profile. |
+| `CODEX_FEISHU_SANDBOX` | `danger-full-access` | Codex sandbox mode. |
+| `CODEX_FEISHU_RUN_MODE` | `app-server` | Runtime mode. |
+| `CODEX_FEISHU_EVENT_KEYS` | `im.message.receive_v1` | Comma-separated Feishu event keys. |
+| `CODEX_FEISHU_MODEL` | empty | Optional model override. |
+| `CODEX_FEISHU_REASONING` | `xhigh` | Reasoning setting. |
+| `CODEX_FEISHU_CODEX_TIMEOUT_MS` | `0` | Hard total timeout in milliseconds. |
+| `CODEX_FEISHU_CODEX_IDLE_TIMEOUT_MS` | `3600000` | Idle/no-progress timeout in milliseconds. |
+| `CODEX_FEISHU_MAX_CONCURRENT` | `1` | Concurrent tasks per instance. Serial processing is recommended. |
+| `CODEX_FEISHU_MAX_REPLY_CHARS` | `6000` | Maximum direct reply length before truncation/card folding. |
+| `CODEX_FEISHU_CARD_MODE` | `1` | Enable Feishu interactive cards. |
+| `CODEX_FEISHU_CARD_THROTTLE_MS` | `400` | Minimum interval between card updates. |
+| `CODEX_FEISHU_SHOW_FINAL_STEPS` | `1` | Include final step summary when available. |
+| `CODEX_FEISHU_REPLY_TO_MESSAGE` | `0` | Reply directly to the triggering message. |
+| `CODEX_FEISHU_REPLY_IN_THREAD` | `0` | Reply in Feishu thread when supported. |
+| `CODEX_FEISHU_DISABLE_MCP` | `0` | Disable MCP when set to a non-zero value. |
+| `CODEX_FEISHU_SYNC_SESSIONS_FROM_CODEX` | `1` | Sync sessions from local Codex state. |
+| `CODEX_FEISHU_SYNC_SIDEBAR` | `0` | Optional sidebar sync. |
+| `CODEX_FEISHU_MAX_FILE_ATTACHMENT_BYTES` | `52428800` | Maximum downloaded file size. |
+| `CODEX_FEISHU_RECALLED_MESSAGE_TTL_MS` | `86400000` | In-memory recalled-message marker lifetime. |
+| `CODEX_CLI_BIN` | auto-detected | Explicit Codex CLI path. |
+| `LARK_CLI_BIN` | `lark-cli` on `PATH` | Explicit `lark-cli` path. |
 
-`/provider`、`/model`、`/fast` 默认只改当前飞书会话，适合手机端临时切换。加 `save` 才会通过 Codex app-server 写入用户级 `~/.codex/config.toml`。如果 provider 使用 `env_key`，环境变量必须对当前 Bridge 进程可见；如果是在 Windows 设置里刚新增的环境变量，需要重启对应 Bot/Bridge 后子进程才能继承。
+## Runtime Files
 
-## Runtime 位置
-
-默认实例：
+Default instance:
 
 ```text
 %LOCALAPPDATA%\CodexFeishuBridge\state
 %LOCALAPPDATA%\CodexFeishuBridge\logs
 ```
 
-命名实例：
+Named instance:
 
 ```text
 %LOCALAPPDATA%\CodexFeishuBridge\instances\<Name>\state
 %LOCALAPPDATA%\CodexFeishuBridge\instances\<Name>\logs
 ```
 
-workspace 示例：
+Workspace attachment directory:
 
 ```text
-%USERPROFILE%\Documents\Codex\workspaces\feishu-bridge-codex-assistant-1
+<Workspace>\.codex-feishu-attachments\<date>\<message-id>\
 ```
 
-附件会下载到 workspace 下的：
+`exec` fallback prompt/output directory:
 
 ```text
-.codex-feishu-attachments\<date>\<message-id>\
+<Workspace>\.codex-feishu-runtime\codex-prompts\
+<Workspace>\.codex-feishu-runtime\codex-output\
 ```
 
-Codex exec fallback 的 prompt/output 会写入：
+Do not commit runtime files, logs, attachments, local sessions, or credentials.
 
-```text
-.codex-feishu-runtime\codex-prompts\
-.codex-feishu-runtime\codex-output\
-```
+## Logs and Troubleshooting
 
-## 日志和排错
-
-查看桥接器输出：
+Set the target instance:
 
 ```powershell
-$root = "$env:LOCALAPPDATA\CodexFeishuBridge\instances\codex-assistant-1"
+$name = "codex-assistant-1"
+$root = "$env:LOCALAPPDATA\CodexFeishuBridge\instances\$name"
+```
+
+Read logs:
+
+```powershell
 Get-Content "$root\logs\bridge.stdout.log" -Tail 80
 Get-Content "$root\logs\bridge.stderr.log" -Tail 80
 Get-Content "$root\logs\watchdog.log" -Tail 80
 ```
 
-确认进程：
+Check bridge PID and process:
 
 ```powershell
-Get-Content "$env:LOCALAPPDATA\CodexFeishuBridge\instances\codex-assistant-1\state\bridge.pid"
+Get-Content "$root\state\bridge.pid"
 Get-Process node
-lark-cli event status --json
 ```
 
-常见问题：
+Check Feishu event consumers:
 
-| 现象 | 处理 |
+```powershell
+lark-cli --profile codex-assistant-1 event status --json
+```
+
+Common issues:
+
+| Symptom | Suggested action |
 |---|---|
-| 飞书没回复 | 先发 `/status`；再看 `bridge.stderr.log` 和 `lark-cli event status --json` |
-| `lark-cli not found` | 重新执行 `npm install -g @larksuite/cli`，并确认新 PowerShell 能找到 `lark-cli` |
-| `codex` 找不到 | 优先确认官方 Microsoft Store 版 `OpenAI.Codex` 已安装；如需使用其他 CLI，再设置 `CODEX_CLI_BIN`，或把 `codex.exe`/`codex.cmd` 加入 PATH |
-| `/list` 只显示默认会话 | 确认 `%USERPROFILE%\.codex\state_5.sqlite` 存在，并确认 `python --version` 或 `sqlite3 --version` 至少一个可用 |
-| 机器人收到消息但 Codex 不动 | 检查 Codex 登录状态、`%USERPROFILE%\.codex\auth.json`、workspace 是否可信 |
-| 卡片显示 Codex 断流 | Bridge 会先等待 Codex 原生重连；最终仍失败时只对流式连接断开自动续跑一次。额度、鉴权、限流不会自动续跑 |
-| 撤回了排队消息但仍担心被执行 | 优先启用 `im.message.recalled_v1`；同时可发送 `/queue` 查看队列，或 `/clearqueue` 清空当前聊天等待队列 |
-| 卡片一直显示正在回复，但新消息又能开始 | 这通常是 Bridge 重启导致旧运行状态丢失；新版会在启动时把上次残留的运行卡片标记为已中断 |
-| 以 `/你好` 开头没有正常回答 | 这是命令解析；普通任务不要用 `/` 开头 |
-| watchdog 反复重启 | 看 `watchdog.log` 里 consumer 或 bridge 失败原因 |
+| Feishu receives no reply | Send `/status`; inspect `bridge.stderr.log`; check `lark-cli event status --json`. |
+| `lark-cli` not found | Run `npm install -g @larksuite/cli`; reopen PowerShell; verify `lark-cli --version`. |
+| Codex not found | Verify Codex installation; set `CODEX_CLI_BIN` if auto-detection cannot find it. |
+| `/list` only shows default or no Codex threads | Confirm `%USERPROFILE%\.codex\state_5.sqlite` exists and Python 3 or `sqlite3` is available. |
+| Bot receives messages but Codex does not start | Check Codex login/auth state, workspace trust, and bridge stderr logs. |
+| Card reports Codex stream interruption | The bridge waits for native reconnect and can retry a stream interruption once. Quota, authentication, and rate-limit errors are not retried as stream recovery. |
+| Recalled queued messages may still be present | Use `/queue`, `/clearqueue`, or `/stop all`. Enable `im.message.recalled_v1` only when Feishu and `lark-cli` support it. |
+| Old card appears stuck after restart | Newer bridge versions mark stale running cards as interrupted during startup recovery. |
+| Message starting with `/` is not handled as a normal task | Leading `/` triggers command parsing. Send ordinary tasks without a leading slash. |
+| Watchdog repeatedly restarts | Inspect `watchdog.log` to determine whether the bridge process or Feishu consumer is failing. |
 
-## 安全边界
+If `rg` is not installed, use PowerShell `Select-String` for repository searches:
 
-这个桥接器会让能给机器人发消息的人触发本机 Codex 执行。它默认使用 `danger-full-access`，适合个人私有、可信群聊和专用机器，不适合公开群或陌生人可访问的机器人。
+```powershell
+Get-ChildItem -Recurse -File | Select-String -Pattern "search text"
+```
 
-建议：
+## Updating an Existing Deployment
 
-- 每个机器人只加入可信会话。
-- 给桥接器使用专用 workspace。
-- 不要把飞书 app secret、Codex auth、日志、sessions、附件提交到 GitHub。
-- 不要在公共仓库 issue 或截图中暴露二维码注册结果、app id/app secret、token。
-- 多人使用前，先明确谁有权让本机执行命令和读写文件。
-
-## 更新项目
-
-在目标设备上更新：
+Update source and dependencies:
 
 ```powershell
 Set-Location "$env:USERPROFILE\Documents\Codex\tools\codex-feishu-bridge"
-git pull
+git switch main
+git pull --ff-only
 npm install
 npm run check
-.\stop-codex-feishu-bridge.ps1 -Name codex-assistant-1
-.\start-codex-feishu-bridge.ps1 -Name codex-assistant-1 -LarkProfile codex-assistant-1 -Workspace "$env:USERPROFILE\Documents\Codex\workspaces\feishu-bridge-codex-assistant-1"
 ```
 
-## 发布到 GitHub 前检查
+Restart one instance so it loads the new code:
+
+```powershell
+.\stop-codex-feishu-bridge.ps1 -Name codex-assistant-1
+.\start-codex-feishu-bridge.ps1 `
+  -Name codex-assistant-1 `
+  -LarkProfile codex-assistant-1 `
+  -Workspace "$env:USERPROFILE\Documents\Codex\workspaces\feishu-bridge-codex-assistant-1" `
+  -CodexTimeoutSeconds 0 `
+  -CodexIdleTimeoutSeconds 3600
+```
+
+If the watchdog script or parameters changed, reinstall the watchdog:
+
+```powershell
+.\install-codex-feishu-watchdog.ps1 `
+  -Name codex-assistant-1 `
+  -LarkProfile codex-assistant-1 `
+  -Workspace "$env:USERPROFILE\Documents\Codex\workspaces\feishu-bridge-codex-assistant-1" `
+  -CodexTimeoutSeconds 0 `
+  -CodexIdleTimeoutSeconds 3600 `
+  -WatchdogTimeoutSeconds 180
+```
+
+Do not restart an instance that is currently running an important Codex task unless interruption is acceptable.
+
+## Security Notes
+
+This bridge allows Feishu users who can message the bot to trigger local Codex execution. The default `danger-full-access` mode is intended for private, trusted deployments only.
+
+Recommended controls:
+
+- Add each bot only to trusted chats.
+- Use a dedicated workspace per bot instance.
+- Do not expose the bot in public groups.
+- Do not commit Feishu app secrets, access tokens, `lark-cli` configuration, Codex authentication, logs, sessions, or attachments.
+- Do not publish QR registration result pages or screenshots containing credentials.
+- Review workspace contents before allowing another user to control an instance.
+
+## Pre-Publish Checklist
+
+Run checks before publishing or pushing repository changes:
 
 ```powershell
 git status --short
-rg -n "app_secret|tenant_access_token|user_access_token|authorization|bearer|\\.lark-cli|\\.codex|AppData|<your-windows-user>" .
 npm run check
 ```
 
-确认没有 secrets、日志、附件和个人状态文件后再提交和推送。
+Search for common secret patterns. Use `rg` when available:
+
+```powershell
+rg -n "app_secret|tenant_access_token|user_access_token|authorization|bearer|\\.lark-cli|\\.codex|AppData|<your-windows-user>" .
+```
+
+PowerShell fallback:
+
+```powershell
+Get-ChildItem -Recurse -File | Select-String -Pattern "app_secret|tenant_access_token|user_access_token|authorization|bearer|\\.lark-cli|\\.codex|AppData|<your-windows-user>"
+```
+
+Confirm that no credentials, logs, attachments, generated runtime data, or personal state files are included before committing.
