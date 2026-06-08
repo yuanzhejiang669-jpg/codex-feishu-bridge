@@ -22,7 +22,8 @@ const CONFIG = {
   codexSandbox: process.env.CODEX_FEISHU_SANDBOX || "danger-full-access",
   codexModel: process.env.CODEX_FEISHU_MODEL || "",
   codexReasoning: process.env.CODEX_FEISHU_REASONING || "xhigh",
-  codexTimeoutMs: Number(process.env.CODEX_FEISHU_CODEX_TIMEOUT_MS || `${10 * 60_000}`),
+  codexTimeoutMs: parseDurationMs(process.env.CODEX_FEISHU_CODEX_TIMEOUT_MS, 0),
+  codexIdleTimeoutMs: parseDurationMs(process.env.CODEX_FEISHU_CODEX_IDLE_TIMEOUT_MS, 60 * 60_000),
   disableMcp: (process.env.CODEX_FEISHU_DISABLE_MCP || "0") !== "0",
   maxConcurrent: Number(process.env.CODEX_FEISHU_MAX_CONCURRENT || "1"),
   maxReplyChars: Number(process.env.CODEX_FEISHU_MAX_REPLY_CHARS || "6000"),
@@ -159,6 +160,31 @@ function parseToolEnv(envName, fallback) {
     }
   }
   return { command: value, argsPrefix: [] };
+}
+
+function parseDurationMs(value, fallbackMs) {
+  const raw = String(value ?? "").trim().toLowerCase();
+  if (!raw) return fallbackMs;
+  if (["0", "none", "never", "infinite", "infinity", "off", "disabled", "false"].includes(raw)) return 0;
+  const match = raw.match(/^([0-9]+(?:\.[0-9]+)?)(ms|s|m|h)?$/);
+  if (!match) return fallbackMs;
+  const number = Number(match[1]);
+  if (!Number.isFinite(number) || number < 0) return fallbackMs;
+  const unit = match[2] || "ms";
+  const factor = unit === "h" ? 60 * 60_000 : unit === "m" ? 60_000 : unit === "s" ? 1000 : 1;
+  return Math.round(number * factor);
+}
+
+function hasDuration(ms) {
+  return Number.isFinite(ms) && ms > 0;
+}
+
+function durationConfigLabel(ms) {
+  return hasDuration(ms) ? `${Math.round(ms / 1000)}s` : "disabled";
+}
+
+function clearTimer(timer) {
+  if (timer) clearTimeout(timer);
 }
 
 function withLarkProfile(tool, profile) {
@@ -3712,9 +3738,10 @@ function observeAppServerSessionEvent(session, message) {
 }
 
 async function waitForAppServerNotification(client, predicate, timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const remaining = Math.max(1, deadline - Date.now());
+  const useDeadline = hasDuration(timeoutMs);
+  const deadline = Date.now() + (useDeadline ? timeoutMs : 0);
+  while (!useDeadline || Date.now() < deadline) {
+    const remaining = useDeadline ? Math.max(1, deadline - Date.now()) : 1000;
     const message = await client.nextNotification(Math.min(1000, remaining));
     if (!message) {
       if (client.closed) break;
@@ -3728,25 +3755,75 @@ async function waitForAppServerNotification(client, predicate, timeoutMs) {
   return null;
 }
 
+function createRunWatchdog(label, onTimeout, {
+  totalMs = CONFIG.codexTimeoutMs,
+  idleMs = CONFIG.codexIdleTimeoutMs,
+} = {}) {
+  let timedOut = false;
+  let reason = "";
+  let totalTimer = null;
+  let idleTimer = null;
+
+  const fire = (message) => {
+    if (timedOut) return;
+    timedOut = true;
+    reason = message;
+    onTimeout?.(message);
+  };
+
+  const armIdleTimer = () => {
+    clearTimer(idleTimer);
+    idleTimer = null;
+    if (!hasDuration(idleMs)) return;
+    idleTimer = setTimeout(() => {
+      fire(`${label} idle timed out after ${Math.round(idleMs / 1000)}s without progress`);
+    }, idleMs);
+    idleTimer.unref?.();
+  };
+
+  if (hasDuration(totalMs)) {
+    totalTimer = setTimeout(() => {
+      fire(`${label} timed out after ${Math.round(totalMs / 1000)}s`);
+    }, totalMs);
+    totalTimer.unref?.();
+  }
+  armIdleTimer();
+
+  return {
+    touch: armIdleTimer,
+    get timedOut() {
+      return timedOut;
+    },
+    get reason() {
+      return reason;
+    },
+    clear() {
+      clearTimer(totalTimer);
+      clearTimer(idleTimer);
+    },
+  };
+}
+
 async function compactAppServerThread(session) {
   const client = new AppServerClient({ cwd: CONFIG.workspace }).start();
   const startedAt = Date.now();
-  let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
+  const watchdog = createRunWatchdog("codex app-server compaction", () => {
     void client.stop();
     setTimeout(() => terminateProcessTree(client.child?.pid, true), 5000).unref?.();
-  }, CONFIG.codexTimeoutMs);
+  });
 
   try {
     log("INFO", "starting codex app-server compaction", {
       sessionId: session.id,
       threadId: session.codexThreadId || "",
       timeoutMs: CONFIG.codexTimeoutMs,
+      idleTimeoutMs: CONFIG.codexIdleTimeoutMs,
     });
 
     await initializeAppServerClient(client);
+    watchdog.touch();
     const resumed = await client.request("thread/resume", appServerResumeParams(session), 60_000);
+    watchdog.touch();
     const threadId = resumed?.thread?.id || session.codexThreadId;
     if (threadId && threadId !== session.codexThreadId) {
       session.codexThreadId = threadId;
@@ -3755,26 +3832,28 @@ async function compactAppServerThread(session) {
     }
 
     await client.request("thread/compact/start", { threadId }, 60_000);
+    watchdog.touch();
     const compacted = await waitForAppServerNotification(
       client,
       (message) => {
+        watchdog.touch();
         observeAppServerSessionEvent(session, message);
         if (message.method === "thread/compacted") {
           return !message.params?.threadId || message.params.threadId === threadId;
         }
         return message.method === "item/completed" && message.params?.item?.type === "contextCompaction";
       },
-      CONFIG.codexTimeoutMs,
+      hasDuration(CONFIG.codexTimeoutMs) ? CONFIG.codexTimeoutMs : CONFIG.codexIdleTimeoutMs,
     );
 
-    if (timedOut || !compacted) {
-      throw new Error(`codex app-server compaction timed out after ${Math.round(CONFIG.codexTimeoutMs / 1000)}s`);
+    if (watchdog.timedOut || !compacted) {
+      throw new Error(watchdog.reason || `codex app-server compaction idle timed out after ${Math.round(CONFIG.codexIdleTimeoutMs / 1000)}s`);
     }
 
     markSessionCompacted(session);
     return { threadId, durationMs: Date.now() - startedAt };
   } finally {
-    clearTimeout(timer);
+    watchdog.clear();
     await client.stop();
   }
 }
@@ -3903,12 +3982,10 @@ async function runCodexAppServer(event, session, state = null, onState = null, o
     if (state && onState) await onState(state);
   };
 
-  let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
+  const watchdog = createRunWatchdog("codex app-server", () => {
     void client.stop();
     setTimeout(() => terminateProcessTree(client.child?.pid, true), 5000).unref?.();
-  }, CONFIG.codexTimeoutMs);
+  });
 
   try {
     const settings = effectiveSessionSettings(session);
@@ -3921,13 +3998,16 @@ async function runCodexAppServer(event, session, state = null, onState = null, o
       reasoning: settings.reasoning || "",
       serviceTier: settings.serviceTier || "",
       timeoutMs: CONFIG.codexTimeoutMs,
+      idleTimeoutMs: CONFIG.codexIdleTimeoutMs,
       disableMcp: CONFIG.disableMcp,
     });
 
     const initialized = await initializeAppServerClient(client);
+    watchdog.touch();
     liveState.meta.model = initialized.userAgent || liveState.meta.model;
 
     const threadId = await startOrResumeAppServerThread(client, session);
+    watchdog.touch();
     liveState.threadId = threadId;
     activeJob.threadId = threadId;
     if (state) {
@@ -3935,16 +4015,18 @@ async function runCodexAppServer(event, session, state = null, onState = null, o
     }
 
     const turn = await client.request("turn/start", appServerTurnParams(threadId, event, userContent, session), 60_000);
+    watchdog.touch();
     const turnId = turn?.turn?.id || "";
     activeJob.turnId = turnId;
 
     let completed = false;
-    while (!completed && !timedOut) {
+    while (!completed && !watchdog.timedOut) {
       const message = await client.nextNotification(1000);
       if (!message) {
         if (client.closed) break;
         continue;
       }
+      watchdog.touch();
       if (reduceAppServerEvent(liveState, message)) await flushState();
       if (message.method === "turn/completed" && (!turnId || message.params?.turn?.id === turnId)) {
         completed = true;
@@ -3964,7 +4046,7 @@ async function runCodexAppServer(event, session, state = null, onState = null, o
       }
     }
 
-    if (timedOut) throw new Error(`codex app-server timed out after ${Math.round(CONFIG.codexTimeoutMs / 1000)}s`);
+    if (watchdog.timedOut) throw new Error(watchdog.reason || "codex app-server timed out");
     if (!completed) {
       const error = new Error(`codex app-server ended before turn completed: ${client.stderrText().slice(-2000)}`);
       if (liveState.failure?.recoverable) error.codexFailure = liveState.failure;
@@ -4017,7 +4099,7 @@ async function runCodexAppServer(event, session, state = null, onState = null, o
     }
     throw error;
   } finally {
-    clearTimeout(timer);
+    watchdog.clear();
     const job = activeCodexJobs.get(chatId);
     if (job?.pid === client.child?.pid) activeCodexJobs.delete(chatId);
     await client.stop();
@@ -4098,6 +4180,7 @@ async function runCodex(event, session, state = null, onState = null) {
     reasoning: settings.reasoning || "",
     serviceTier: settings.serviceTier || "",
     timeoutMs: CONFIG.codexTimeoutMs,
+    idleTimeoutMs: CONFIG.codexIdleTimeoutMs,
     disableMcp: CONFIG.disableMcp,
   });
 
@@ -4121,15 +4204,20 @@ async function runCodex(event, session, state = null, onState = null) {
   });
 
   let timedOut = false;
+  let timeoutReason = "";
   let stdoutRaw = "";
   const stderrChunks = [];
-  const timer = setTimeout(() => {
+  const watchdog = createRunWatchdog("codex exec", (reason) => {
     timedOut = true;
+    timeoutReason = reason;
     terminateProcessTree(child.pid, false);
     setTimeout(() => terminateProcessTree(child.pid, true), 5000).unref?.();
-  }, CONFIG.codexTimeoutMs);
+  });
 
-  child.stderr.on("data", (chunk) => stderrChunks.push(chunk));
+  child.stderr.on("data", (chunk) => {
+    watchdog.touch();
+    stderrChunks.push(chunk);
+  });
 
   const flushState = async () => {
     if (state && onState) await onState(state);
@@ -4138,6 +4226,7 @@ async function runCodex(event, session, state = null, onState = null) {
   const rl = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
   const streamPromise = (async () => {
     for await (const line of rl) {
+      watchdog.touch();
       stdoutRaw += `${line}\n`;
       const trimmed = line.trim();
       if (!trimmed) continue;
@@ -4163,7 +4252,7 @@ async function runCodex(event, session, state = null, onState = null) {
     closeResult = await closePromise;
     await streamPromise.catch(() => {});
   } finally {
-    clearTimeout(timer);
+    watchdog.clear();
     rl.close();
     activeChildren.delete(child.pid);
     const job = activeCodexJobs.get(chatId);
@@ -4179,10 +4268,10 @@ async function runCodex(event, session, state = null, onState = null) {
 
   if (timedOut) {
     if (state) {
-      markRunError(state, `codex exec timed out after ${Math.round(CONFIG.codexTimeoutMs / 1000)}s`);
+      markRunError(state, timeoutReason || "codex exec timed out");
       await flushState();
     }
-    throw new Error(`codex exec timed out after ${Math.round(CONFIG.codexTimeoutMs / 1000)}s`);
+    throw new Error(timeoutReason || "codex exec timed out");
   }
   if (closeResult.code !== 0) {
     const stderr = Buffer.concat(stderrChunks).toString("utf8");
@@ -5345,6 +5434,7 @@ async function statusMarkdown(chatId) {
     `工作区：\`${CONFIG.workspace}\``,
     `设置：${settingsSummary(session)}`,
     `运行模式：\`${CONFIG.runMode}\` · 沙箱：\`${CONFIG.codexSandbox}\` · MCP：${CONFIG.disableMcp ? "禁用" : "启用"}`,
+    `超时：总时长 ${durationConfigLabel(CONFIG.codexTimeoutMs)} · 无进展 ${durationConfigLabel(CONFIG.codexIdleTimeoutMs)}`,
   ].join("\n");
 }
 
@@ -5473,6 +5563,7 @@ async function nowMarkdown(chatId) {
     `队列：${pendingEvents.length}`,
     `设置：${settingsSummary(session)}`,
     `运行模式：\`${CONFIG.runMode}\` · 沙箱：\`${CONFIG.codexSandbox}\` · MCP：${CONFIG.disableMcp ? "禁用" : "启用"}`,
+    `超时：总时长 ${durationConfigLabel(CONFIG.codexTimeoutMs)} · 无进展 ${durationConfigLabel(CONFIG.codexIdleTimeoutMs)}`,
     "",
     `本轮启动后：事件 ${stats.events} · 命令 ${stats.commands} · 完成 ${stats.answered} · 失败 ${stats.failed} · 断流续跑 ${stats.recovered}`,
   ].join("\n");
@@ -5569,6 +5660,7 @@ function startConsumer() {
     sandbox: CONFIG.codexSandbox,
     reasoning: codexReasoningLabel,
     codexTimeoutMs: CONFIG.codexTimeoutMs,
+    codexIdleTimeoutMs: CONFIG.codexIdleTimeoutMs,
     disableMcp: CONFIG.disableMcp,
     maxConcurrent: CONFIG.maxConcurrent,
     cardMode: CONFIG.useCards,

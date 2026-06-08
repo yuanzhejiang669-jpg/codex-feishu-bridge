@@ -17,18 +17,20 @@ Options:
   --profile <name>              lark-cli profile name. Defaults to --name.
   --display-name <name>         Feishu app/bot display name shown during QR registration.
   --description <text>          Feishu app description shown during QR registration.
-  --workspace <path>            Bridge workspace. Defaults to Documents\\Codex\\workspaces\\feishu-bridge-<name>.
+  --workspace <path>            Bridge workspace. Defaults to Documents/Codex/workspaces/feishu-bridge-<name>.
   --source <source>             Lark registerApp source. Defaults to codex.
   --brand <feishu|lark>         lark-cli profile brand. Defaults to feishu.
   --timeout-seconds <seconds>   Registration timeout. Defaults to 600.
   --no-open-qr                  Do not open the QR HTML page automatically.
   --no-start                    Register and add profile only; do not start bridge.
-  --install-startup             Install a per-instance scheduled-task watchdog.
+  --install-startup             Install a per-instance watchdog (Windows Scheduled Task or macOS launchd).
   --force-profile               Remove an existing lark-cli profile with the same name first.
   --sandbox <value>             Passed to start script.
   --run-mode <app-server|auto|exec>
   --reasoning <value>           Passed to start script.
   --codex-timeout-seconds <n>   Passed to start script.
+  --codex-idle-timeout-seconds <n>
+                                Passed to start script.
   --max-concurrent <n>          Passed to start script.
   --disable-mcp                 Passed to start script.
   --enable-mcp                  Passed to start script.
@@ -89,7 +91,7 @@ async function main() {
   }
 
   if (options.installStartup) {
-    await installStartup({ name, profile, workspace });
+    await installStartup({ name, profile, workspace, options });
   }
 
   console.log("");
@@ -138,10 +140,7 @@ function defaultWorkspace(name) {
 }
 
 function dataRootForRegistration(name) {
-  const base = process.platform === "win32"
-    ? path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"), "CodexFeishuBridge")
-    : path.join(os.homedir(), ".codex-feishu-bridge");
-  return path.join(base, "registrations", name);
+  return path.join(defaultDataRoot(), "registrations", name);
 }
 
 async function registerFeishuApp({ name, source, displayName, description, timeoutSeconds, openQr }) {
@@ -300,30 +299,9 @@ async function addLarkProfile(larkCli, { profile, appId, appSecret, brand }) {
 }
 
 async function startBridge({ name, profile, workspace, options }) {
-  const script = path.join(ROOT, "start-codex-feishu-bridge.ps1");
-  const args = [
-    "-NoProfile",
-    "-ExecutionPolicy",
-    "Bypass",
-    "-File",
-    script,
-    "-Name",
-    name,
-    "-LarkProfile",
-    profile,
-    "-Workspace",
-    workspace,
-  ];
-  addOptionalPowerShellArg(args, "-Sandbox", options.sandbox);
-  addOptionalPowerShellArg(args, "-RunMode", options.runMode);
-  addOptionalPowerShellArg(args, "-Reasoning", options.reasoning);
-  addOptionalPowerShellArg(args, "-CodexTimeoutSeconds", options.codexTimeoutSeconds);
-  addOptionalPowerShellArg(args, "-MaxConcurrent", options.maxConcurrent);
-  if (options.disableMcp) args.push("-DisableMcp");
-  if (options.enableMcp) args.push("-EnableMcp");
-
   console.log("Starting bridge...");
-  const result = await runRaw("powershell.exe", args, { timeoutMs: 60_000 });
+  const { command, args } = bridgeStartCommand({ name, profile, workspace, options });
+  const result = await runRaw(command, args, { timeoutMs: 60_000 });
   process.stdout.write(result.stdout);
   process.stderr.write(result.stderr);
 
@@ -331,28 +309,104 @@ async function startBridge({ name, profile, workspace, options }) {
   console.log(`Bridge started: ${name}`);
 }
 
-async function installStartup({ name, profile, workspace }) {
-  const script = path.join(ROOT, "install-codex-feishu-watchdog.ps1");
-  const args = [
-    "-NoProfile",
-    "-ExecutionPolicy",
-    "Bypass",
-    "-File",
-    script,
-    "-Name",
-    name,
-    "-LarkProfile",
-    profile,
-    "-Workspace",
-    workspace,
-  ];
+async function installStartup({ name, profile, workspace, options }) {
   console.log("Installing startup watchdog...");
-  const result = await runRaw("powershell.exe", args, { timeoutMs: 60_000 });
+  const { command, args } = bridgeStartupCommand({ name, profile, workspace, options });
+  const result = await runRaw(command, args, { timeoutMs: 60_000 });
   process.stdout.write(result.stdout);
   process.stderr.write(result.stderr);
 }
 
 function addOptionalPowerShellArg(args, name, value) {
+  if (value == null || String(value).trim() === "") return;
+  args.push(name, String(value));
+}
+
+function bridgeStartCommand({ name, profile, workspace, options }) {
+  if (process.platform === "win32") {
+    const script = path.join(ROOT, "start-codex-feishu-bridge.ps1");
+    const args = [
+      "-NoProfile",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File",
+      script,
+      "-Name",
+      name,
+      "-LarkProfile",
+      profile,
+      "-Workspace",
+      workspace,
+    ];
+    addOptionalPowerShellArg(args, "-Sandbox", options.sandbox);
+    addOptionalPowerShellArg(args, "-RunMode", options.runMode);
+    addOptionalPowerShellArg(args, "-Reasoning", options.reasoning);
+    addOptionalPowerShellArg(args, "-CodexTimeoutSeconds", options.codexTimeoutSeconds);
+    addOptionalPowerShellArg(args, "-CodexIdleTimeoutSeconds", options.codexIdleTimeoutSeconds);
+    addOptionalPowerShellArg(args, "-MaxConcurrent", options.maxConcurrent);
+    if (options.disableMcp) args.push("-DisableMcp");
+    if (options.enableMcp) args.push("-EnableMcp");
+    return { command: "powershell.exe", args };
+  }
+
+  const script = path.join(ROOT, "start-codex-feishu-bridge.sh");
+  const args = [
+    script,
+    "--name",
+    name,
+    "--lark-profile",
+    profile,
+    "--workspace",
+    workspace,
+  ];
+  addOptionalCliArg(args, "--sandbox", options.sandbox);
+  addOptionalCliArg(args, "--run-mode", options.runMode);
+  addOptionalCliArg(args, "--reasoning", options.reasoning);
+  addOptionalCliArg(args, "--codex-timeout-seconds", options.codexTimeoutSeconds);
+  addOptionalCliArg(args, "--codex-idle-timeout-seconds", options.codexIdleTimeoutSeconds);
+  addOptionalCliArg(args, "--max-concurrent", options.maxConcurrent);
+  if (options.disableMcp) args.push("--disable-mcp");
+  if (options.enableMcp) args.push("--enable-mcp");
+  return { command: "bash", args };
+}
+
+function bridgeStartupCommand({ name, profile, workspace, options }) {
+  if (process.platform === "win32") {
+    const script = path.join(ROOT, "install-codex-feishu-watchdog.ps1");
+    const args = [
+      "-NoProfile",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File",
+      script,
+      "-Name",
+      name,
+      "-LarkProfile",
+      profile,
+      "-Workspace",
+      workspace,
+    ];
+    addOptionalPowerShellArg(args, "-CodexTimeoutSeconds", options.codexTimeoutSeconds);
+    addOptionalPowerShellArg(args, "-CodexIdleTimeoutSeconds", options.codexIdleTimeoutSeconds);
+    return { command: "powershell.exe", args };
+  }
+
+  const script = path.join(ROOT, "install-codex-feishu-launchd.sh");
+  const args = [
+    script,
+    "--name",
+    name,
+    "--lark-profile",
+    profile,
+    "--workspace",
+    workspace,
+  ];
+  addOptionalCliArg(args, "--codex-timeout-seconds", options.codexTimeoutSeconds);
+  addOptionalCliArg(args, "--codex-idle-timeout-seconds", options.codexIdleTimeoutSeconds);
+  return { command: "bash", args };
+}
+
+function addOptionalCliArg(args, name, value) {
   if (value == null || String(value).trim() === "") return;
   args.push(name, String(value));
 }
@@ -382,10 +436,17 @@ function readBridgePid(name) {
 }
 
 function instanceDataRoot(name) {
-  const base = process.platform === "win32"
-    ? path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"), "CodexFeishuBridge")
-    : path.join(os.homedir(), ".codex-feishu-bridge");
-  return path.join(base, "instances", name);
+  return path.join(defaultDataRoot(), "instances", name);
+}
+
+function defaultDataRoot() {
+  if (process.platform === "win32") {
+    return path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"), "CodexFeishuBridge");
+  }
+  if (process.platform === "darwin") {
+    return path.join(os.homedir(), "Library", "Application Support", "CodexFeishuBridge");
+  }
+  return path.join(process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state"), "codex-feishu-bridge");
 }
 
 function isProcessRunning(pid) {

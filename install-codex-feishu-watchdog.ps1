@@ -3,6 +3,9 @@ param(
   [string]$LarkProfile = "",
   [string]$Workspace = "",
   [string]$TaskName = "",
+  [int]$CodexTimeoutSeconds = 0,
+  [int]$CodexIdleTimeoutSeconds = 3600,
+  [int]$WatchdogTimeoutSeconds = 180,
   [switch]$Uninstall
 )
 
@@ -55,13 +58,16 @@ $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $author = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 $startBoundary = (Get-Date).Date.ToString("yyyy-MM-ddTHH:mm:ss")
 $workingDirectory = $PSScriptRoot
-$argumentParts = @("`"$hiddenLauncher`"", "`"$Workspace`"")
-if ($safeName) {
-  $argumentParts += "`"$safeName`""
-}
-if ($LarkProfile.Trim()) {
-  $argumentParts += "`"$($LarkProfile.Trim())`""
-}
+$profileArg = $LarkProfile.Trim()
+$argumentParts = @(
+  "`"$hiddenLauncher`"",
+  "`"$Workspace`"",
+  "`"$safeName`"",
+  "`"$profileArg`"",
+  $CodexTimeoutSeconds,
+  $CodexIdleTimeoutSeconds,
+  $WatchdogTimeoutSeconds
+)
 $arguments = $argumentParts -join " "
 
 function Escape-XmlText {
@@ -124,7 +130,7 @@ $xml = @"
     <DisallowStartOnRemoteAppSession>false</DisallowStartOnRemoteAppSession>
     <UseUnifiedSchedulingEngine>true</UseUnifiedSchedulingEngine>
     <WakeToRun>false</WakeToRun>
-    <ExecutionTimeLimit>PT3M</ExecutionTimeLimit>
+    <ExecutionTimeLimit>PT5M</ExecutionTimeLimit>
     <Priority>7</Priority>
   </Settings>
   <Actions Context="Author">
@@ -148,6 +154,9 @@ Write-Host "Installed scheduled task: $TaskName"
 Write-Host "Instance: $(if ($safeName) { $safeName } else { 'default' })"
 Write-Host "Lark profile: $(if ($LarkProfile.Trim()) { $LarkProfile.Trim() } else { 'default/current' })"
 Write-Host "Workspace: $Workspace"
+Write-Host "Codex total timeout: $(if ($CodexTimeoutSeconds -gt 0) { "$CodexTimeoutSeconds seconds" } else { 'disabled' })"
+Write-Host "Codex idle timeout: $(if ($CodexIdleTimeoutSeconds -gt 0) { "$CodexIdleTimeoutSeconds seconds" } else { 'disabled' })"
+Write-Host "Watchdog timeout: $(if ($WatchdogTimeoutSeconds -gt 0) { "$WatchdogTimeoutSeconds seconds" } else { 'disabled' })"
 Write-Host "State: $($task.State)"
 Write-Host "LastRunTime: $($info.LastRunTime)"
 Write-Host "LastTaskResult: $($info.LastTaskResult)"

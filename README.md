@@ -1,12 +1,12 @@
 # Codex Feishu Bridge
 
-把飞书机器人接到本机 Codex 的 Windows 桥接器。
+把飞书机器人接到本机 Codex 的本地桥接器。Windows 是主力稳定场景；`macos-support` 分支提供 macOS 启动和 launchd 守护脚本，方便 Mac 用户试用。
 
-这个项目的目标很直接：在一台 Windows 电脑上运行本地 Codex，把飞书里的普通消息、图片和文件转成 Codex 任务，再把 Codex 的过程和最终回答回传到飞书。旧设备只要拿到这个仓库链接，按 README 配置一次，就可以复现同样的“飞书远程控制 Codex”效果。
+这个项目的目标很直接：在一台本地电脑上运行 Codex，把飞书里的普通消息、图片和文件转成 Codex 任务，再把 Codex 的过程和最终回答回传到飞书。旧设备或师兄的 Mac 只要拿到这个仓库链接，按 README 配置一次，就可以复现同样的“飞书远程控制 Codex”效果。
 
 ## 适用场景
 
-- 在手机、平板或另一台电脑的飞书里远程调用家里/办公室 Windows 机器上的 Codex。
+- 在手机、平板或另一台电脑的飞书里远程调用家里/办公室 Windows 或 Mac 机器上的 Codex。
 - 给多个飞书机器人分别绑定不同 Codex workspace，例如 `codex-assistant-1`、`codex-assistant-2`。
 - 让 Codex 在一个稳定目录里处理飞书发来的文档、图片、代码和长任务。
 - 用飞书动态卡片查看 Codex 正在做什么，任务结束后折叠过程并保留最终答案。
@@ -19,8 +19,8 @@
 - 附件处理：支持飞书图片和文件下载到 workspace，再交给 Codex 读取。
 - 会话管理：支持新建、切换、列出、同步 Codex 可见线程。
 - 安全删除：删除本地 Codex thread 前需要按 `/confirm delete <序号>` 二次确认。
-- 多实例：同一台 Windows 机器可以跑多个机器人/profile/workspace。
-- 看门狗：Windows 计划任务定期检查桥进程和飞书 consumer，不健康时自动重启。
+- 多实例：同一台机器可以跑多个机器人/profile/workspace。
+- 看门狗：Windows 用计划任务，macOS 用 launchd，定期检查桥进程和飞书 consumer，不健康时自动重启。
 
 ## 目录说明
 
@@ -31,8 +31,13 @@
 | `stop-codex-feishu-bridge.ps1` | 停止桥接器，优先优雅退出，必要时结束进程 |
 | `watch-codex-feishu-bridge.ps1` | 看门狗健康检查和自动重启 |
 | `install-codex-feishu-watchdog.ps1` | 注册/卸载 Windows 计划任务 |
+| `start-codex-feishu-bridge.sh` | macOS/Linux 启动桥接器 |
+| `stop-codex-feishu-bridge.sh` | macOS/Linux 停止桥接器 |
+| `watch-codex-feishu-bridge.sh` | macOS/Linux 看门狗健康检查和自动重启 |
+| `install-codex-feishu-launchd.sh` | 注册/卸载 macOS launchd LaunchAgent |
 | `register-codex-feishu-bot.mjs` | 通过飞书二维码注册新机器人，并写入 lark-cli profile |
 | `register-codex-feishu-bot.ps1` | 注册器的 PowerShell 包装，会自动安装 Node 依赖 |
+| `register-codex-feishu-bot.sh` | macOS/Linux 注册器包装，会自动安装 Node 依赖 |
 | `*-hidden.vbs` | 后台隐藏窗口启动器 |
 | `.env.example` | 可选环境变量示例，不要提交真实 `.env` |
 | `docs/` | 补充部署和故障文档 |
@@ -44,8 +49,10 @@
 
 - 飞书 App Secret、access token。
 - `%USERPROFILE%\.lark-cli\config.json`。
+- `~/.lark-cli/config.json`。
 - `%USERPROFILE%\.codex\auth.json`、`config.toml`、sessions、SQLite state。
 - `%LOCALAPPDATA%\CodexFeishuBridge` 下的日志、PID、sessions、二维码注册文件。
+- `~/Library/Application Support/CodexFeishuBridge` 下的日志、PID、sessions、二维码注册文件。
 - `.codex-feishu-runtime`、`.codex-feishu-attachments`、Codex 输出、飞书下载附件。
 
 ## 旧设备给 Codex 的提示词
@@ -62,7 +69,7 @@
 2. 按 README 检查 Node.js 20+、npm、PowerShell、Codex CLI、lark-cli。
 3. 使用 register-codex-feishu-bot.ps1 注册一个飞书机器人，实例名用 codex-assistant-1。
 4. workspace 使用 %USERPROFILE%\Documents\Codex\workspaces\feishu-bridge-codex-assistant-1。
-5. 默认使用 app-server、danger-full-access、reasoning=xhigh、Codex 超时 7200 秒、动态卡片开启、MCP 开启。
+5. 默认使用 app-server、danger-full-access、reasoning=xhigh、Codex 总时长超时禁用、无进展超时 3600 秒、动态卡片开启、MCP 开启。
 6. 安装 watchdog 开机/解锁/每 5 分钟自动检查。
 7. 最后在飞书里发送 /status 和一条普通消息验证。
 
@@ -70,7 +77,116 @@
 如果本机 codex 不在 PATH，请先定位 codex.exe 或 codex.cmd，然后设置 CODEX_CLI_BIN 再启动。
 ```
 
-## 前置要求
+## macOS 快速安装（给师兄）
+
+macOS 支持在 `macos-support` 分支。推荐先让师兄使用独立飞书机器人和独立 workspace。
+
+### 给 Mac 上 Codex 的部署提示词
+
+把下面这段发给师兄 Mac 上的 Codex，并把 `<REPO_URL>` 换成真实仓库地址：
+
+```text
+请在这台 Mac 上安装并配置 Codex Feishu Bridge。
+
+仓库地址：<REPO_URL>
+分支：macos-support
+
+目标效果：
+1. 克隆仓库到 ~/Documents/Codex/tools/codex-feishu-bridge。
+2. 切换到 macos-support 分支。
+3. 检查 Node.js 20+、npm、Git、Codex CLI、lark-cli、python3。
+4. 如果缺少 lark-cli，执行 npm install -g @larksuite/cli。
+5. 执行 npm install 和 npm run check。
+6. 使用 register-codex-feishu-bot.sh 注册一个飞书机器人，实例名用 codex-assistant-mac1。
+7. workspace 使用 ~/Documents/Codex/workspaces/feishu-bridge-codex-assistant-mac1。
+8. 使用 app-server、danger-full-access、reasoning=xhigh、Codex 总时长超时禁用、无进展超时 3600 秒。
+9. 安装 macOS launchd 守护，让它开机/定期检查并自动重启 Bridge。
+10. 最后让我在飞书里发送 /status 和一条普通消息验证。
+
+注意：
+- 二维码注册时需要我扫码确认。
+- 不要提交或展示任何 app secret、token、.codex auth、.lark-cli config、日志、sessions 或附件内容。
+- 如果 codex 或 lark-cli 不在 launchd 可见 PATH 里，请设置 CODEX_CLI_BIN 和 LARK_CLI_BIN 后再安装 launchd。
+- 如果中途失败，先看 README 的 macOS 常用命令，检查 watchdog.log、bridge.stderr.log 和 lark-cli event status。
+```
+
+成功判据：
+
+- `npm run check` 通过。
+- `~/Library/Application Support/CodexFeishuBridge/instances/codex-assistant-mac1/state/bridge.pid` 存在，且 PID 对应进程还活着。
+- `lark-cli --profile codex-assistant-mac1 event status --current --json` 能看到 `im.message.receive_v1` consumer。
+- 飞书里 `/status` 有回复，普通消息能触发 Codex 任务。
+
+前置准备：
+
+```bash
+node -v
+npm -v
+git --version
+codex --version
+python3 --version
+npm install -g @larksuite/cli
+lark-cli --version
+```
+
+如果 `codex` 或 `lark-cli` 不在普通终端 PATH 里，先定位它们：
+
+```bash
+which codex
+which lark-cli
+```
+
+安装 launchd 时脚本会把当前终端的 PATH 写进 LaunchAgent。如果后续后台启动仍找不到命令，可以在运行注册脚本前显式设置：
+
+```bash
+export CODEX_CLI_BIN="$(which codex)"
+export LARK_CLI_BIN="$(which lark-cli)"
+```
+
+克隆和安装：
+
+```bash
+mkdir -p "$HOME/Documents/Codex/tools"
+git clone <REPO_URL> "$HOME/Documents/Codex/tools/codex-feishu-bridge"
+cd "$HOME/Documents/Codex/tools/codex-feishu-bridge"
+git switch macos-support
+npm install
+npm run check
+```
+
+扫码注册、启动并安装 launchd 守护：
+
+```bash
+bash ./register-codex-feishu-bot.sh \
+  --name codex-assistant-mac1 \
+  --display-name "Codex Assistant Mac 1" \
+  --workspace "$HOME/Documents/Codex/workspaces/feishu-bridge-codex-assistant-mac1" \
+  --run-mode app-server \
+  --reasoning xhigh \
+  --codex-timeout-seconds 0 \
+  --codex-idle-timeout-seconds 3600 \
+  --install-startup
+```
+
+完成后在飞书里发：
+
+```text
+/status
+```
+
+再发一条普通消息验证。普通任务不要以 `/` 开头。
+
+常用 macOS 命令：
+
+```bash
+bash ./start-codex-feishu-bridge.sh --name codex-assistant-mac1 --lark-profile codex-assistant-mac1
+bash ./stop-codex-feishu-bridge.sh --name codex-assistant-mac1
+bash ./install-codex-feishu-launchd.sh --name codex-assistant-mac1 --uninstall
+tail -n 80 "$HOME/Library/Application Support/CodexFeishuBridge/instances/codex-assistant-mac1/logs/watchdog.log"
+lark-cli --profile codex-assistant-mac1 event status --current --json
+```
+
+## Windows 前置要求
 
 在目标 Windows 设备上准备：
 
@@ -113,7 +229,7 @@ $env:CODEX_CLI_BIN = "C:\Path\To\codex.exe"
 
 如果 `python --version` 不可用，也可以安装 `sqlite3` CLI。二者有一个可用即可；桥接器会优先调用 `sqlite3`，没有时自动 fallback 到 Python 标准库 `sqlite3`。
 
-## 安装仓库
+## Windows 安装仓库
 
 推荐固定放到：
 
@@ -125,7 +241,7 @@ npm install
 npm run check
 ```
 
-## 推荐方式：二维码自动注册机器人
+## Windows 推荐方式：二维码自动注册机器人
 
 这个方式最接近当前好用的效果。它会：
 
@@ -152,7 +268,8 @@ $BotDisplayName = "Codex Assistant 1"
   -Workspace "$env:USERPROFILE\Documents\Codex\workspaces\feishu-bridge-$BotName" `
   -RunMode app-server `
   -Reasoning xhigh `
-  -CodexTimeoutSeconds 7200 `
+  -CodexTimeoutSeconds 0 `
+  -CodexIdleTimeoutSeconds 3600 `
   -InstallStartup
 ```
 
@@ -181,7 +298,8 @@ Set-Location "$env:USERPROFILE\Documents\Codex\tools\codex-feishu-bridge"
   -Workspace "$env:USERPROFILE\Documents\Codex\workspaces\feishu-bridge-codex-assistant-1" `
   -RunMode app-server `
   -Reasoning xhigh `
-  -CodexTimeoutSeconds 7200 `
+  -CodexTimeoutSeconds 0 `
+  -CodexIdleTimeoutSeconds 3600 `
   -InstallStartup
 ```
 
@@ -235,7 +353,8 @@ lark-cli profile list
   -Workspace "$env:USERPROFILE\Documents\Codex\workspaces\feishu-bridge-codex-assistant-1" `
   -RunMode app-server `
   -Reasoning xhigh `
-  -CodexTimeoutSeconds 7200
+  -CodexTimeoutSeconds 0 `
+  -CodexIdleTimeoutSeconds 3600
 ```
 
 ## 开机自启和看门狗
@@ -309,7 +428,8 @@ lark-cli profile list
 | `RunMode` | `app-server` | 使用 Codex app-server 原生线程 |
 | `Sandbox` | `danger-full-access` | 本机私有桥默认全权限，依靠私有机器人和专用 workspace 做边界 |
 | `Reasoning` | `xhigh` | 传给 Codex 的推理强度 |
-| `CodexTimeoutSeconds` | `7200` | 启动脚本默认 2 小时 |
+| `CodexTimeoutSeconds` | `0` | 禁用总时长硬超时；Codex 正常持续工作时不主动中断 |
+| `CodexIdleTimeoutSeconds` | `3600` | 默认 1 小时无进展才判定卡住 |
 | `MaxConcurrent` | `1` | 同实例串行处理 |
 | 动态卡片 | 开启 | 用飞书卡片显示过程和结果 |
 | MCP | 开启 | 需要关闭时传 `-DisableMcp` |

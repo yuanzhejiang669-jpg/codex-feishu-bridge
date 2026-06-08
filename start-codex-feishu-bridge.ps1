@@ -6,7 +6,8 @@ param(
   [ValidateSet("app-server", "auto", "exec")]
   [string]$RunMode = "app-server",
   [string]$Reasoning = "xhigh",
-  [int]$CodexTimeoutSeconds = 7200,
+  [int]$CodexTimeoutSeconds = 0,
+  [int]$CodexIdleTimeoutSeconds = 3600,
   [int]$MaxConcurrent = 1,
   [int]$CardThrottleMs = 400,
   [switch]$NoCard,
@@ -133,6 +134,7 @@ if ($Reasoning.Trim()) {
   Remove-Item Env:CODEX_FEISHU_REASONING -ErrorAction SilentlyContinue
 }
 $env:CODEX_FEISHU_CODEX_TIMEOUT_MS = [string]($CodexTimeoutSeconds * 1000)
+$env:CODEX_FEISHU_CODEX_IDLE_TIMEOUT_MS = [string]($CodexIdleTimeoutSeconds * 1000)
 $env:CODEX_FEISHU_DISABLE_MCP = if ($DisableMcp) { "1" } else { "0" }
 $env:CODEX_FEISHU_MAX_CONCURRENT = [string]$MaxConcurrent
 $env:CODEX_FEISHU_CARD_MODE = if ($NoCard) { "0" } else { "1" }
@@ -178,6 +180,8 @@ Write-Host "Codex CLI: $($env:CODEX_CLI_BIN)"
 Write-Host "Run mode: $($env:CODEX_FEISHU_RUN_MODE)"
 Write-Host "Sandbox: $($env:CODEX_FEISHU_SANDBOX)"
 Write-Host "Reasoning: $($env:CODEX_FEISHU_REASONING)"
+Write-Host "Codex total timeout: $(if ($CodexTimeoutSeconds -gt 0) { "$CodexTimeoutSeconds seconds" } else { 'disabled' })"
+Write-Host "Codex idle timeout: $(if ($CodexIdleTimeoutSeconds -gt 0) { "$CodexIdleTimeoutSeconds seconds" } else { 'disabled' })"
 Write-Host "MCP: $(if ($env:CODEX_FEISHU_DISABLE_MCP -eq '0') { 'enabled' } else { 'disabled' })"
 Write-Host "Card throttle: $($env:CODEX_FEISHU_CARD_THROTTLE_MS)ms"
 Write-Host "Final steps: $($env:CODEX_FEISHU_SHOW_FINAL_STEPS)"

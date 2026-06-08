@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Windows bridge that connects a Feishu bot to local Codex.",
+  "description": "Local bridge that connects a Feishu bot to Codex.",
   "scripts": {
     "check": "node --check codex-feishu-bridge.mjs && node --check register-codex-feishu-bot.mjs",
     "register": "node register-codex-feishu-bot.mjs"

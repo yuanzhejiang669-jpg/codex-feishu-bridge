@@ -8,8 +8,10 @@ param(
   [ValidateSet("app-server", "auto", "exec")]
   [string]$RunMode = "app-server",
   [string]$Reasoning = "xhigh",
-  [int]$CodexTimeoutSeconds = 7200,
+  [int]$CodexTimeoutSeconds = 0,
+  [int]$CodexIdleTimeoutSeconds = 3600,
   [int]$RestartCooldownSeconds = 60,
+  [int]$WatchdogTimeoutSeconds = 180,
   [switch]$DisableMcp
 )
 
@@ -59,6 +61,47 @@ function Rotate-WatchdogLog {
     $backup = Join-Path $logDir "watchdog.log.1"
     Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue
     Move-Item -LiteralPath $logFile -Destination $backup -Force
+  }
+}
+
+function Test-WatchdogCommandMatchesInstance {
+  param([string]$CommandLine)
+  if (-not $CommandLine) { return $false }
+  if ($CommandLine -notlike "*watch-codex-feishu-bridge.ps1*") { return $false }
+  if (-not $safeName) {
+    return $CommandLine -notmatch "(?i)\s-Name\s+"
+  }
+  $escaped = [regex]::Escape($safeName)
+  return $CommandLine -match "(?i)\s-Name\s+[`"']?$escaped[`"']?(?:\s|$)"
+}
+
+function Stop-StaleWatchdogProcesses {
+  if ($WatchdogTimeoutSeconds -le 0) { return }
+  $now = Get-Date
+  $currentPid = [int]$PID
+  $processes = Get-CimInstance Win32_Process -Filter "Name='powershell.exe' OR Name='pwsh.exe'" -ErrorAction SilentlyContinue
+  foreach ($processInfo in @($processes)) {
+    $processId = [int]$processInfo.ProcessId
+    if ($processId -eq $currentPid) { continue }
+    if (-not (Test-WatchdogCommandMatchesInstance ([string]$processInfo.CommandLine))) { continue }
+
+    $startedAt = $null
+    try {
+      $startedAt = [System.Management.ManagementDateTimeConverter]::ToDateTime($processInfo.CreationDate)
+    } catch {
+      $startedAt = $null
+    }
+    if (-not $startedAt) { continue }
+
+    $ageSeconds = ($now - $startedAt).TotalSeconds
+    if ($ageSeconds -lt $WatchdogTimeoutSeconds) { continue }
+
+    try {
+      Stop-Process -Id $processId -Force -ErrorAction Stop
+      Write-WatchdogLog "stopped stale watchdog pid=$processId age=$([int]$ageSeconds)s"
+    } catch {
+      Write-WatchdogLog "failed to stop stale watchdog pid=${processId}: $($_.Exception.Message)"
+    }
   }
 }
 
@@ -114,7 +157,19 @@ function Invoke-ProcessWithTimeout {
   [void]$process.Start()
   if (-not $process.WaitForExit($TimeoutMs)) {
     try { $process.Kill() } catch {}
-    return @{ ExitCode = -1; Stdout = ""; Stderr = ""; TimedOut = $true }
+    try { [void]$process.WaitForExit(5000) } catch {}
+    $stdoutText = ""
+    $stderrText = ""
+    if ($process.HasExited) {
+      $stdoutText = $process.StandardOutput.ReadToEnd()
+      $stderrText = $process.StandardError.ReadToEnd()
+    }
+    return @{
+      ExitCode = -1
+      Stdout = $stdoutText
+      Stderr = $stderrText
+      TimedOut = $true
+    }
   }
   return @{
     ExitCode = $process.ExitCode
@@ -153,14 +208,14 @@ function Test-LarkConsumer {
   }
   $stdout = [string]$result.Stdout
   $stderr = [string]$result.Stderr
-  if ($result.ExitCode -ne 0) {
-    return @{ Ok = $false; Reason = "lark-cli status failed: $($stdout.Trim()) $($stderr.Trim())".Trim() }
-  }
   $outputText = $stdout
 
   try {
     $status = $outputText | ConvertFrom-Json
   } catch {
+    if ($result.ExitCode -ne 0) {
+      return @{ Ok = $false; Reason = "lark-cli status failed: $($stdout.Trim()) $($stderr.Trim())".Trim() }
+    }
     return @{ Ok = $false; Reason = "lark-cli status returned invalid json" }
   }
 
@@ -184,6 +239,24 @@ function Test-RecentRestartCooldown {
   } catch {
     return $false
   }
+}
+
+function Wait-BridgeHealthy {
+  param([int]$TimeoutSeconds = 60)
+  $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+  $bridge = $null
+  $consumer = @{ Ok = $false; Reason = "not checked yet" }
+
+  while ((Get-Date) -lt $deadline) {
+    $bridge = Get-BridgeProcess
+    $consumer = Test-LarkConsumer
+    if ($bridge -and $consumer.Ok) {
+      return @{ Ok = $true; Bridge = $bridge; Consumer = $consumer }
+    }
+    Start-Sleep -Seconds 2
+  }
+
+  return @{ Ok = $false; Bridge = $bridge; Consumer = $consumer }
 }
 
 function Restart-Bridge {
@@ -229,7 +302,9 @@ function Restart-Bridge {
       "-Reasoning",
       $Reasoning,
       "-CodexTimeoutSeconds",
-      $CodexTimeoutSeconds
+      $CodexTimeoutSeconds,
+      "-CodexIdleTimeoutSeconds",
+      $CodexIdleTimeoutSeconds
     )
     if ($safeName) { $startArgs += @("-Name", $safeName) }
     if ($LarkProfile.Trim()) { $startArgs += @("-LarkProfile", $LarkProfile.Trim()) }
@@ -243,17 +318,16 @@ function Restart-Bridge {
     throw
   }
 
-  Start-Sleep -Seconds 3
-  $bridge = Get-BridgeProcess
-  $consumer = Test-LarkConsumer
-  if ($bridge -and $consumer.Ok) {
-    Write-WatchdogLog "restart ok; bridgePid=$($bridge.Id); $($consumer.Reason)"
+  $health = Wait-BridgeHealthy -TimeoutSeconds 60
+  if ($health.Ok) {
+    Write-WatchdogLog "restart ok; bridgePid=$($health.Bridge.Id); $($health.Consumer.Reason)"
   } else {
-    Write-WatchdogLog "restart incomplete; bridge=$([bool]$bridge); consumer=$($consumer.Ok); reason=$($consumer.Reason)"
+    Write-WatchdogLog "restart incomplete; bridge=$([bool]$health.Bridge); consumer=$($health.Consumer.Ok); reason=$($health.Consumer.Reason)"
   }
 }
 
 Rotate-WatchdogLog
+Stop-StaleWatchdogProcesses
 
 $lockStream = $null
 try {
