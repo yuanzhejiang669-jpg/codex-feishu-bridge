@@ -1,5 +1,7 @@
 # Codex Feishu Bridge
 
+Languages: [English](README.md) | [中文](README.zh-CN.md)
+
 Codex Feishu Bridge connects a Feishu bot to a local Codex runtime. It receives Feishu messages, downloads supported attachments into a dedicated workspace, starts or continues a Codex task, and posts progress plus final responses back to Feishu.
 
 The `macos-support` branch provides the cross-platform bridge code plus macOS-oriented shell scripts and `launchd` service management. It is intended for macOS deployments while retaining the Windows scripts from the main branch.
