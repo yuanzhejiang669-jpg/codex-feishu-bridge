@@ -11,10 +11,12 @@ const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_TOOLS = resolveDefaultTools();
 const DEFAULT_DATA_ROOT = resolveDefaultDataRoot();
 const LARK_PROFILE = String(process.env.CODEX_FEISHU_LARK_PROFILE || process.env.LARK_CLI_PROFILE || "").trim();
+const EVENT_KEYS = parseEventKeys(process.env.CODEX_FEISHU_EVENT_KEYS || process.env.CODEX_FEISHU_EVENT_KEY || "im.message.receive_v1");
 
 const CONFIG = {
   workspace: process.env.CODEX_FEISHU_WORKSPACE || process.cwd(),
-  eventKey: process.env.CODEX_FEISHU_EVENT_KEY || "im.message.receive_v1",
+  eventKeys: EVENT_KEYS,
+  eventKey: EVENT_KEYS[0] || "im.message.receive_v1",
   larkProfile: LARK_PROFILE,
   larkCli: withLarkProfile(parseToolEnv("LARK_CLI_BIN", DEFAULT_TOOLS.larkCli), LARK_PROFILE),
   codexCli: parseToolEnv("CODEX_CLI_BIN", DEFAULT_TOOLS.codexCli),
@@ -43,6 +45,7 @@ const CONFIG = {
   attachmentPendingTtlMs: Number(process.env.CODEX_FEISHU_ATTACHMENT_PENDING_TTL_MS || `${30 * 60_000}`),
   maxPendingAttachments: Number(process.env.CODEX_FEISHU_MAX_PENDING_ATTACHMENTS || "12"),
   maxFileAttachmentBytes: Number(process.env.CODEX_FEISHU_MAX_FILE_ATTACHMENT_BYTES || `${50 * 1024 * 1024}`),
+  recalledMessageTtlMs: parseDurationMs(process.env.CODEX_FEISHU_RECALLED_MESSAGE_TTL_MS, 24 * 60 * 60_000),
   deleteConfirmTtlMs: Number(process.env.CODEX_FEISHU_DELETE_CONFIRM_TTL_MS || `${5 * 60_000}`),
   streamRecoveryEnabled: (process.env.CODEX_FEISHU_STREAM_RECOVERY || "1") !== "0",
   streamRecoveryMaxAttempts: Number(process.env.CODEX_FEISHU_STREAM_RECOVERY_MAX_ATTEMPTS || "1"),
@@ -55,6 +58,7 @@ const CONFIG = {
 const logPath = path.join(CONFIG.logDir, "codex-feishu-bridge.log");
 const seenPath = path.join(CONFIG.stateDir, "seen-events.json");
 const sessionsPath = path.join(CONFIG.stateDir, "sessions.json");
+const activeRunsPath = path.join(CONFIG.stateDir, "active-runs.json");
 const pidPath = path.join(CONFIG.stateDir, "bridge.pid");
 const lockPath = path.join(CONFIG.stateDir, "bridge.lock.json");
 const stopPath = path.join(CONFIG.stateDir, "bridge.stop");
@@ -91,8 +95,10 @@ const STANDARD_SERVICE_TIER = "standard";
 let shuttingDown = false;
 let activeJobs = 0;
 const pendingEvents = [];
+const recalledMessages = new Map();
 const seen = loadSeen();
 const sessions = loadSessions();
+const activeRuns = loadActiveRuns();
 cleanupOldEventLocks();
 const stats = {
   startedAt: Date.now(),
@@ -160,6 +166,15 @@ function parseToolEnv(envName, fallback) {
     }
   }
   return { command: value, argsPrefix: [] };
+}
+
+function parseEventKeys(value) {
+  const keys = String(value || "")
+    .split(/[,\s;]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const unique = [...new Set(keys)];
+  return unique.length ? unique : ["im.message.receive_v1"];
 }
 
 function parseDurationMs(value, fallbackMs) {
@@ -553,6 +568,18 @@ function saveSeen() {
   fs.writeFileSync(seenPath, JSON.stringify(last, null, 2), "utf8");
 }
 
+function loadActiveRuns() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(activeRunsPath, "utf8"));
+    if (parsed && typeof parsed === "object" && parsed.runs && typeof parsed.runs === "object") return parsed;
+  } catch {}
+  return { runs: {} };
+}
+
+function saveActiveRuns() {
+  fs.writeFileSync(activeRunsPath, JSON.stringify(activeRuns, null, 2), "utf8");
+}
+
 function remember(id) {
   if (!id) return false;
   if (seen.has(id)) return true;
@@ -611,6 +638,55 @@ function rememberEvent(id, messageId = "") {
 
   remember(id);
   return false;
+}
+
+function eventTypeOf(event) {
+  return String(
+    event?.event_type
+      || event?.type
+      || event?.header?.event_type
+      || event?.event?.event_type
+      || findDeepKey(event, "event_type")
+      || "",
+  ).trim();
+}
+
+function eventIdOf(event) {
+  return String(
+    event?.event_id
+      || event?.header?.event_id
+      || event?.event?.event_id
+      || findDeepKey(event, "event_id")
+      || "",
+  ).trim();
+}
+
+function messageIdOf(event) {
+  return String(
+    event?.message_id
+      || event?.event?.message_id
+      || event?.message?.message_id
+      || findDeepKey(event, "message_id")
+      || findDeepKey(event, "messageId")
+      || event?.id
+      || "",
+  ).trim();
+}
+
+function chatIdOf(event) {
+  return String(
+    event?.chat_id
+      || event?.event?.chat_id
+      || event?.message?.chat_id
+      || findDeepKey(event, "chat_id")
+      || findDeepKey(event, "chatId")
+      || "",
+  ).trim();
+}
+
+function isRecallEvent(event) {
+  const type = eventTypeOf(event);
+  return type === "im.message.recalled_v1" || Boolean(event?.recall_time || event?.event?.recall_time);
 }
 
 function isProcessAlive(pid) {
@@ -2041,6 +2117,105 @@ function noteMd(content) {
   return { tag: "markdown", content, text_size: "notation" };
 }
 
+function activeRunKey(messageId) {
+  return String(messageId || "").trim();
+}
+
+function recordActiveRun(record) {
+  const key = activeRunKey(record?.messageId);
+  if (!key) return;
+  activeRuns.runs[key] = {
+    messageId: key,
+    chatId: String(record.chatId || ""),
+    sessionId: String(record.sessionId || ""),
+    cardId: String(record.cardId || ""),
+    cardMessageId: String(record.cardMessageId || ""),
+    startedAt: Number(record.startedAt || 0) || Date.now(),
+    updatedAt: Date.now(),
+    bridgePid: process.pid,
+    workspace: CONFIG.workspace,
+  };
+  saveActiveRuns();
+}
+
+function touchActiveRun(messageId) {
+  const key = activeRunKey(messageId);
+  if (!key || !activeRuns.runs[key]) return;
+  if (Date.now() - Number(activeRuns.runs[key].updatedAt || 0) < 10_000) return;
+  activeRuns.runs[key].updatedAt = Date.now();
+  saveActiveRuns();
+}
+
+function clearActiveRun(messageId) {
+  const key = activeRunKey(messageId);
+  if (!key || !activeRuns.runs[key]) return;
+  delete activeRuns.runs[key];
+  saveActiveRuns();
+}
+
+function renderStaleRunCard(record) {
+  const startedAt = Number(record?.startedAt || 0);
+  const updatedAt = Number(record?.updatedAt || 0);
+  return {
+    schema: "2.0",
+    config: {
+      streaming_mode: false,
+      summary: { content: "Bridge 已重启，上一轮状态已失效" },
+    },
+    header: {
+      title: { tag: "plain_text", content: "Bridge 已重启" },
+      template: "red",
+    },
+    body: {
+      elements: [
+        markdown("**上一轮 Codex 任务状态已丢失**\n\nBridge 启动时发现这张卡片仍处于运行状态，但原进程已经不在当前 Bridge 内。为避免误判为仍在执行，已将它标记为中断。"),
+        noteMd(`原始消息：${record?.messageId || ""}`),
+        noteMd(`会话：${record?.sessionId || ""}`),
+        startedAt ? noteMd(`开始时间：${formatTime(startedAt)}`) : null,
+        updatedAt ? noteMd(`最后记录：${formatTime(updatedAt)}`) : null,
+      ].filter(Boolean),
+    },
+  };
+}
+
+async function updateCardById(cardId, card) {
+  if (!cardId) return false;
+  await larkJson([
+    "api",
+    "PUT",
+    `/open-apis/cardkit/v1/cards/${cardId}`,
+    "--as",
+    "bot",
+    "--data",
+    JSON.stringify({ card: { type: "card_json", data: JSON.stringify(card) } }),
+  ], { timeoutMs: 60_000, attempts: 2 });
+  return true;
+}
+
+async function repairStaleActiveRunsOnStartup() {
+  const entries = Object.values(activeRuns.runs || {});
+  if (!entries.length) return;
+  log("INFO", "repairing stale active runs", { count: entries.length });
+  let repaired = 0;
+  for (const record of entries) {
+    try {
+      if (record?.cardId) {
+        await updateCardById(record.cardId, renderStaleRunCard(record));
+      }
+      repaired += 1;
+    } catch (error) {
+      log("WARN", "stale active run card update failed", {
+        messageId: record?.messageId || "",
+        cardId: record?.cardId || "",
+        error: String(error.message || error).slice(0, 1000),
+      });
+    }
+  }
+  activeRuns.runs = {};
+  saveActiveRuns();
+  log("INFO", "stale active runs repaired", { repaired });
+}
+
 function renderRunBlocks(blocks, finalized) {
   if (finalized && !CONFIG.debugCards) {
     const elements = [];
@@ -2604,8 +2779,25 @@ function safeRelativePath(value, fallback) {
   return raw.replace(/^\/+/, "") || fallback;
 }
 
+function larkTextIndicatesRecalled(text) {
+  return /recalled|message\s+is\s+recalled|230011|撤回|已撤回/i.test(String(text || ""));
+}
+
+function messageRecordLooksRecalled(message) {
+  if (!message || typeof message !== "object") return false;
+  const status = String(
+    message.status
+      || message.msg_status
+      || message.message_status
+      || message.state
+      || "",
+  ).toLowerCase();
+  if (["recalled", "recall", "deleted", "removed"].includes(status)) return true;
+  return Boolean(message.recalled || message.is_recalled || message.is_recalled_message || message.deleted || message.is_deleted);
+}
+
 async function enrichEvent(event) {
-  const messageId = event.message_id || event.id;
+  const messageId = messageIdOf(event);
   if (!messageId) return event;
 
   const result = await runLark([
@@ -2618,6 +2810,14 @@ async function enrichEvent(event) {
   ], { timeoutMs: 45_000, attempts: 2 });
 
   if (result.code !== 0) {
+    const detail = `${result.stderr || ""}\n${result.stdout || ""}`;
+    if (larkTextIndicatesRecalled(detail)) {
+      return {
+        ...event,
+        recalled: true,
+        recallReason: detail.slice(0, 500),
+      };
+    }
     log("WARN", "message mget failed; using event payload", {
       messageId,
       error: (result.stderr || result.stdout).slice(0, 1000),
@@ -2629,6 +2829,14 @@ async function enrichEvent(event) {
     const parsed = JSON.parse(result.stdout);
     const msg = parsed?.data?.messages?.[0];
     if (!msg) return event;
+    if (messageRecordLooksRecalled(msg)) {
+      return {
+        ...event,
+        chat_id: msg.chat_id || event.chat_id,
+        recalled: true,
+        recallReason: "message record is recalled",
+      };
+    }
     return {
       ...event,
       chat_id: msg.chat_id || event.chat_id,
@@ -4328,24 +4536,148 @@ function safeFilePart(value) {
   return String(value).replace(/[^a-zA-Z0-9_.-]/g, "_").slice(0, 80);
 }
 
+function cleanupRecalledMessages() {
+  if (!hasDuration(CONFIG.recalledMessageTtlMs)) return;
+  const cutoff = Date.now() - CONFIG.recalledMessageTtlMs;
+  for (const [messageId, record] of recalledMessages) {
+    if (Number(record?.at || 0) < cutoff) recalledMessages.delete(messageId);
+  }
+}
+
+function rememberRecalledMessage(messageId, record = {}) {
+  const id = String(messageId || "").trim();
+  if (!id) return false;
+  cleanupRecalledMessages();
+  recalledMessages.set(id, {
+    messageId: id,
+    chatId: String(record.chatId || ""),
+    eventId: String(record.eventId || ""),
+    at: Number(record.at || 0) || Date.now(),
+    reason: String(record.reason || "recall"),
+  });
+  return true;
+}
+
+function isMessageRecalled(messageId) {
+  cleanupRecalledMessages();
+  return recalledMessages.has(String(messageId || "").trim());
+}
+
+function dropPendingAttachmentsForMessage(messageId, chatId = "") {
+  const target = String(messageId || "").trim();
+  if (!target) return 0;
+  let removed = 0;
+  for (const [key, items] of pendingAttachmentsByChat) {
+    if (chatId && key !== chatId) continue;
+    const next = (items || []).filter((item) => {
+      const keep = String(item?.messageId || "") !== target;
+      if (!keep) removed += 1;
+      return keep;
+    });
+    if (next.length) pendingAttachmentsByChat.set(key, next);
+    else pendingAttachmentsByChat.delete(key);
+  }
+  return removed;
+}
+
+function removePendingEventsByMessageId(messageId) {
+  const target = String(messageId || "").trim();
+  if (!target) return 0;
+  let removed = 0;
+  for (let index = pendingEvents.length - 1; index >= 0; index -= 1) {
+    if (messageIdOf(pendingEvents[index]) === target) {
+      pendingEvents.splice(index, 1);
+      removed += 1;
+    }
+  }
+  return removed;
+}
+
+function pendingEventMatchesChat(event, chatId) {
+  const target = String(chatId || "").trim();
+  if (!target) return false;
+  const current = chatIdOf(event);
+  return current && current === target;
+}
+
+function clearPendingEventsForChat(chatId, { all = false } = {}) {
+  let removed = 0;
+  for (let index = pendingEvents.length - 1; index >= 0; index -= 1) {
+    if (all || pendingEventMatchesChat(pendingEvents[index], chatId)) {
+      pendingEvents.splice(index, 1);
+      removed += 1;
+    }
+  }
+  return removed;
+}
+
+function pendingEventsForChat(chatId) {
+  if (!chatId) return 0;
+  return pendingEvents.filter((event) => pendingEventMatchesChat(event, chatId)).length;
+}
+
+function queueSummary(chatId) {
+  const knownForChat = pendingEventsForChat(chatId);
+  const unknown = pendingEvents.filter((event) => !chatIdOf(event)).length;
+  const parts = [`总队列 ${pendingEvents.length}`];
+  if (chatId) parts.push(`当前聊天 ${knownForChat}`);
+  if (unknown) parts.push(`未知聊天 ${unknown}`);
+  return parts.join("，");
+}
+
+function handleRecallEvent(rawEvent) {
+  const messageId = messageIdOf(rawEvent);
+  const chatId = chatIdOf(rawEvent);
+  const eventId = eventIdOf(rawEvent);
+  if (!messageId) {
+    log("WARN", "recall event missing message_id", rawEvent);
+    return;
+  }
+  if (eventId && rememberEvent(eventId, messageId)) {
+    log("INFO", "duplicate recall event ignored", { eventId, messageId });
+    return;
+  }
+  rememberRecalledMessage(messageId, { chatId, eventId, reason: "recall_event" });
+  const removedEvents = removePendingEventsByMessageId(messageId);
+  const removedAttachments = dropPendingAttachmentsForMessage(messageId, chatId);
+  log("INFO", "message recall handled", {
+    eventId,
+    messageId,
+    chatId,
+    removedEvents,
+    removedAttachments,
+  });
+}
+
 function enqueue(event) {
+  if (isRecallEvent(event)) {
+    handleRecallEvent(event);
+    return;
+  }
+
+  const messageId = messageIdOf(event);
+  if (messageId && isMessageRecalled(messageId)) {
+    log("INFO", "recalled message ignored before enqueue", { messageId, eventId: eventIdOf(event) });
+    return;
+  }
+
   const command = parseCommand(event?.content);
   if (isOutOfBandCommand(command)) {
     void handleOutOfBandCommand(event, command)
       .catch((error) => log("ERROR", "out-of-band command handling failed", { error: String(error.stack || error) }));
     return;
   }
-  pendingEvents.push(event);
+  pendingEvents.push({ ...event, queuedAt: Date.now() });
   drainQueue();
 }
 
 function isOutOfBandCommand(command) {
-  return ["/stop", "/goal", "/provider", "/model", "/fast"].includes(command?.name);
+  return ["/stop", "/clearqueue", "/queue", "/goal", "/provider", "/model", "/fast"].includes(command?.name);
 }
 
 async function handleOutOfBandCommand(rawEvent, command) {
-  const messageId = rawEvent.message_id || rawEvent.id;
-  const dedupeId = rawEvent.event_id || messageId;
+  const messageId = messageIdOf(rawEvent);
+  const dedupeId = eventIdOf(rawEvent) || messageId;
   if (!messageId) {
     log("WARN", "out-of-band command missing message_id", rawEvent);
     return;
@@ -4389,10 +4721,14 @@ function drainQueue() {
 }
 
 async function handleEvent(rawEvent) {
-  const messageId = rawEvent.message_id || rawEvent.id;
-  const dedupeId = rawEvent.event_id || messageId;
+  const messageId = messageIdOf(rawEvent);
+  const dedupeId = eventIdOf(rawEvent) || messageId;
   if (!messageId) {
     log("WARN", "event missing message_id", rawEvent);
+    return;
+  }
+  if (isMessageRecalled(messageId)) {
+    log("INFO", "recalled message skipped before handling", { messageId, eventId: eventIdOf(rawEvent) });
     return;
   }
   if (rememberEvent(dedupeId, messageId)) {
@@ -4401,6 +4737,12 @@ async function handleEvent(rawEvent) {
   }
 
   const event = await enrichEvent(rawEvent);
+  if (event?.recalled || isMessageRecalled(messageId)) {
+    rememberRecalledMessage(messageId, { chatId: chatIdOf(event), eventId: eventIdOf(event), reason: event?.recallReason || "preflight" });
+    dropPendingAttachmentsForMessage(messageId, chatIdOf(event));
+    log("INFO", "recalled message skipped after preflight", { messageId, reason: event?.recallReason || "" });
+    return;
+  }
   const chatId = event.chat_id;
   if (!chatId) {
     log("WARN", "event missing chat_id", event);
@@ -4478,6 +4820,7 @@ async function handleEvent(rawEvent) {
   const session = getSession(chatId);
   const cardState = createRunState(session, event, userContent);
   let card = null;
+  let activeRunRecorded = false;
   if (CONFIG.useCards) {
     try {
       card = await ManagedCard.open(
@@ -4487,6 +4830,15 @@ async function handleEvent(rawEvent) {
         messageId,
       );
       log("INFO", "card opened", { messageId, cardId: card.cardId, cardMessageId: card.messageId });
+      recordActiveRun({
+        chatId,
+        messageId,
+        sessionId: session.id,
+        cardId: card.cardId,
+        cardMessageId: card.messageId,
+        startedAt: cardState.startedAt,
+      });
+      activeRunRecorded = true;
     } catch (error) {
       log("WARN", "card open failed; falling back to markdown", {
         messageId,
@@ -4513,6 +4865,7 @@ async function handleEvent(rawEvent) {
   let finalCardFlushOk = true;
   const updateCard = async (state) => {
     if (!card) return;
+    if (activeRunRecorded && state.terminal === "running") touchActiveRun(messageId);
     const rendered = renderRunCard(state);
     if (state.terminal === "running") {
       card.update(rendered);
@@ -4588,6 +4941,8 @@ async function handleEvent(rawEvent) {
       );
     }
     throw error;
+  } finally {
+    if (activeRunRecorded) clearActiveRun(messageId);
   }
 }
 
@@ -4631,7 +4986,13 @@ async function handleCommand(event, command) {
       await handleCompactCommand(chatId, messageId);
       return;
     case "/stop":
-      await stopCurrentJob(chatId, messageId);
+      await stopCurrentJob(chatId, messageId, { clearMode: stopClearMode(command.rest) });
+      return;
+    case "/queue":
+      await sendText(chatId, `当前队列：${queueSummary(chatId)}`, "queue", messageId);
+      return;
+    case "/clearqueue":
+      await clearQueueCommand(chatId, command.rest, messageId);
       return;
     case "/sessions":
     case "/list": {
@@ -5241,10 +5602,32 @@ function runtimeCommandErrorMarkdown(title, error) {
   ].join("\n");
 }
 
-async function stopCurrentJob(chatId, messageId) {
+function stopClearMode(rest) {
+  const text = String(rest || "").trim().toLowerCase();
+  if (!text) return "";
+  if (["queue", "queued", "clear", "current"].includes(text)) return "chat";
+  if (["all", "queues", "clearall", "clear-all"].includes(text)) return "all";
+  return "";
+}
+
+async function clearQueueCommand(chatId, rest, messageId) {
+  const mode = stopClearMode(rest) === "all" ? "all" : "chat";
+  const removed = clearPendingEventsForChat(chatId, { all: mode === "all" });
+  await sendText(
+    chatId,
+    mode === "all"
+      ? `已清空全部等待队列：${removed} 条。`
+      : `已清空当前聊天等待队列：${removed} 条。当前队列：${queueSummary(chatId)}`,
+    "clearqueue",
+    messageId,
+  );
+}
+
+async function stopCurrentJob(chatId, messageId, { clearMode = "" } = {}) {
+  const cleared = clearMode ? clearPendingEventsForChat(chatId, { all: clearMode === "all" }) : 0;
   const job = activeCodexJobs.get(chatId);
   if (!job) {
-    await sendText(chatId, "当前没有运行中的 Codex 任务。", "stop-none", messageId);
+    await sendText(chatId, `当前没有运行中的 Codex 任务。${clearMode ? `已清理等待队列 ${cleared} 条。` : ""}`, "stop-none", messageId);
     return;
   }
   stoppedJobs.add(job.messageId);
@@ -5257,7 +5640,12 @@ async function stopCurrentJob(chatId, messageId) {
         const current = activeCodexJobs.get(chatId);
         if (current?.pid === job.pid) terminateProcessTree(job.pid, true);
       }, 5000).unref?.();
-      await sendText(chatId, "已请求 Codex 原生停止当前任务；如果没有及时结束，Bridge 会自动兜底强制停止。", "stop", messageId);
+      await sendText(
+        chatId,
+        `已请求 Codex 原生停止当前任务；如果没有及时结束，Bridge 会自动兜底强制停止。${clearMode ? `已清理等待队列 ${cleared} 条。` : ""}`,
+        "stop",
+        messageId,
+      );
       return;
     } catch (error) {
       log("WARN", "codex turn interrupt failed; falling back to process termination", {
@@ -5272,7 +5660,7 @@ async function stopCurrentJob(chatId, messageId) {
 
   terminateProcessTree(job.pid, false);
   setTimeout(() => terminateProcessTree(job.pid, true), 5000).unref?.();
-  await sendText(chatId, "已停止当前 Codex 任务。", "stop", messageId);
+  await sendText(chatId, `已停止当前 Codex 任务。${clearMode ? `已清理等待队列 ${cleared} 条。` : ""}`, "stop", messageId);
 }
 
 async function handleCompactCommand(chatId, messageId) {
@@ -5353,6 +5741,10 @@ function helpMarkdown() {
     "`/delete <序号或ID>` — 删除 Codex 本地会话，需 `/confirm delete <序号>` 确认",
     "`/reset` — 清空当前会话上下文",
     "`/stop` — 停止当前 Codex 任务",
+    "`/stop queue` — 停止当前任务，并清空当前聊天的等待队列",
+    "`/stop all` — 停止当前任务，并清空本 Bot 全部等待队列",
+    "`/queue` — 查看等待队列",
+    "`/clearqueue [all]` — 清空当前聊天或全部等待队列",
     "`/list` — 同 `/sessions`",
     "",
     "直接发送文本会进入当前会话。群聊里可以 @codex助手 后发送文本。",
@@ -5427,7 +5819,7 @@ async function statusMarkdown(chatId) {
     `Goal：${goalSummary(session.lastGoal)}`,
     `上下文：${context}`,
     `运行中：${job ? `是，已运行 ${formatDuration(Date.now() - job.startedAt)}` : "否"}`,
-    `队列：${pendingEvents.length}`,
+    `队列：${queueSummary(chatId)}`,
     `最近失败：${session.lastFailure ? `${session.lastFailure.label} (${formatTime(session.lastFailure.at)})` : "无"}`,
     `失败统计：${failureStatsSummary()}`,
     "",
@@ -5560,7 +5952,7 @@ async function nowMarkdown(chatId) {
     `上下文：${sessionContextSummary(session)}`,
     `历史：${session.messages.length} 条`,
     `运行中：${job ? `是，已运行 ${formatDuration(Date.now() - job.startedAt)}` : "否"}`,
-    `队列：${pendingEvents.length}`,
+    `队列：${queueSummary(chatId)}`,
     `设置：${settingsSummary(session)}`,
     `运行模式：\`${CONFIG.runMode}\` · 沙箱：\`${CONFIG.codexSandbox}\` · MCP：${CONFIG.disableMcp ? "禁用" : "启用"}`,
     `超时：总时长 ${durationConfigLabel(CONFIG.codexTimeoutMs)} · 无进展 ${durationConfigLabel(CONFIG.codexIdleTimeoutMs)}`,
@@ -5652,7 +6044,7 @@ function delay(ms) {
 function startConsumer() {
   log("INFO", "starting bridge", {
     workspace: CONFIG.workspace,
-    eventKey: CONFIG.eventKey,
+    eventKeys: CONFIG.eventKeys,
     larkProfile: CONFIG.larkProfile || "default",
     larkCli: toolLabel(CONFIG.larkCli),
     codexCli: toolLabel(CONFIG.codexCli),
@@ -5671,7 +6063,23 @@ function startConsumer() {
     replyInThread: CONFIG.useThreadReply,
   });
 
-  const eventArgs = [...CONFIG.larkCli.argsPrefix, "event", "consume", CONFIG.eventKey, "--as", "bot"];
+  for (const eventKey of CONFIG.eventKeys) startEventConsumer(eventKey);
+
+  const stopTimer = setInterval(() => {
+    if (fs.existsSync(stopPath)) {
+      log("INFO", "stop file detected");
+      try {
+        fs.rmSync(stopPath, { force: true });
+      } catch {}
+      shutdown(0);
+    }
+  }, 1000);
+  stopTimer.unref?.();
+  shutdownCallbacks.add(() => clearInterval(stopTimer));
+}
+
+function startEventConsumer(eventKey) {
+  const eventArgs = [...CONFIG.larkCli.argsPrefix, "event", "consume", eventKey, "--as", "bot"];
   const child = spawn(CONFIG.larkCli.command, eventArgs, {
     cwd: CONFIG.workspace,
     env: process.env,
@@ -5706,38 +6114,26 @@ function startConsumer() {
     const trimmed = line.trim();
     if (!trimmed) return;
     if (trimmed.includes("[event] ready")) {
-      log("INFO", "event consumer ready", { line: trimmed });
+      log("INFO", "event consumer ready", { eventKey, line: trimmed });
     } else if (trimmed.includes("[event] exited")) {
-      log("INFO", "event consumer exited", { line: trimmed });
+      log("INFO", "event consumer exited", { eventKey, line: trimmed });
     } else {
-      log("WARN", "event consumer stderr", { line: trimmed });
+      log("WARN", "event consumer stderr", { eventKey, line: trimmed });
     }
   });
 
   child.on("error", (error) => {
-    log("ERROR", "event consumer spawn failed", { error: String(error.stack || error) });
+    log("ERROR", "event consumer spawn failed", { eventKey, error: String(error.stack || error) });
     shutdown(1);
   });
 
   child.on("close", (code) => {
     activeChildren.delete(child.pid);
     if (!shuttingDown) {
-      log("ERROR", "event consumer stopped unexpectedly", { code });
+      log("ERROR", "event consumer stopped unexpectedly", { eventKey, code });
       shutdown(code || 1);
     }
   });
-
-  const stopTimer = setInterval(() => {
-    if (fs.existsSync(stopPath)) {
-      log("INFO", "stop file detected");
-      try {
-        fs.rmSync(stopPath, { force: true });
-      } catch {}
-      shutdown(0);
-    }
-  }, 1000);
-  stopTimer.unref?.();
-  shutdownCallbacks.add(() => clearInterval(stopTimer));
 }
 
 function toolLabel(tool) {
@@ -5788,4 +6184,6 @@ process.on("exit", () => {
   releaseSingleInstanceLock();
 });
 
-startConsumer();
+repairStaleActiveRunsOnStartup()
+  .catch((error) => log("WARN", "stale active run repair failed", { error: String(error.stack || error) }))
+  .finally(() => startConsumer());

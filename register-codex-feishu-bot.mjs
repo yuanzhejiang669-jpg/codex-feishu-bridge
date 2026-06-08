@@ -28,6 +28,7 @@ Options:
   --sandbox <value>             Passed to start script.
   --run-mode <app-server|auto|exec>
   --reasoning <value>           Passed to start script.
+  --event-keys <keys>           Comma-separated EventKeys passed to start script.
   --codex-timeout-seconds <n>   Passed to start script.
   --codex-idle-timeout-seconds <n>
                                 Passed to start script.
@@ -341,6 +342,7 @@ function bridgeStartCommand({ name, profile, workspace, options }) {
     addOptionalPowerShellArg(args, "-Sandbox", options.sandbox);
     addOptionalPowerShellArg(args, "-RunMode", options.runMode);
     addOptionalPowerShellArg(args, "-Reasoning", options.reasoning);
+    addOptionalPowerShellArg(args, "-EventKeys", options.eventKeys);
     addOptionalPowerShellArg(args, "-CodexTimeoutSeconds", options.codexTimeoutSeconds);
     addOptionalPowerShellArg(args, "-CodexIdleTimeoutSeconds", options.codexIdleTimeoutSeconds);
     addOptionalPowerShellArg(args, "-MaxConcurrent", options.maxConcurrent);
@@ -362,6 +364,7 @@ function bridgeStartCommand({ name, profile, workspace, options }) {
   addOptionalCliArg(args, "--sandbox", options.sandbox);
   addOptionalCliArg(args, "--run-mode", options.runMode);
   addOptionalCliArg(args, "--reasoning", options.reasoning);
+  addOptionalCliArg(args, "--event-keys", options.eventKeys);
   addOptionalCliArg(args, "--codex-timeout-seconds", options.codexTimeoutSeconds);
   addOptionalCliArg(args, "--codex-idle-timeout-seconds", options.codexIdleTimeoutSeconds);
   addOptionalCliArg(args, "--max-concurrent", options.maxConcurrent);
@@ -388,6 +391,7 @@ function bridgeStartupCommand({ name, profile, workspace, options }) {
     ];
     addOptionalPowerShellArg(args, "-CodexTimeoutSeconds", options.codexTimeoutSeconds);
     addOptionalPowerShellArg(args, "-CodexIdleTimeoutSeconds", options.codexIdleTimeoutSeconds);
+    addOptionalPowerShellArg(args, "-EventKeys", options.eventKeys);
     return { command: "powershell.exe", args };
   }
 
@@ -403,6 +407,7 @@ function bridgeStartupCommand({ name, profile, workspace, options }) {
   ];
   addOptionalCliArg(args, "--codex-timeout-seconds", options.codexTimeoutSeconds);
   addOptionalCliArg(args, "--codex-idle-timeout-seconds", options.codexIdleTimeoutSeconds);
+  addOptionalCliArg(args, "--event-keys", options.eventKeys);
   return { command: "bash", args };
 }
 

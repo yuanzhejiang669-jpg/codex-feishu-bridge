@@ -8,6 +8,7 @@ NAME=""
 LARK_PROFILE=""
 WORKSPACE=""
 LABEL=""
+EVENT_KEYS="im.message.receive_v1"
 CODEX_TIMEOUT_SECONDS="0"
 CODEX_IDLE_TIMEOUT_SECONDS="3600"
 WATCHDOG_TIMEOUT_SECONDS="180"
@@ -23,6 +24,7 @@ Options:
   --lark-profile <name>
   --workspace <path>
   --label <launchd-label>
+  --event-keys <keys>
   --codex-timeout-seconds <n>
   --codex-idle-timeout-seconds <n>
   --watchdog-timeout-seconds <n>
@@ -76,6 +78,8 @@ while [[ $# -gt 0 ]]; do
       WORKSPACE="${2:-}"; shift 2 ;;
     --label)
       LABEL="${2:-}"; shift 2 ;;
+    --event-keys|-EventKeys)
+      EVENT_KEYS="${2:-}"; shift 2 ;;
     --codex-timeout-seconds|-CodexTimeoutSeconds)
       CODEX_TIMEOUT_SECONDS="${2:-}"; shift 2 ;;
     --codex-idle-timeout-seconds|-CodexIdleTimeoutSeconds)
@@ -147,6 +151,8 @@ if [[ -n "$LARK_PROFILE" ]]; then
 fi
 PROGRAM_ARGS+="$(string_item "--workspace")"
 PROGRAM_ARGS+="$(string_item "$WORKSPACE")"
+PROGRAM_ARGS+="$(string_item "--event-keys")"
+PROGRAM_ARGS+="$(string_item "$EVENT_KEYS")"
 PROGRAM_ARGS+="$(string_item "--codex-timeout-seconds")"
 PROGRAM_ARGS+="$(string_item "$CODEX_TIMEOUT_SECONDS")"
 PROGRAM_ARGS+="$(string_item "--codex-idle-timeout-seconds")"
@@ -205,6 +211,7 @@ echo "Plist: $PLIST"
 echo "Instance: ${SAFE_NAME:-default}"
 echo "Lark profile: ${LARK_PROFILE:-default/current}"
 echo "Workspace: $WORKSPACE"
+echo "Event keys: $EVENT_KEYS"
 echo "Codex total timeout: $([[ "$CODEX_TIMEOUT_SECONDS" -gt 0 ]] && echo "${CODEX_TIMEOUT_SECONDS} seconds" || echo disabled)"
 echo "Codex idle timeout: $([[ "$CODEX_IDLE_TIMEOUT_SECONDS" -gt 0 ]] && echo "${CODEX_IDLE_TIMEOUT_SECONDS} seconds" || echo disabled)"
 echo "Watchdog timeout: $([[ "$WATCHDOG_TIMEOUT_SECONDS" -gt 0 ]] && echo "${WATCHDOG_TIMEOUT_SECONDS} seconds" || echo disabled)"

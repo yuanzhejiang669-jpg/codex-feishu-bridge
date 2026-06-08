@@ -10,6 +10,7 @@ WORKSPACE=""
 SANDBOX="danger-full-access"
 RUN_MODE="app-server"
 REASONING="xhigh"
+EVENT_KEYS="im.message.receive_v1"
 CODEX_TIMEOUT_SECONDS="0"
 CODEX_IDLE_TIMEOUT_SECONDS="3600"
 MAX_CONCURRENT="1"
@@ -34,6 +35,7 @@ Options:
   --sandbox <value>                Defaults to danger-full-access.
   --run-mode <app-server|auto|exec>
   --reasoning <value>              Defaults to xhigh.
+  --event-keys <keys>              Defaults to im.message.receive_v1.
   --codex-timeout-seconds <n>      Defaults to 0 (disabled).
   --codex-idle-timeout-seconds <n> Defaults to 3600.
   --max-concurrent <n>             Defaults to 1.
@@ -83,6 +85,8 @@ while [[ $# -gt 0 ]]; do
       RUN_MODE="${2:-}"; shift 2 ;;
     --reasoning|-Reasoning)
       REASONING="${2:-}"; shift 2 ;;
+    --event-keys|-EventKeys)
+      EVENT_KEYS="${2:-}"; shift 2 ;;
     --codex-timeout-seconds|-CodexTimeoutSeconds)
       CODEX_TIMEOUT_SECONDS="${2:-}"; shift 2 ;;
     --codex-idle-timeout-seconds|-CodexIdleTimeoutSeconds)
@@ -176,6 +180,7 @@ else
 fi
 export CODEX_FEISHU_SANDBOX="$SANDBOX"
 export CODEX_FEISHU_RUN_MODE="$RUN_MODE"
+export CODEX_FEISHU_EVENT_KEYS="$EVENT_KEYS"
 if [[ -n "$REASONING" ]]; then
   export CODEX_FEISHU_REASONING="$REASONING"
 else
@@ -220,6 +225,7 @@ echo "Codex CLI: ${CODEX_CLI_BIN:-codex}"
 echo "Run mode: $CODEX_FEISHU_RUN_MODE"
 echo "Sandbox: $CODEX_FEISHU_SANDBOX"
 echo "Reasoning: ${CODEX_FEISHU_REASONING:-config}"
+echo "Event keys: $CODEX_FEISHU_EVENT_KEYS"
 if [[ "$CODEX_TIMEOUT_SECONDS" -gt 0 ]]; then
   echo "Codex total timeout: ${CODEX_TIMEOUT_SECONDS} seconds"
 else

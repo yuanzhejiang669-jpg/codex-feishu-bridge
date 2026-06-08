@@ -11,6 +11,7 @@ WORKSPACE=""
 SANDBOX="danger-full-access"
 RUN_MODE="app-server"
 REASONING="xhigh"
+EVENT_KEYS="im.message.receive_v1"
 CODEX_TIMEOUT_SECONDS="0"
 CODEX_IDLE_TIMEOUT_SECONDS="3600"
 RESTART_COOLDOWN_SECONDS="60"
@@ -29,6 +30,7 @@ Options:
   --sandbox <value>
   --run-mode <app-server|auto|exec>
   --reasoning <value>
+  --event-keys <keys>
   --codex-timeout-seconds <n>
   --codex-idle-timeout-seconds <n>
   --restart-cooldown-seconds <n>
@@ -70,6 +72,8 @@ while [[ $# -gt 0 ]]; do
       RUN_MODE="${2:-}"; shift 2 ;;
     --reasoning|-Reasoning)
       REASONING="${2:-}"; shift 2 ;;
+    --event-keys|-EventKeys)
+      EVENT_KEYS="${2:-}"; shift 2 ;;
     --codex-timeout-seconds|-CodexTimeoutSeconds)
       CODEX_TIMEOUT_SECONDS="${2:-}"; shift 2 ;;
     --codex-idle-timeout-seconds|-CodexIdleTimeoutSeconds)
@@ -219,19 +223,25 @@ test_lark_consumer() {
   status_code="$?"
   set -e
 
-  if printf '%s' "$output" | node -e '
+  if printf '%s' "$output" | EXPECTED_EVENT_KEYS="$EVENT_KEYS" node -e '
 let input = "";
+const expected = String(process.env.EXPECTED_EVENT_KEYS || "im.message.receive_v1")
+  .split(/[,\s;]+/)
+  .map((item) => item.trim())
+  .filter(Boolean);
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => input += chunk);
 process.stdin.on("end", () => {
   try {
     const parsed = JSON.parse(input);
+    const running = new Set();
     for (const app of parsed.apps || []) {
       if (!app.running) continue;
       for (const consumer of app.consumers || []) {
-        if (consumer.event_key === "im.message.receive_v1") process.exit(0);
+        if (consumer.event_key) running.add(String(consumer.event_key));
       }
     }
+    if (expected.every((key) => running.has(key))) process.exit(0);
   } catch {}
   process.exit(1);
 });
@@ -249,7 +259,7 @@ process.stdin.on("end", () => {
     return 1
   fi
 
-  printf '%s' "no active im.message.receive_v1 consumer"
+  printf 'missing consumer for expected events: %s' "$EVENT_KEYS"
   return 1
 }
 
@@ -280,6 +290,7 @@ restart_bridge() {
     --sandbox "$SANDBOX"
     --run-mode "$RUN_MODE"
     --reasoning "$REASONING"
+    --event-keys "$EVENT_KEYS"
     --codex-timeout-seconds "$CODEX_TIMEOUT_SECONDS"
     --codex-idle-timeout-seconds "$CODEX_IDLE_TIMEOUT_SECONDS"
   )
