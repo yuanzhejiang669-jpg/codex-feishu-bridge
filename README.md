@@ -1,5 +1,7 @@
 # Codex Feishu Bridge
 
+Languages: [English](README.md) | [中文](README.zh-CN.md)
+
 Codex Feishu Bridge connects a Feishu bot to a local Codex runtime. It receives Feishu messages, downloads supported attachments into a dedicated workspace, starts or continues a Codex task, and posts progress plus final responses back to Feishu.
 
 The `main` branch is the Windows deployment branch. It includes PowerShell startup scripts, Windows Scheduled Task watchdog support, QR-code based Feishu bot registration, multi-instance runtime isolation, queue controls, and operational diagnostics.
