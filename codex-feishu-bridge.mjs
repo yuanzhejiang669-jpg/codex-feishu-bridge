@@ -2157,6 +2157,12 @@ function clearActiveRun(messageId) {
   saveActiveRuns();
 }
 
+function staleCardUpdateSequence(record) {
+  const recorded = Math.floor(Number(record?.sequence || 0));
+  const epochSeconds = Math.floor(Date.now() / 1000);
+  return Math.max(1, recorded + 1, epochSeconds);
+}
+
 function renderStaleRunCard(record) {
   const startedAt = Number(record?.startedAt || 0);
   const updatedAt = Number(record?.updatedAt || 0);
@@ -2182,8 +2188,9 @@ function renderStaleRunCard(record) {
   };
 }
 
-async function updateCardById(cardId, card) {
+async function updateCardById(cardId, card, { sequence } = {}) {
   if (!cardId) return false;
+  const nextSequence = Math.max(1, Math.floor(Number(sequence || 0)));
   await larkJson([
     "api",
     "PUT",
@@ -2191,7 +2198,7 @@ async function updateCardById(cardId, card) {
     "--as",
     "bot",
     "--data",
-    JSON.stringify({ card: { type: "card_json", data: JSON.stringify(card) } }),
+    JSON.stringify({ card: { type: "card_json", data: JSON.stringify(card) }, sequence: nextSequence }),
   ], { timeoutMs: 60_000, attempts: 2 });
   return true;
 }
@@ -2201,13 +2208,25 @@ async function repairStaleActiveRunsOnStartup() {
   if (!entries.length) return;
   log("INFO", "repairing stale active runs", { count: entries.length });
   let repaired = 0;
+  const remaining = {};
   for (const record of entries) {
     try {
       if (record?.cardId) {
-        await updateCardById(record.cardId, renderStaleRunCard(record));
+        await updateCardById(record.cardId, renderStaleRunCard(record), {
+          sequence: staleCardUpdateSequence(record),
+        });
       }
       repaired += 1;
     } catch (error) {
+      const key = activeRunKey(record?.messageId);
+      if (key) {
+        remaining[key] = {
+          ...record,
+          repairAttempts: Number(record?.repairAttempts || 0) + 1,
+          lastRepairAt: Date.now(),
+          lastRepairError: String(error.message || error).slice(0, 1000),
+        };
+      }
       log("WARN", "stale active run card update failed", {
         messageId: record?.messageId || "",
         cardId: record?.cardId || "",
@@ -2215,9 +2234,9 @@ async function repairStaleActiveRunsOnStartup() {
       });
     }
   }
-  activeRuns.runs = {};
+  activeRuns.runs = remaining;
   saveActiveRuns();
-  log("INFO", "stale active runs repaired", { repaired });
+  log("INFO", "stale active runs repaired", { repaired, remaining: Object.keys(remaining).length });
 }
 
 function renderRunBlocks(blocks, finalized) {
