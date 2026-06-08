@@ -19,6 +19,7 @@ param(
   [string]$RunMode = "",
   [string]$Reasoning = "",
   [int]$CodexTimeoutSeconds = 0,
+  [int]$CodexIdleTimeoutSeconds = 3600,
   [int]$MaxConcurrent = 0,
   [switch]$DisableMcp,
   [switch]$EnableMcp
@@ -68,7 +69,8 @@ if ($ForceProfile) { $argsList += "--force-profile" }
 if ($Sandbox.Trim()) { $argsList += @("--sandbox", $Sandbox.Trim()) }
 if ($RunMode.Trim()) { $argsList += @("--run-mode", $RunMode.Trim()) }
 if ($Reasoning.Trim()) { $argsList += @("--reasoning", $Reasoning.Trim()) }
-if ($CodexTimeoutSeconds -gt 0) { $argsList += @("--codex-timeout-seconds", $CodexTimeoutSeconds) }
+if ($PSBoundParameters.ContainsKey("CodexTimeoutSeconds")) { $argsList += @("--codex-timeout-seconds", $CodexTimeoutSeconds) }
+if ($PSBoundParameters.ContainsKey("CodexIdleTimeoutSeconds")) { $argsList += @("--codex-idle-timeout-seconds", $CodexIdleTimeoutSeconds) }
 if ($MaxConcurrent -gt 0) { $argsList += @("--max-concurrent", $MaxConcurrent) }
 if ($DisableMcp) { $argsList += "--disable-mcp" }
 if ($EnableMcp) { $argsList += "--enable-mcp" }

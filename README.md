@@ -62,7 +62,7 @@
 2. 按 README 检查 Node.js 20+、npm、PowerShell、Codex CLI、lark-cli。
 3. 使用 register-codex-feishu-bot.ps1 注册一个飞书机器人，实例名用 codex-assistant-1。
 4. workspace 使用 %USERPROFILE%\Documents\Codex\workspaces\feishu-bridge-codex-assistant-1。
-5. 默认使用 app-server、danger-full-access、reasoning=xhigh、Codex 超时 7200 秒、动态卡片开启、MCP 开启。
+5. 默认使用 app-server、danger-full-access、reasoning=xhigh、Codex 总时长超时禁用、无进展超时 3600 秒、动态卡片开启、MCP 开启。
 6. 安装 watchdog 开机/解锁/每 5 分钟自动检查。
 7. 最后在飞书里发送 /status 和一条普通消息验证。
 
@@ -152,7 +152,8 @@ $BotDisplayName = "Codex Assistant 1"
   -Workspace "$env:USERPROFILE\Documents\Codex\workspaces\feishu-bridge-$BotName" `
   -RunMode app-server `
   -Reasoning xhigh `
-  -CodexTimeoutSeconds 7200 `
+  -CodexTimeoutSeconds 0 `
+  -CodexIdleTimeoutSeconds 3600 `
   -InstallStartup
 ```
 
@@ -181,7 +182,8 @@ Set-Location "$env:USERPROFILE\Documents\Codex\tools\codex-feishu-bridge"
   -Workspace "$env:USERPROFILE\Documents\Codex\workspaces\feishu-bridge-codex-assistant-1" `
   -RunMode app-server `
   -Reasoning xhigh `
-  -CodexTimeoutSeconds 7200 `
+  -CodexTimeoutSeconds 0 `
+  -CodexIdleTimeoutSeconds 3600 `
   -InstallStartup
 ```
 
@@ -235,7 +237,8 @@ lark-cli profile list
   -Workspace "$env:USERPROFILE\Documents\Codex\workspaces\feishu-bridge-codex-assistant-1" `
   -RunMode app-server `
   -Reasoning xhigh `
-  -CodexTimeoutSeconds 7200
+  -CodexTimeoutSeconds 0 `
+  -CodexIdleTimeoutSeconds 3600
 ```
 
 ## 开机自启和看门狗
@@ -309,7 +312,8 @@ lark-cli profile list
 | `RunMode` | `app-server` | 使用 Codex app-server 原生线程 |
 | `Sandbox` | `danger-full-access` | 本机私有桥默认全权限，依靠私有机器人和专用 workspace 做边界 |
 | `Reasoning` | `xhigh` | 传给 Codex 的推理强度 |
-| `CodexTimeoutSeconds` | `7200` | 启动脚本默认 2 小时 |
+| `CodexTimeoutSeconds` | `0` | 禁用总时长硬超时；Codex 正常持续工作时不主动中断 |
+| `CodexIdleTimeoutSeconds` | `3600` | 默认 1 小时无进展才判定卡住 |
 | `MaxConcurrent` | `1` | 同实例串行处理 |
 | 动态卡片 | 开启 | 用飞书卡片显示过程和结果 |
 | MCP | 开启 | 需要关闭时传 `-DisableMcp` |

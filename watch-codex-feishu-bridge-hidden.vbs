@@ -1,6 +1,7 @@
 Option Explicit
 
-Dim fso, shell, scriptDir, watchdogScript, workspace, instanceName, larkProfile, command
+Dim fso, shell, scriptDir, watchdogScript, workspace, instanceName, larkProfile
+Dim codexTimeoutSeconds, codexIdleTimeoutSeconds, watchdogTimeoutSeconds, command
 
 Set fso = CreateObject("Scripting.FileSystemObject")
 Set shell = CreateObject("WScript.Shell")
@@ -19,6 +20,18 @@ larkProfile = ""
 If WScript.Arguments.Count > 2 Then
   larkProfile = WScript.Arguments(2)
 End If
+codexTimeoutSeconds = "0"
+If WScript.Arguments.Count > 3 Then
+  codexTimeoutSeconds = WScript.Arguments(3)
+End If
+codexIdleTimeoutSeconds = "3600"
+If WScript.Arguments.Count > 4 Then
+  codexIdleTimeoutSeconds = WScript.Arguments(4)
+End If
+watchdogTimeoutSeconds = "180"
+If WScript.Arguments.Count > 5 Then
+  watchdogTimeoutSeconds = WScript.Arguments(5)
+End If
 
 command = "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File " & _
   Quote(watchdogScript) & " -Workspace " & Quote(workspace)
@@ -28,6 +41,9 @@ End If
 If larkProfile <> "" Then
   command = command & " -LarkProfile " & Quote(larkProfile)
 End If
+command = command & " -CodexTimeoutSeconds " & Quote(codexTimeoutSeconds)
+command = command & " -CodexIdleTimeoutSeconds " & Quote(codexIdleTimeoutSeconds)
+command = command & " -WatchdogTimeoutSeconds " & Quote(watchdogTimeoutSeconds)
 
 shell.CurrentDirectory = scriptDir
 shell.Run command, 0, False

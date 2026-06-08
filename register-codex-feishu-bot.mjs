@@ -29,6 +29,8 @@ Options:
   --run-mode <app-server|auto|exec>
   --reasoning <value>           Passed to start script.
   --codex-timeout-seconds <n>   Passed to start script.
+  --codex-idle-timeout-seconds <n>
+                                Passed to start script.
   --max-concurrent <n>          Passed to start script.
   --disable-mcp                 Passed to start script.
   --enable-mcp                  Passed to start script.
@@ -89,7 +91,7 @@ async function main() {
   }
 
   if (options.installStartup) {
-    await installStartup({ name, profile, workspace });
+    await installStartup({ name, profile, workspace, options });
   }
 
   console.log("");
@@ -318,6 +320,7 @@ async function startBridge({ name, profile, workspace, options }) {
   addOptionalPowerShellArg(args, "-RunMode", options.runMode);
   addOptionalPowerShellArg(args, "-Reasoning", options.reasoning);
   addOptionalPowerShellArg(args, "-CodexTimeoutSeconds", options.codexTimeoutSeconds);
+  addOptionalPowerShellArg(args, "-CodexIdleTimeoutSeconds", options.codexIdleTimeoutSeconds);
   addOptionalPowerShellArg(args, "-MaxConcurrent", options.maxConcurrent);
   if (options.disableMcp) args.push("-DisableMcp");
   if (options.enableMcp) args.push("-EnableMcp");
@@ -331,7 +334,7 @@ async function startBridge({ name, profile, workspace, options }) {
   console.log(`Bridge started: ${name}`);
 }
 
-async function installStartup({ name, profile, workspace }) {
+async function installStartup({ name, profile, workspace, options }) {
   const script = path.join(ROOT, "install-codex-feishu-watchdog.ps1");
   const args = [
     "-NoProfile",
@@ -346,6 +349,8 @@ async function installStartup({ name, profile, workspace }) {
     "-Workspace",
     workspace,
   ];
+  addOptionalPowerShellArg(args, "-CodexTimeoutSeconds", options.codexTimeoutSeconds);
+  addOptionalPowerShellArg(args, "-CodexIdleTimeoutSeconds", options.codexIdleTimeoutSeconds);
   console.log("Installing startup watchdog...");
   const result = await runRaw("powershell.exe", args, { timeoutMs: 60_000 });
   process.stdout.write(result.stdout);
