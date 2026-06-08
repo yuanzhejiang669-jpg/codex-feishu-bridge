@@ -1701,6 +1701,7 @@ function ensureToolBlock(state, item) {
       kind: "tool",
       tool: {
         id: item.id,
+        source: toolSourceFromAppServerItem(item),
         name: toolNameFromAppServerItem(item),
         input: toolInputFromAppServerItem(item),
         output: "",
@@ -1715,6 +1716,7 @@ function ensureToolBlock(state, item) {
 function updateToolFromAppServerItem(state, item) {
   const block = ensureToolBlock(state, item);
   if (!block) return false;
+  block.tool.source = toolSourceFromAppServerItem(item);
   block.tool.name = toolNameFromAppServerItem(item);
   block.tool.input = toolInputFromAppServerItem(item);
   block.tool.status = toolStatusFromAppServerItem(item);
@@ -1756,6 +1758,7 @@ function reduceCodexJsonEvent(state, raw) {
         kind: "tool",
         tool: {
           id: item.id || crypto.randomUUID(),
+          source: toolSourceFromItem(item),
           name,
           input: toolInputFromItem(item),
           status: "running",
@@ -1787,6 +1790,7 @@ function reduceCodexJsonEvent(state, raw) {
         kind: "tool",
         tool: {
           id: item.id || crypto.randomUUID(),
+          source: toolSourceFromItem(item),
           name: item.name || item.type || "tool",
           input: toolInputFromItem(item),
           output: toolOutputFromItem(item),
@@ -2320,6 +2324,12 @@ function toolSummaryFinalBody(tools, counts) {
   }
   const names = [...new Set(tools.map((tool) => displayToolName(tool)).filter(Boolean))].slice(0, 6);
   if (names.length) lines.push(`工具：${names.join(" · ")}`);
+  const auditLines = tools.map((tool, index) => `${index + 1}. ${toolHeaderText(tool, false)}`);
+  if (auditLines.length) {
+    lines.push("");
+    lines.push("调用明细：");
+    lines.push(truncateCardText(auditLines.join("\n"), 6000));
+  }
   return lines.join("\n");
 }
 
@@ -2448,21 +2458,49 @@ function displayToolName(toolOrName) {
   const raw = typeof toolOrName === "object"
     ? String(toolOrName?.name || "tool")
     : String(toolOrName || "tool");
+  const source = typeof toolOrName === "object" ? String(toolOrName?.source || "") : "";
   const lower = raw.toLowerCase();
-  if (lower === "app_server_fallback") return "原生通道回退";
+  if (lower === "app_server_fallback") return "Bridge · app_server_fallback";
   if (lower === "command_execution" || lower === "exec_command" || lower === "bash") {
-    return classifyCommandToolName(commandTextFromInput(toolOrName?.input));
+    return `${classifyCommandToolName(commandTextFromInput(toolOrName?.input))} · ${raw}`;
   }
-  if (lower === "read" || lower === "file_read") return "读取文件";
-  if (lower === "write" || lower === "file_write") return "写入文件";
-  if (lower === "edit" || lower === "apply_patch") return "修改文件";
-  if (lower === "plan") return "更新计划";
-  if (lower === "web_search") return "网页搜索";
-  if (lower === "image_view") return "查看图片";
-  if (lower === "image_generation") return "生成图片";
-  if (lower.includes("mcp")) return "MCP 工具";
-  if (lower.includes("search") || lower === "grep" || lower === "rg") return "搜索";
-  return raw.replace(/_/g, " ");
+  if (source === "mcp") return `MCP · ${raw}`;
+  if (source === "dynamic") return `${dynamicToolDisplayCategory(raw)} · ${raw}`;
+  if (source === "collab_agent") return `Agent · ${raw}`;
+  if (lower === "read" || lower === "file_read") return `File · ${raw}`;
+  if (lower === "write" || lower === "file_write") return `File · ${raw}`;
+  if (lower === "edit" || lower === "apply_patch") return `File · ${raw}`;
+  if (lower === "plan") return `Plan · ${raw}`;
+  if (lower === "web_search") return `Web · ${raw}`;
+  if (lower === "image_view") return `Image · ${raw}`;
+  if (lower === "image_generation") return `Image · ${raw}`;
+  if (lower.includes("mcp") || lower.startsWith("mcp__")) return `MCP · ${raw}`;
+  if (lower.startsWith("skill:") || lower.startsWith("skill.")) return `Skill · ${raw}`;
+  if (lower.startsWith("plugin:") || lower.startsWith("plugin.")) return `Plugin · ${raw}`;
+  if (looksLikeNamespacedTool(raw)) return `${dynamicToolDisplayCategory(raw)} · ${raw}`;
+  if (lower.includes("search") || lower === "grep" || lower === "rg") return `Search · ${raw}`;
+  return `Tool · ${raw}`;
+}
+
+function dynamicToolDisplayCategory(name) {
+  const raw = String(name || "tool");
+  const lower = raw.toLowerCase();
+  const namespace = lower.split(".")[0];
+  if (lower.startsWith("mcp__") || namespace.startsWith("mcp__")) return "MCP";
+  if (namespace === "web") return "Web";
+  if (namespace === "image_gen" || namespace === "imagegen" || namespace === "image") return "Image";
+  if (namespace === "functions") return "Developer Tool";
+  if (namespace === "multi_tool_use") return "Tool";
+  if (namespace === "tool_search") return "Tool Search";
+  if (lower.includes("browser")) return "Browser";
+  if (lower.includes("desktop")) return "Desktop";
+  if (lower.includes("android")) return "Android";
+  if (lower.includes("tavily") || lower.includes("context7") || lower.includes("discord")) return "MCP";
+  return "Tool";
+}
+
+function looksLikeNamespacedTool(name) {
+  return /^[A-Za-z0-9_-]+(?:__[A-Za-z0-9_-]+)?\.[A-Za-z0-9_-]+$/.test(String(name || ""));
 }
 
 function summarizeToolInput(tool) {
@@ -2506,6 +2544,43 @@ function toolOutputFromItem(item) {
     }
   }
   return "";
+}
+
+function toolSourceFromItem(item) {
+  const type = String(item?.type || "").toLowerCase();
+  const name = String(item?.name || "").toLowerCase();
+  if (type.includes("mcp") || name.includes("mcp")) return "mcp";
+  if (type.includes("command") || type === "bash" || name === "bash") return "command";
+  if (type.includes("file") || ["read", "write", "edit", "apply_patch"].includes(name)) return "file";
+  if (type.includes("web") || name.startsWith("web_")) return "web";
+  if (type.includes("image") || name.startsWith("image_")) return "image";
+  if (type.includes("plan") || name === "plan") return "plan";
+  if (type.includes("agent")) return "collab_agent";
+  return "";
+}
+
+function toolSourceFromAppServerItem(item) {
+  switch (item?.type) {
+    case "commandExecution":
+      return "command";
+    case "fileChange":
+      return "file";
+    case "mcpToolCall":
+      return "mcp";
+    case "dynamicToolCall":
+      return "dynamic";
+    case "collabAgentToolCall":
+      return "collab_agent";
+    case "webSearch":
+      return "web";
+    case "imageView":
+    case "imageGeneration":
+      return "image";
+    case "plan":
+      return "plan";
+    default:
+      return toolSourceFromItem(item || {});
+  }
 }
 
 function toolNameFromAppServerItem(item) {
