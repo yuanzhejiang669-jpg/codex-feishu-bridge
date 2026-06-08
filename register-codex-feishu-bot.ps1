@@ -18,6 +18,7 @@ param(
   [ValidateSet("", "app-server", "auto", "exec")]
   [string]$RunMode = "",
   [string]$Reasoning = "",
+  [string]$EventKeys = "",
   [int]$CodexTimeoutSeconds = 0,
   [int]$CodexIdleTimeoutSeconds = 3600,
   [int]$MaxConcurrent = 0,
@@ -69,6 +70,7 @@ if ($ForceProfile) { $argsList += "--force-profile" }
 if ($Sandbox.Trim()) { $argsList += @("--sandbox", $Sandbox.Trim()) }
 if ($RunMode.Trim()) { $argsList += @("--run-mode", $RunMode.Trim()) }
 if ($Reasoning.Trim()) { $argsList += @("--reasoning", $Reasoning.Trim()) }
+if ($EventKeys.Trim()) { $argsList += @("--event-keys", $EventKeys.Trim()) }
 if ($PSBoundParameters.ContainsKey("CodexTimeoutSeconds")) { $argsList += @("--codex-timeout-seconds", $CodexTimeoutSeconds) }
 if ($PSBoundParameters.ContainsKey("CodexIdleTimeoutSeconds")) { $argsList += @("--codex-idle-timeout-seconds", $CodexIdleTimeoutSeconds) }
 if ($MaxConcurrent -gt 0) { $argsList += @("--max-concurrent", $MaxConcurrent) }

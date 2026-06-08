@@ -3,6 +3,7 @@ param(
   [string]$LarkProfile = "",
   [string]$Workspace = "",
   [string]$TaskName = "",
+  [string]$EventKeys = "im.message.receive_v1",
   [int]$CodexTimeoutSeconds = 0,
   [int]$CodexIdleTimeoutSeconds = 3600,
   [int]$WatchdogTimeoutSeconds = 180,
@@ -66,7 +67,8 @@ $argumentParts = @(
   "`"$profileArg`"",
   $CodexTimeoutSeconds,
   $CodexIdleTimeoutSeconds,
-  $WatchdogTimeoutSeconds
+  $WatchdogTimeoutSeconds,
+  "`"$EventKeys`""
 )
 $arguments = $argumentParts -join " "
 
@@ -157,6 +159,7 @@ Write-Host "Workspace: $Workspace"
 Write-Host "Codex total timeout: $(if ($CodexTimeoutSeconds -gt 0) { "$CodexTimeoutSeconds seconds" } else { 'disabled' })"
 Write-Host "Codex idle timeout: $(if ($CodexIdleTimeoutSeconds -gt 0) { "$CodexIdleTimeoutSeconds seconds" } else { 'disabled' })"
 Write-Host "Watchdog timeout: $(if ($WatchdogTimeoutSeconds -gt 0) { "$WatchdogTimeoutSeconds seconds" } else { 'disabled' })"
+Write-Host "Event keys: $EventKeys"
 Write-Host "State: $($task.State)"
 Write-Host "LastRunTime: $($info.LastRunTime)"
 Write-Host "LastTaskResult: $($info.LastTaskResult)"

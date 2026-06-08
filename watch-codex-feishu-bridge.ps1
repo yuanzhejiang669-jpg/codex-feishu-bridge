@@ -8,6 +8,7 @@ param(
   [ValidateSet("app-server", "auto", "exec")]
   [string]$RunMode = "app-server",
   [string]$Reasoning = "xhigh",
+  [string]$EventKeys = "im.message.receive_v1",
   [int]$CodexTimeoutSeconds = 0,
   [int]$CodexIdleTimeoutSeconds = 3600,
   [int]$RestartCooldownSeconds = 60,
@@ -173,6 +174,20 @@ function Invoke-ProcessWithTimeout {
   }
 }
 
+function Get-ExpectedEventKeys {
+  $keys = @()
+  foreach ($item in ($EventKeys -split '[,\s;]+')) {
+    $trimmed = $item.Trim()
+    if ($trimmed -and -not $keys.Contains($trimmed)) {
+      $keys += $trimmed
+    }
+  }
+  if (-not $keys.Count) {
+    $keys += "im.message.receive_v1"
+  }
+  return $keys
+}
+
 function Test-LarkConsumer {
   $larkCli = Get-LarkCliCommand
   if (-not $larkCli) {
@@ -213,16 +228,31 @@ function Test-LarkConsumer {
     return @{ Ok = $false; Reason = "lark-cli status returned invalid json" }
   }
 
+  $runningKeys = @{}
   foreach ($app in @($status.apps)) {
     if (-not $app.running) { continue }
     foreach ($consumer in @($app.consumers)) {
-      if ($consumer.event_key -eq "im.message.receive_v1") {
-        return @{ Ok = $true; Reason = "consumer pid $($consumer.pid)" }
+      if ($consumer.event_key) {
+        $runningKeys[[string]$consumer.event_key] = $consumer.pid
       }
     }
   }
 
-  return @{ Ok = $false; Reason = "no active im.message.receive_v1 consumer" }
+  $expected = Get-ExpectedEventKeys
+  $missing = @()
+  $found = @()
+  foreach ($key in $expected) {
+    if ($runningKeys.ContainsKey($key)) {
+      $found += "$key#$($runningKeys[$key])"
+    } else {
+      $missing += $key
+    }
+  }
+  if (-not $missing.Count) {
+    return @{ Ok = $true; Reason = "consumer $($found -join ', ')" }
+  }
+
+  return @{ Ok = $false; Reason = "missing consumer: $($missing -join ', ')" }
 }
 
 function Test-RecentRestartCooldown {
@@ -295,6 +325,8 @@ function Restart-Bridge {
       $RunMode,
       "-Reasoning",
       $Reasoning,
+      "-EventKeys",
+      $EventKeys,
       "-CodexTimeoutSeconds",
       $CodexTimeoutSeconds,
       "-CodexIdleTimeoutSeconds",

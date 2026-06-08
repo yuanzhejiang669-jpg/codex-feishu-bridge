@@ -13,7 +13,7 @@
 
 ## 当前能力
 
-- 飞书事件消费：监听 `im.message.receive_v1`。
+- 飞书事件消费：默认监听 `im.message.receive_v1`；可通过 `CODEX_FEISHU_EVENT_KEYS` 额外监听撤回事件。
 - Codex 运行模式：默认使用 `codex app-server --listen stdio://`，必要时可切到 `exec`。
 - 动态卡片：任务运行中实时更新，完成后展示最终答案、耗时、token/context 信息。
 - 附件处理：支持飞书图片和文件下载到 workspace，再交给 Codex 读取。
@@ -209,6 +209,7 @@ Set-Location "$env:USERPROFILE\Documents\Codex\tools\codex-feishu-bridge"
 
 - 启用机器人能力。
 - 订阅事件：`im.message.receive_v1`。
+- 如需“撤回排队消息后不再执行”，飞书应用还应订阅 `im.message.recalled_v1`，并确保本机 `lark-cli event list` 能识别该 EventKey；否则 Bridge 只能在真正执行前 best-effort 重新检查消息状态。
 - 给机器人授予收消息、发消息、下载消息资源所需权限。
 - 发布或安装到对应企业/租户。
 
@@ -304,6 +305,10 @@ lark-cli profile list
 | `/delete <序号或id>` | 请求删除本地 Codex thread，需要二次确认 |
 | `/confirm delete <序号>` | 确认删除 |
 | `/stop` | 停止当前运行中的 Codex 任务；app-server 模式优先使用原生 `turn/interrupt` |
+| `/stop queue` | 停止当前任务，并清空当前聊天等待队列 |
+| `/stop all` | 停止当前任务，并清空本 Bot 全部等待队列 |
+| `/queue` | 查看等待队列 |
+| `/clearqueue [all]` | 清空当前聊天或全部等待队列 |
 
 ## 默认参数
 
@@ -314,6 +319,7 @@ lark-cli profile list
 | `Reasoning` | `xhigh` | 传给 Codex 的推理强度 |
 | `CodexTimeoutSeconds` | `0` | 禁用总时长硬超时；Codex 正常持续工作时不主动中断 |
 | `CodexIdleTimeoutSeconds` | `3600` | 默认 1 小时无进展才判定卡住 |
+| `CODEX_FEISHU_EVENT_KEYS` | `im.message.receive_v1` | 逗号分隔的事件列表；额外启用撤回实时处理时可设为 `im.message.receive_v1,im.message.recalled_v1` |
 | `MaxConcurrent` | `1` | 同实例串行处理 |
 | 动态卡片 | 开启 | 用飞书卡片显示过程和结果 |
 | MCP | 开启 | 需要关闭时传 `-DisableMcp` |
@@ -387,6 +393,8 @@ lark-cli event status --json
 | `/list` 只显示默认会话 | 确认 `%USERPROFILE%\.codex\state_5.sqlite` 存在，并确认 `python --version` 或 `sqlite3 --version` 至少一个可用 |
 | 机器人收到消息但 Codex 不动 | 检查 Codex 登录状态、`%USERPROFILE%\.codex\auth.json`、workspace 是否可信 |
 | 卡片显示 Codex 断流 | Bridge 会先等待 Codex 原生重连；最终仍失败时只对流式连接断开自动续跑一次。额度、鉴权、限流不会自动续跑 |
+| 撤回了排队消息但仍担心被执行 | 优先启用 `im.message.recalled_v1`；同时可发送 `/queue` 查看队列，或 `/clearqueue` 清空当前聊天等待队列 |
+| 卡片一直显示正在回复，但新消息又能开始 | 这通常是 Bridge 重启导致旧运行状态丢失；新版会在启动时把上次残留的运行卡片标记为已中断 |
 | 以 `/你好` 开头没有正常回答 | 这是命令解析；普通任务不要用 `/` 开头 |
 | watchdog 反复重启 | 看 `watchdog.log` 里 consumer 或 bridge 失败原因 |
 

@@ -6,6 +6,7 @@ param(
   [ValidateSet("app-server", "auto", "exec")]
   [string]$RunMode = "app-server",
   [string]$Reasoning = "xhigh",
+  [string]$EventKeys = "im.message.receive_v1",
   [int]$CodexTimeoutSeconds = 0,
   [int]$CodexIdleTimeoutSeconds = 3600,
   [int]$MaxConcurrent = 1,
@@ -128,6 +129,11 @@ if ($LarkProfile.Trim()) {
 }
 $env:CODEX_FEISHU_SANDBOX = $Sandbox
 $env:CODEX_FEISHU_RUN_MODE = $RunMode
+if ($EventKeys.Trim()) {
+  $env:CODEX_FEISHU_EVENT_KEYS = $EventKeys.Trim()
+} else {
+  Remove-Item Env:CODEX_FEISHU_EVENT_KEYS -ErrorAction SilentlyContinue
+}
 if ($Reasoning.Trim()) {
   $env:CODEX_FEISHU_REASONING = $Reasoning.Trim()
 } else {
@@ -180,6 +186,7 @@ Write-Host "Codex CLI: $($env:CODEX_CLI_BIN)"
 Write-Host "Run mode: $($env:CODEX_FEISHU_RUN_MODE)"
 Write-Host "Sandbox: $($env:CODEX_FEISHU_SANDBOX)"
 Write-Host "Reasoning: $($env:CODEX_FEISHU_REASONING)"
+Write-Host "Event keys: $($env:CODEX_FEISHU_EVENT_KEYS)"
 Write-Host "Codex total timeout: $(if ($CodexTimeoutSeconds -gt 0) { "$CodexTimeoutSeconds seconds" } else { 'disabled' })"
 Write-Host "Codex idle timeout: $(if ($CodexIdleTimeoutSeconds -gt 0) { "$CodexIdleTimeoutSeconds seconds" } else { 'disabled' })"
 Write-Host "MCP: $(if ($env:CODEX_FEISHU_DISABLE_MCP -eq '0') { 'enabled' } else { 'disabled' })"

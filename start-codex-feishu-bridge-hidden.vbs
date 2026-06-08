@@ -1,6 +1,6 @@
 Option Explicit
 
-Dim fso, shell, scriptDir, scriptPath, workspace, command
+Dim fso, shell, scriptDir, scriptPath, workspace, eventKeys, command
 
 Set fso = CreateObject("Scripting.FileSystemObject")
 Set shell = CreateObject("WScript.Shell")
@@ -11,9 +11,13 @@ workspace = shell.ExpandEnvironmentStrings("%USERPROFILE%") & "\Documents\Codex\
 If WScript.Arguments.Count > 0 Then
   workspace = WScript.Arguments(0)
 End If
+eventKeys = "im.message.receive_v1"
+If WScript.Arguments.Count > 1 Then
+  eventKeys = WScript.Arguments(1)
+End If
 
 command = "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File " & _
-  Quote(scriptPath) & " -Workspace " & Quote(workspace)
+  Quote(scriptPath) & " -Workspace " & Quote(workspace) & " -EventKeys " & Quote(eventKeys)
 
 shell.CurrentDirectory = scriptDir
 shell.Run command, 0, False

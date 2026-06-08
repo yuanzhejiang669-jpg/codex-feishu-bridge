@@ -28,6 +28,7 @@ Options:
   --sandbox <value>             Passed to start script.
   --run-mode <app-server|auto|exec>
   --reasoning <value>           Passed to start script.
+  --event-keys <keys>           Comma-separated EventKeys passed to start script.
   --codex-timeout-seconds <n>   Passed to start script.
   --codex-idle-timeout-seconds <n>
                                 Passed to start script.
@@ -319,6 +320,7 @@ async function startBridge({ name, profile, workspace, options }) {
   addOptionalPowerShellArg(args, "-Sandbox", options.sandbox);
   addOptionalPowerShellArg(args, "-RunMode", options.runMode);
   addOptionalPowerShellArg(args, "-Reasoning", options.reasoning);
+  addOptionalPowerShellArg(args, "-EventKeys", options.eventKeys);
   addOptionalPowerShellArg(args, "-CodexTimeoutSeconds", options.codexTimeoutSeconds);
   addOptionalPowerShellArg(args, "-CodexIdleTimeoutSeconds", options.codexIdleTimeoutSeconds);
   addOptionalPowerShellArg(args, "-MaxConcurrent", options.maxConcurrent);
@@ -351,6 +353,7 @@ async function installStartup({ name, profile, workspace, options }) {
   ];
   addOptionalPowerShellArg(args, "-CodexTimeoutSeconds", options.codexTimeoutSeconds);
   addOptionalPowerShellArg(args, "-CodexIdleTimeoutSeconds", options.codexIdleTimeoutSeconds);
+  addOptionalPowerShellArg(args, "-EventKeys", options.eventKeys);
   console.log("Installing startup watchdog...");
   const result = await runRaw("powershell.exe", args, { timeoutMs: 60_000 });
   process.stdout.write(result.stdout);
