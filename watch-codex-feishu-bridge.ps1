@@ -158,16 +158,10 @@ function Invoke-ProcessWithTimeout {
   if (-not $process.WaitForExit($TimeoutMs)) {
     try { $process.Kill() } catch {}
     try { [void]$process.WaitForExit(5000) } catch {}
-    $stdoutText = ""
-    $stderrText = ""
-    if ($process.HasExited) {
-      $stdoutText = $process.StandardOutput.ReadToEnd()
-      $stderrText = $process.StandardError.ReadToEnd()
-    }
     return @{
       ExitCode = -1
-      Stdout = $stdoutText
-      Stderr = $stderrText
+      Stdout = ""
+      Stderr = ""
       TimedOut = $true
     }
   }
