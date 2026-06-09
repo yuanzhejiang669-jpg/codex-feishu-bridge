@@ -4766,7 +4766,7 @@ function enqueue(event) {
 }
 
 function isOutOfBandCommand(command) {
-  return ["/stop", "/clearqueue", "/queue", "/goal", "/provider", "/model", "/fast"].includes(command?.name);
+  return Boolean(command?.name);
 }
 
 async function handleOutOfBandCommand(rawEvent, command) {
@@ -5202,14 +5202,210 @@ function deletePreviewMarkdown({ entry, record, index, expiresAt }) {
   ].join("\n");
 }
 
+function parseDeleteSelectionSpec(value) {
+  const text = String(value || "").trim();
+  const tokens = text.split(/[\s,，、]+/).filter(Boolean);
+  if (!tokens.length) return { error: "empty" };
+
+  const indexes = [];
+  const invalid = [];
+  const nonNumeric = [];
+  let hasRange = false;
+  for (const token of tokens) {
+    const rangeMatch = token.match(/^(\d+)\s*[-~～]\s*(\d+)$/);
+    if (rangeMatch) {
+      hasRange = true;
+      const start = Number(rangeMatch[1]);
+      const end = Number(rangeMatch[2]);
+      if (!Number.isInteger(start) || !Number.isInteger(end) || start < 1 || end < 1 || start > end) {
+        invalid.push(token);
+        continue;
+      }
+      for (let index = start; index <= end; index += 1) indexes.push(index);
+      continue;
+    }
+
+    if (/^\d+$/.test(token)) {
+      const index = Number(token);
+      if (Number.isInteger(index) && index >= 1) {
+        indexes.push(index);
+      } else {
+        invalid.push(token);
+      }
+      continue;
+    }
+
+    nonNumeric.push(token);
+  }
+
+  if (invalid.length) return { error: `无效序号或区间：${invalid.join("、")}` };
+  if (nonNumeric.length) {
+    if (tokens.length === 1 && !hasRange && indexes.length === 0) return { target: nonNumeric[0] };
+    return { error: `批量删除只支持序号和区间，无法混用 ID：${nonNumeric.join("、")}` };
+  }
+
+  const unique = [];
+  const seenIndexes = new Set();
+  for (const index of indexes) {
+    if (seenIndexes.has(index)) continue;
+    seenIndexes.add(index);
+    unique.push(index);
+  }
+  return { indexes: unique, isBatch: unique.length > 1 || hasRange || tokens.length > 1 };
+}
+
+function compressIndexes(indexes) {
+  const sorted = [...new Set(indexes)].sort((a, b) => a - b);
+  const parts = [];
+  let start = null;
+  let prev = null;
+  for (const index of sorted) {
+    if (start === null) {
+      start = index;
+      prev = index;
+      continue;
+    }
+    if (index === prev + 1) {
+      prev = index;
+      continue;
+    }
+    parts.push(start === prev ? String(start) : `${start}-${prev}`);
+    start = index;
+    prev = index;
+  }
+  if (start !== null) parts.push(start === prev ? String(start) : `${start}-${prev}`);
+  return parts.join(" ");
+}
+
+async function resolveDeleteItemsByIndexes(chatId, indexes) {
+  const list = await listChatSessionsSynced(chatId);
+  const items = [];
+  const errors = [];
+  for (const index of indexes) {
+    if (index < 1 || index > list.length) {
+      errors.push(`序号 ${index} 超出当前列表范围。`);
+      continue;
+    }
+
+    const entry = list[index - 1];
+    const threadId = String(entry.codexThreadId || "").trim();
+    if (!threadId) {
+      errors.push(`序号 ${index} 还没有 Codex 原生 thread。`);
+      continue;
+    }
+    if (activeJobUsesThread(threadId)) {
+      errors.push(`序号 ${index} 正在运行中。`);
+      continue;
+    }
+
+    const record = await loadCodexThreadRecord(threadId);
+    if (!record) {
+      errors.push(`序号 ${index} 的 Codex 本地 thread 已不存在，请重新 /list。`);
+      continue;
+    }
+
+    items.push({
+      index,
+      threadId,
+      sessionId: entry.id || "",
+      title: entry.title || record.title || "",
+      rolloutPath: record.rollout_path || "",
+    });
+  }
+
+  return { items, errors, list };
+}
+
+function deleteBatchPreviewMarkdown({ items, expiresAt, confirmText }) {
+  const lines = [
+    "**Codex 会话批量删除确认**",
+    "",
+    "这会执行 Codex++ 等价的本地删除：删除 Codex 本地索引记录、清理关联表、删除 rollout 会话文件，并移除飞书绑定。",
+    "",
+    `待删除：${items.length} 条`,
+    `确认有效期：${formatTime(expiresAt)}`,
+    "",
+    ...items.map((item) => `${item.index}. ${item.title || "未命名会话"} · ${codexThreadLink(item.threadId)}`),
+    "",
+    `确认删除请输入：\`/confirm delete ${confirmText}\``,
+  ];
+  return lines.join("\n");
+}
+
+function pendingDeleteItems(pending) {
+  if (Array.isArray(pending?.items) && pending.items.length) return pending.items;
+  if (pending?.threadId) {
+    return [{
+      index: pending.index,
+      threadId: pending.threadId,
+      sessionId: pending.sessionId || "",
+      title: pending.title || "",
+      rolloutPath: pending.rolloutPath || "",
+    }];
+  }
+  return [];
+}
+
 async function handleDeleteCommand(chatId, target, messageId) {
   if (!target) {
-    await sendText(chatId, "用法：/delete <序号或ID>。先发送 /list 查看会话；删除需要二次确认。", "delete-usage", messageId);
+    await sendText(chatId, "用法：/delete <序号或ID>、/delete 1 2 3、/delete 1-18、/delete 3-7 8-12。先发送 /list 查看会话；删除需要二次确认。", "delete-usage", messageId);
     return;
   }
 
   await syncChatSessionsWithCodex(chatId);
-  const match = await findSessionEntry(chatId, target);
+  const selection = parseDeleteSelectionSpec(target);
+  if (selection.error) {
+    await sendText(chatId, selection.error, "delete-selection-error", messageId);
+    return;
+  }
+
+  if (selection.indexes) {
+    const { items, errors } = await resolveDeleteItemsByIndexes(chatId, selection.indexes);
+    if (errors.length || items.length !== selection.indexes.length) {
+      await sendMarkdown(
+        chatId,
+        [
+          "**Codex 会话删除预检失败**",
+          "",
+          ...errors.map((line) => `- ${line}`),
+          "",
+          "请重新发送 `/list` 确认序号后再删除。",
+        ].join("\n"),
+        "delete-precheck-error",
+        messageId,
+      );
+      return;
+    }
+
+    const expiresAt = Date.now() + CONFIG.deleteConfirmTtlMs;
+    const confirmText = compressIndexes(items.map((item) => item.index));
+    const key = deleteConfirmationKey(chatId, confirmText);
+    cleanupPendingDeleteConfirmations();
+    pendingDeleteConfirmations.set(key, {
+      chatId,
+      index: confirmText,
+      items,
+      createdAt: Date.now(),
+      expiresAt,
+    });
+
+    await sendMarkdown(
+      chatId,
+      items.length === 1
+        ? deletePreviewMarkdown({
+            entry: { ...items[0], id: items[0].sessionId, codexThreadId: items[0].threadId },
+            record: { id: items[0].threadId, title: items[0].title, rollout_path: items[0].rolloutPath },
+            index: items[0].index,
+            expiresAt,
+          })
+        : deleteBatchPreviewMarkdown({ items, expiresAt, confirmText }),
+      "delete-preview",
+      messageId,
+    );
+    return;
+  }
+
+  const match = await findSessionEntry(chatId, selection.target);
   if (!match) {
     await sendText(chatId, "没有找到这个会话。发送 /list 查看可删除的会话。", "delete-miss", messageId);
     return;
@@ -5255,50 +5451,82 @@ async function handleDeleteCommand(chatId, target, messageId) {
 }
 
 async function handleConfirmCommand(chatId, rest, messageId) {
-  const [actionRaw, indexRaw] = String(rest || "").trim().split(/\s+/);
+  const [actionRaw, ...targetParts] = String(rest || "").trim().split(/\s+/);
   const action = String(actionRaw || "").toLowerCase();
-  const indexText = String(indexRaw || "").trim();
-  const index = Number(indexText);
-  if (action !== "delete" || !Number.isInteger(index) || index < 1) {
-    await sendText(chatId, "用法：/confirm delete <序号>。先用 /delete <序号或ID> 发起删除确认。", "confirm-usage", messageId);
+  const targetText = targetParts.join(" ").trim();
+  const selection = parseDeleteSelectionSpec(targetText);
+  const confirmText = selection.indexes ? compressIndexes(selection.indexes) : targetText;
+  if (action !== "delete" || !confirmText || selection.error || selection.target) {
+    await sendText(chatId, "用法：/confirm delete <序号或区间>。先用 /delete <序号或区间> 发起删除确认。", "confirm-usage", messageId);
     return;
   }
 
   cleanupPendingDeleteConfirmations();
-  const key = deleteConfirmationKey(chatId, index);
+  const key = deleteConfirmationKey(chatId, confirmText);
   const pending = pendingDeleteConfirmations.get(key);
   if (!pending || pending.chatId !== chatId) {
-    await sendText(chatId, "删除确认不存在或已过期。请重新发送 /delete <序号或ID>。", "confirm-miss", messageId);
+    await sendText(chatId, "删除确认不存在或已过期。请重新发送 /delete <序号或区间>。", "confirm-miss", messageId);
     return;
   }
 
-  const currentMatch = await findSessionEntry(chatId, String(pending.index));
-  if (!currentMatch || String(currentMatch.entry.codexThreadId || "").trim() !== pending.threadId) {
+  const items = pendingDeleteItems(pending);
+  if (!items.length) {
     pendingDeleteConfirmations.delete(key);
-    await sendText(chatId, "会话列表顺序已经变化，为避免删错，请重新发送 /list 和 /delete。", "confirm-list-changed", messageId);
+    await sendText(chatId, "删除确认内容为空或损坏。请重新发送 /delete。", "confirm-miss", messageId);
     return;
   }
 
-  if (activeJobUsesThread(pending.threadId)) {
-    await sendText(chatId, "这个会话正在运行中，先 /stop 或等待任务结束后再删除。", "confirm-busy", messageId);
-    return;
+  const changed = [];
+  const busy = [];
+  for (const item of items) {
+    const currentMatch = await findSessionEntry(chatId, String(item.index));
+    if (!currentMatch || String(currentMatch.entry.codexThreadId || "").trim() !== item.threadId) {
+      changed.push(item.index);
+      continue;
+    }
+    if (activeJobUsesThread(item.threadId)) busy.push(item.index);
   }
-
-  let result;
-  try {
-    result = await deleteCodexLocalThread(pending.threadId);
-  } catch (error) {
+  if (changed.length) {
     pendingDeleteConfirmations.delete(key);
+    await sendText(chatId, `会话列表顺序已经变化，为避免删错，请重新发送 /list 和 /delete。变化序号：${changed.join("、")}`, "confirm-list-changed", messageId);
+    return;
+  }
+  if (busy.length) {
+    await sendText(chatId, `这些会话正在运行中，先 /stop 或等待任务结束后再删除：${busy.join("、")}`, "confirm-busy", messageId);
+    return;
+  }
+
+  const successes = [];
+  const failures = [];
+  let bridgeRemovedTotal = 0;
+  for (const item of items) {
+    try {
+      const result = await deleteCodexLocalThread(item.threadId);
+      const bridgeRemoved = removeThreadFromBridgeSessions(item.threadId);
+      bridgeRemovedTotal += bridgeRemoved;
+      forgetDeleteConfirmationsForThread(item.threadId);
+      successes.push({ item, result, bridgeRemoved });
+      log("INFO", "codex local thread deleted", {
+        chatId,
+        threadId: item.threadId,
+        rolloutDeleted: result.rolloutDeleted,
+        rolloutMissing: result.rolloutMissing,
+        rolloutError: result.rolloutError,
+        bridgeRemoved,
+      });
+    } catch (error) {
+      failures.push({ item, error });
+    }
+  }
+  pendingDeleteConfirmations.delete(key);
+
+  if (failures.length && !successes.length) {
     await sendMarkdown(
       chatId,
       [
         "**Codex 会话删除失败**",
         "",
-        `Thread：${codexThreadLink(pending.threadId)}`,
-        "",
-        "```",
-        String(error.message || error).slice(0, 1500),
-        "```",
+        ...failures.map(({ item, error }) => `${item.index}. ${item.title || "未命名会话"} · ${codexThreadLink(item.threadId)}\n\`\`\`\n${String(error.message || error).slice(0, 1000)}\n\`\`\``),
       ].join("\n"),
       "delete-error",
       messageId,
@@ -5306,30 +5534,38 @@ async function handleConfirmCommand(chatId, rest, messageId) {
     return;
   }
 
-  const bridgeRemoved = removeThreadFromBridgeSessions(pending.threadId);
-  forgetDeleteConfirmationsForThread(pending.threadId);
-  log("INFO", "codex local thread deleted", {
-    chatId,
-    threadId: pending.threadId,
-    rolloutDeleted: result.rolloutDeleted,
-    rolloutMissing: result.rolloutMissing,
-    rolloutError: result.rolloutError,
-    bridgeRemoved,
-  });
-
-  const status = result.rolloutError ? "Codex 会话已从本地库删除，但 rollout 文件删除失败" : "Codex 会话已删除";
+  const single = successes.length === 1 && failures.length === 0;
+  const status = single && successes[0].result.rolloutError
+    ? "Codex 会话已从本地库删除，但 rollout 文件删除失败"
+    : single
+      ? "Codex 会话已删除"
+      : failures.length
+        ? "Codex 会话批量删除部分完成"
+        : "Codex 会话批量删除完成";
   await sendMarkdown(
     chatId,
-    [
-      `**${status}**`,
-      "",
-      `标题：${pending.title || result.title || "未命名会话"}`,
-      `Thread：${codexThreadLink(pending.threadId)}`,
-      `飞书绑定清理：${bridgeRemoved} 条`,
-      `Rollout：${result.rolloutDeleted ? "已删除" : result.rolloutMissing ? "原本不存在" : result.rolloutError ? "删除失败" : "未记录"}`,
-      result.rolloutPath ? `路径：\`${result.rolloutPath}\`` : "",
-      result.rolloutError ? ["", "```", result.rolloutError.slice(0, 1200), "```"].join("\n") : "",
-    ].filter(Boolean).join("\n"),
+    single
+      ? [
+          `**${status}**`,
+          "",
+          `标题：${successes[0].item.title || successes[0].result.title || "未命名会话"}`,
+          `Thread：${codexThreadLink(successes[0].item.threadId)}`,
+          `飞书绑定清理：${successes[0].bridgeRemoved} 条`,
+          `Rollout：${successes[0].result.rolloutDeleted ? "已删除" : successes[0].result.rolloutMissing ? "原本不存在" : successes[0].result.rolloutError ? "删除失败" : "未记录"}`,
+          successes[0].result.rolloutPath ? `路径：\`${successes[0].result.rolloutPath}\`` : "",
+          successes[0].result.rolloutError ? ["", "```", successes[0].result.rolloutError.slice(0, 1200), "```"].join("\n") : "",
+        ].filter(Boolean).join("\n")
+      : [
+          `**${status}**`,
+          "",
+          `成功：${successes.length} 条`,
+          `失败：${failures.length} 条`,
+          `飞书绑定清理：${bridgeRemovedTotal} 条`,
+          "",
+          ...successes.map(({ item }) => `- 已删除 ${item.index}. ${item.title || "未命名会话"} · ${compactThreadId(item.threadId)}`),
+          failures.length ? "" : "",
+          ...failures.map(({ item, error }) => `- 删除失败 ${item.index}. ${item.title || "未命名会话"} · ${compactThreadId(item.threadId)}：${String(error.message || error).slice(0, 300)}`),
+        ].filter(Boolean).join("\n"),
     "delete-done",
     messageId,
   );
@@ -5832,7 +6068,7 @@ function helpMarkdown() {
     "`/compact` — 触发当前原生 thread 的上下文压缩",
     "`/sessions` — 列出飞书会话和 Codex 侧边栏可见会话",
     "`/switch <序号或ID>` — 切换到已有 Codex 会话",
-    "`/delete <序号或ID>` — 删除 Codex 本地会话，需 `/confirm delete <序号>` 确认",
+    "`/delete <序号或ID>` — 删除 Codex 本地会话；支持 `1 2 3`、`1-18`、`3-7 8-12`，需 `/confirm delete <序号或区间>` 确认",
     "`/reset` — 清空当前会话上下文",
     "`/stop` — 停止当前 Codex 任务",
     "`/stop queue` — 停止当前任务，并清空当前聊天的等待队列",
@@ -6091,7 +6327,7 @@ async function sessionsMarkdown(chatId) {
     );
   });
   lines.push("");
-  lines.push("使用 `/switch <序号或ID>` 切换会话，使用 `/delete <序号或ID>` 删除会话，删除需 `/confirm delete <序号>` 确认，使用 `/new [标题]` 创建新会话。");
+  lines.push("使用 `/switch <序号或ID>` 切换会话；使用 `/delete <序号或ID>`、`/delete 1 2 3`、`/delete 1-18`、`/delete 3-7 8-12` 删除会话；删除需按预览里的 `/confirm delete <序号或区间>` 确认；使用 `/new [标题]` 创建新会话。");
   return lines.join("\n");
 }
 
