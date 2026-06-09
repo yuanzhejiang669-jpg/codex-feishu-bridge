@@ -321,10 +321,10 @@ function effectiveSessionSettings(session) {
 function settingsSummary(session) {
   const settings = effectiveSessionSettings(session);
   return [
-    `provider \`${settings.provider || "默认"}\``,
-    `model \`${settings.model || "默认"}\``,
-    `reasoning \`${settings.reasoning || "默认"}\``,
-    `speed \`${displayServiceTier(settings.serviceTier) || "默认"}\``,
+    `provider ${settings.provider || "默认"}`,
+    `model ${settings.model || "默认"}`,
+    `reasoning ${settings.reasoning || "默认"}`,
+    `speed ${displayServiceTier(settings.serviceTier) || "默认"}`,
   ].join(" · ");
 }
 
@@ -2114,11 +2114,24 @@ function renderRunCard(state) {
 }
 
 function markdown(content) {
-  return { tag: "markdown", content };
+  return { tag: "markdown", content: cardMarkdownContent(content) };
 }
 
 function noteMd(content) {
-  return { tag: "markdown", content, text_size: "notation" };
+  return { tag: "markdown", content: cardMarkdownContent(content), text_size: "notation" };
+}
+
+function cardMarkdownContent(content) {
+  const lines = String(content || "").split(/\r?\n/);
+  let inFence = false;
+  return lines.map((line) => {
+    if (/^\s*(```|~~~)/.test(line)) {
+      inFence = !inFence;
+      return line;
+    }
+    if (inFence) return line;
+    return line.replace(/(^|[^`])`([^`\r\n]+)`(?!`)/g, "$1$2");
+  }).join("\n");
 }
 
 function activeRunKey(messageId) {
@@ -2312,7 +2325,7 @@ function toolSummaryPanel(tools, finalized) {
     border: { color: counts.error ? "red" : "blue", corner_radius: "5px" },
     vertical_spacing: "8px",
     padding: "8px 8px 8px 8px",
-    elements: [{ tag: "markdown", content: body || "_暂无步骤_", text_size: "notation" }],
+    elements: [{ tag: "markdown", content: cardMarkdownContent(body || "_暂无步骤_"), text_size: "notation" }],
   };
 }
 
@@ -2362,13 +2375,13 @@ function toolCardPanel(tool, expanded = false) {
     border: { color: tool.status === "error" ? "red" : "grey", corner_radius: "5px" },
     vertical_spacing: "8px",
     padding: "8px 8px 8px 8px",
-    elements: [{ tag: "markdown", content: body, text_size: "notation" }],
+    elements: [{ tag: "markdown", content: cardMarkdownContent(body), text_size: "notation" }],
   };
 }
 
 function panelHeader(content) {
   return {
-    title: { tag: "markdown", content },
+    title: { tag: "markdown", content: cardMarkdownContent(content) },
     vertical_align: "center",
     icon: { tag: "standard_icon", token: "down-small-ccm_outlined", size: "16px 16px" },
     icon_position: "follow_text",
