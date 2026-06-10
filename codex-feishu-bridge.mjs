@@ -4960,8 +4960,8 @@ async function handleEvent(rawEvent) {
       [
         "**Codex 正在处理**",
         "",
-        `会话：\`${session.title}\` (${session.id})`,
-        `工作区：\`${CONFIG.workspace}\``,
+        `会话：${session.title} (${session.id})`,
+        `工作区：${CONFIG.workspace}`,
         `设置：${settingsSummary(session)}`,
       ].join("\n"),
       "ack",

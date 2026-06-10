@@ -81,18 +81,37 @@ function Resolve-OfficialCodexCliBin {
   return $null
 }
 
+function Test-IsBridgeOfficialCodexCliCache([string]$PathValue) {
+  if (-not $PathValue) { return $false }
+  $cacheRoot = Join-Path $env:LOCALAPPDATA "CodexFeishuBridge\official-codex-cli"
+  $cacheRootWithSlash = (Join-Path $cacheRoot "")
+  try {
+    $resolved = (Resolve-Path -LiteralPath $PathValue -ErrorAction Stop).Path
+  } catch {
+    $resolved = $PathValue
+  }
+  return $resolved.StartsWith($cacheRootWithSlash, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
 function Resolve-CodexCliBin {
+  $officialCandidate = Resolve-OfficialCodexCliBin
+
   if ($env:CODEX_CLI_BIN) {
     if (Test-Path -LiteralPath $env:CODEX_CLI_BIN) {
-      return (Resolve-Path -LiteralPath $env:CODEX_CLI_BIN).Path
+      $envCandidate = (Resolve-Path -LiteralPath $env:CODEX_CLI_BIN).Path
+      if (-not (Test-IsBridgeOfficialCodexCliCache $envCandidate)) {
+        return $envCandidate
+      }
+      if (-not $officialCandidate -or [string]::Equals($envCandidate, $officialCandidate, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $envCandidate
+      }
+      Write-Warning "Ignoring stale CODEX_CLI_BIN official cache: $envCandidate; using latest Codex app package: $officialCandidate"
+    } else {
+      Write-Warning "CODEX_CLI_BIN is set but not found: $env:CODEX_CLI_BIN"
     }
-    Write-Warning "CODEX_CLI_BIN is set but not found: $env:CODEX_CLI_BIN"
   }
 
-  $officialCandidate = Resolve-OfficialCodexCliBin
-  if ($officialCandidate) {
-    return $officialCandidate
-  }
+  if ($officialCandidate) { return $officialCandidate }
 
   $pathCandidate = Get-Command "codex.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
   if ($pathCandidate) {
