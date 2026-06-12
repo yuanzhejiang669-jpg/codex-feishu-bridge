@@ -303,7 +303,7 @@ $Workspace = "$env:USERPROFILE\Documents\Codex\workspaces\feishu-bridge-$BotName
 | `/list` 或 `/sessions` | 列出本地 bridge session 和可见 Codex threads。 |
 | `/switch <序号或id>` | 将当前飞书聊天切换到另一个 session。 |
 | `/context` | 查看当前 Codex thread、context 和 token 状态。 |
-| `/goal [目标]` | 查看或设置 Codex goal。支持 `/goal pause`、`/goal resume`、`/goal clear`。 |
+| `/goal [目标]` | 查看或启动原生 Codex Goal mode。支持 `/goal pause`、`/goal resume`、`/goal clear`。 |
 | `/provider [id]` | 查看或切换当前飞书聊天使用的 Codex provider。使用 `/provider save <id>` 持久写入用户 Codex 配置。 |
 | `/model [模型ID] [推理强度]` | 查看或切换模型和 reasoning。使用 `/model list` 列出已配置模型。 |
 | `/fast on/off/status` | 查看或切换 Codex Fast 模式。使用 `/fast save on` 持久写入配置。 |
@@ -321,6 +321,7 @@ $Workspace = "$env:USERPROFILE\Documents\Codex\workspaces\feishu-bridge-$BotName
 队列行为：
 
 - Codex 已在运行时发送的新消息会进入等待队列。
+- Codex goal runner 运行中时，普通文本消息会作为当前 goal 的补充指令处理，不会启动无关任务。
 - `/queue` 只显示等待消息，不显示当前正在执行的任务。
 - 如果 Bridge 能检测到排队消息已被撤回，会跳过该消息。
 - 后续排队消息不再需要执行时，使用 `/clearqueue`。

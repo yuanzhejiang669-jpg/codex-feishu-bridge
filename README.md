@@ -303,7 +303,7 @@ $Workspace = "$env:USERPROFILE\Documents\Codex\workspaces\feishu-bridge-$BotName
 | `/list` or `/sessions` | List local bridge sessions and visible Codex threads. |
 | `/switch <index-or-id>` | Switch the current Feishu chat to another session. |
 | `/context` | Show current Codex thread/context/token state. |
-| `/goal [goal]` | View or set a Codex goal. Supports `/goal pause`, `/goal resume`, and `/goal clear`. |
+| `/goal [goal]` | View or start native Codex Goal mode. Supports `/goal pause`, `/goal resume`, and `/goal clear`. |
 | `/provider [id]` | View or switch the Codex provider for the current Feishu chat. Use `/provider save <id>` to persist to the user Codex config. |
 | `/model [model-id] [reasoning]` | View or switch model and reasoning. Use `/model list` to list configured models. |
 | `/fast on/off/status` | View or switch Codex Fast mode. Use `/fast save on` to persist. |
@@ -321,6 +321,7 @@ $Workspace = "$env:USERPROFILE\Documents\Codex\workspaces\feishu-bridge-$BotName
 Queue behavior:
 
 - A message sent while Codex is already running is queued.
+- While a Codex goal runner is active, plain text messages are routed as goal steering input instead of starting an unrelated task.
 - `/queue` shows pending messages only, not the active task.
 - Recalled queued messages are skipped when the bridge can detect recall status.
 - Use `/clearqueue` for queued messages that should not run.

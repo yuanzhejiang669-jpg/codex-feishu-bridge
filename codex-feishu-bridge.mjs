@@ -86,6 +86,7 @@ fs.writeFileSync(pidPath, String(process.pid), "utf8");
 const shutdownCallbacks = new Set();
 const activeChildren = new Map();
 const activeCodexJobs = new Map();
+const activeGoalRuns = new Map();
 const pendingAttachmentsByChat = new Map();
 const pendingDeleteConfirmations = new Map();
 const stoppedJobs = new Set();
@@ -1659,6 +1660,9 @@ function createRunState(session, event, userContent) {
     event,
     userContent,
     threadId: "",
+    goalMode: false,
+    goal: null,
+    goalSteerCount: 0,
     errorMsg: "",
     failure: null,
     meta: {
@@ -2073,6 +2077,7 @@ function recoveryEventFromFailure(event, state, failure, attempt) {
 function renderRunCard(state) {
   const elements = [];
   const elapsed = formatDuration(Date.now() - state.startedAt);
+  const goal = state.goalMode ? normalizeGoal(state.goal || state.session.lastGoal) : null;
 
   if (CONFIG.debugCards) {
     elements.push(noteMd(`会话：${state.session.title} (${state.session.id})`));
@@ -2080,8 +2085,14 @@ function renderRunCard(state) {
     if (state.threadId) elements.push(noteMd(`Codex 线程：${state.threadId}`));
   }
 
+  if (goal) {
+    elements.push(markdown(goalRunHeaderMarkdown(state, goal, elapsed)));
+  }
+
   if (state.blocks.length === 0 && state.terminal === "running") {
-    elements.push(markdown("**正在处理**\n\n我已经收到消息，正在整理回复。"));
+    elements.push(markdown(state.goalMode
+      ? "**正在推进目标**\n\nCodex goal 已进入运行态，后续普通消息会作为当前目标的补充指令处理。"
+      : "**正在处理**\n\n我已经收到消息，正在整理回复。"));
   }
 
   elements.push(...renderRunBlocks(state.blocks, state.terminal !== "running"));
@@ -2119,6 +2130,21 @@ function markdown(content) {
 
 function noteMd(content) {
   return { tag: "markdown", content: cardMarkdownContent(content), text_size: "notation" };
+}
+
+function goalRunHeaderMarkdown(state, goal, elapsed) {
+  const parts = [`状态：${goalStatusLabel(goal.status)}`, `运行：${elapsed}`];
+  if (goal.tokensUsed) parts.push(`已用 ${formatNumber(goal.tokensUsed)} tokens`);
+  if (goal.tokenBudget) parts.push(`预算 ${formatNumber(goal.tokenBudget)} tokens`);
+  if (state.goalSteerCount) parts.push(`补充指令 ${formatNumber(state.goalSteerCount)} 条`);
+  return [
+    `**Codex goal：${goalStatusLabel(goal.status)}**`,
+    "",
+    truncateCardText(goal.objective, 800),
+    "",
+    parts.join(" · "),
+    "操作：/goal pause · /goal resume · /goal clear · /stop",
+  ].join("\n");
 }
 
 function cardMarkdownContent(content) {
@@ -2830,6 +2856,18 @@ function isContextUsageHigher(candidate, baseline) {
 }
 
 function cardTitle(state) {
+  if (state.goalMode) {
+    const goal = normalizeGoal(state.goal || state.session.lastGoal);
+    if (state.terminal === "error") return "Codex goal 失败";
+    if (state.terminal === "interrupted") return "Codex goal 已停止";
+    if (goal?.status === "complete") return "Codex goal 已完成";
+    if (goal?.status === "paused") return "Codex goal 已暂停";
+    if (goal?.status === "blocked") return "Codex goal 受阻";
+    if (goal?.status === "usageLimited") return "Codex goal 使用量受限";
+    if (goal?.status === "budgetLimited") return "Codex goal 预算受限";
+    if (state.terminal === "done") return "Codex goal 已结束";
+    return "Codex goal 进行中";
+  }
   if (state.terminal === "error") return state.failure?.label || "Codex 处理失败";
   if (state.terminal === "interrupted") return "Codex 已停止";
   if (state.terminal === "done") return "Codex 已完成";
@@ -2841,6 +2879,13 @@ function cardTitle(state) {
 }
 
 function cardSummary(state) {
+  if (state.goalMode) {
+    const goal = normalizeGoal(state.goal || state.session.lastGoal);
+    if (state.terminal === "error") return "goal 失败";
+    if (state.terminal === "interrupted") return "goal 已停止";
+    if (goal?.status) return `goal ${goalStatusLabel(goal.status)}`;
+    return state.terminal === "done" ? "goal 已结束" : "goal 进行中";
+  }
   if (state.terminal === "interrupted") return "已停止";
   if (state.terminal === "error") return state.failure?.label || "处理失败";
   if (state.terminal === "done") return "已完成";
@@ -3972,7 +4017,7 @@ function appServerResumeParams(session) {
   return applySessionThreadOverrides(params, session);
 }
 
-function appServerTurnParams(threadId, event, userContent, session) {
+function appServerInputItems(event, userContent) {
   const input = [];
   const text = appServerUserText(event, userContent);
   if (text) input.push({ type: "text", text, text_elements: [] });
@@ -3982,15 +4027,28 @@ function appServerTurnParams(threadId, event, userContent, session) {
     }
   }
   if (!input.length) input.push({ type: "text", text: "(attachment only)", text_elements: [] });
+  return input;
+}
 
+function appServerTurnParams(threadId, event, userContent, session) {
   const params = {
     threadId,
-    input,
+    input: appServerInputItems(event, userContent),
+    clientUserMessageId: event.message_id || event.id || undefined,
     cwd: CONFIG.workspace,
     approvalPolicy: "never",
     sandboxPolicy: { type: "dangerFullAccess" },
   };
   return applySessionTurnOverrides(params, session);
+}
+
+function appServerSteerParams(threadId, turnId, event, userContent) {
+  return {
+    threadId,
+    expectedTurnId: turnId,
+    clientUserMessageId: event.message_id || event.id || crypto.randomUUID(),
+    input: appServerInputItems(event, userContent),
+  };
 }
 
 function appServerUserText(event, userContent) {
@@ -4221,6 +4279,493 @@ async function clearAppServerGoal(session) {
     updateSessionGoal(session, null);
     return Boolean(result?.cleared);
   });
+}
+
+function activeGoalRunForChat(chatId, session = null) {
+  const run = activeGoalRuns.get(chatId);
+  if (!run || run.done) return null;
+  if (session && run.sessionId !== session.id) return null;
+  return run;
+}
+
+function goalStatusIsTerminal(status) {
+  const value = String(status || "").trim();
+  return Boolean(value && value !== "active");
+}
+
+function goalRunTerminal(run) {
+  if (run.goalCleared) return true;
+  return goalStatusIsTerminal(normalizeGoal(run.goal || run.session.lastGoal)?.status);
+}
+
+function previewGoalFromPatch(session, patch) {
+  const current = normalizeGoal(session.lastGoal) || {};
+  const objective = String(patch.objective ?? current.objective ?? "").trim();
+  if (!objective) return null;
+  return normalizeGoal({
+    ...current,
+    ...patch,
+    objective,
+    status: patch.status || current.status || "active",
+    threadId: current.threadId || session.codexThreadId || "",
+    updatedAt: Date.now(),
+  });
+}
+
+function setRunGoalState(state, goal) {
+  state.goalMode = true;
+  state.goal = normalizeGoal(goal);
+  return state.goal;
+}
+
+function settleGoalRunReady(run, error = null) {
+  if (run.readySettled) return;
+  run.readySettled = true;
+  if (error) run.readyReject(error);
+  else run.readyResolve(run);
+}
+
+function goalRunFinalText(run) {
+  const goal = normalizeGoal(run.goal || run.session.lastGoal);
+  if (run.goalCleared || !goal) return "Codex goal 已清除。";
+  switch (goal.status) {
+    case "complete":
+      return "Codex goal 已完成。";
+    case "paused":
+      return "Codex goal 已暂停。后续可用 `/goal resume` 继续。";
+    case "blocked":
+      return "Codex goal 已受阻。";
+    case "usageLimited":
+      return "Codex goal 因使用量限制停止。";
+    case "budgetLimited":
+      return "Codex goal 因 token 预算限制停止。";
+    default:
+      return `Codex goal 已结束，当前状态：${goalStatusLabel(goal.status)}。`;
+  }
+}
+
+function goalRunResultMarkdown(run) {
+  const text = resultTextFromState(run.state) || goalRunFinalText(run);
+  return [
+    "**Codex goal 已结束**",
+    "",
+    run.goal ? goalMarkdown(run.session, run.goal).replace(/^.*?\n\n/s, "") : "当前 goal 已清除。",
+    "",
+    "---",
+    text,
+  ].join("\n");
+}
+
+async function openGoalRunCard(chatId, messageId, state) {
+  if (!CONFIG.useCards) return null;
+  return await ManagedCard.open(
+    chatId,
+    CONFIG.replyToMessage || CONFIG.useThreadReply ? messageId : "",
+    renderRunCard(state),
+    messageId,
+  );
+}
+
+async function startGoalRun(chatId, event, session, goalPatch, options = {}) {
+  const existing = activeGoalRunForChat(chatId, session);
+  if (existing) {
+    const goal = await updateGoalRunGoal(existing, goalPatch);
+    if (options.initialSteer) await queueGoalSteer(existing, options.initialSteer, { quiet: true });
+    return { run: existing, goal, started: false };
+  }
+
+  const messageId = event.message_id || event.id || crypto.randomUUID();
+  const userContent = userTextFromContent(event.content) || goalPatch.objective || session.lastGoal?.objective || "Codex goal";
+  const state = createRunState(session, event, userContent);
+  state.goalMode = true;
+  setRunGoalState(state, previewGoalFromPatch(session, goalPatch));
+
+  let card = null;
+  let activeRunRecorded = false;
+  let finalCardFlushOk = true;
+  try {
+    card = await openGoalRunCard(chatId, messageId, state);
+    if (card) {
+      recordActiveRun({
+        chatId,
+        messageId,
+        sessionId: session.id,
+        cardId: card.cardId,
+        cardMessageId: card.messageId,
+        startedAt: state.startedAt,
+      });
+      activeRunRecorded = true;
+    }
+  } catch (error) {
+    log("WARN", "goal card open failed; falling back to markdown", {
+      messageId,
+      error: String(error.message || error).slice(0, 1200),
+    });
+  }
+
+  if (!card) {
+    await sendMarkdown(
+      chatId,
+      goalMarkdown(session, state.goal, "Codex goal 正在启动"),
+      "goal-start",
+      messageId,
+    );
+  }
+
+  const run = {
+    chatId,
+    messageId,
+    rootMessageId: messageId,
+    sessionId: session.id,
+    session,
+    event,
+    state,
+    card,
+    activeRunRecorded,
+    finalCardFlushOk,
+    client: null,
+    threadId: "",
+    currentTurnId: "",
+    turnActive: false,
+    goal: state.goal,
+    goalCleared: false,
+    pendingSteers: options.initialSteer ? [options.initialSteer] : [],
+    steeringInFlight: null,
+    done: false,
+    readySettled: false,
+    readyResolve: null,
+    readyReject: null,
+  };
+  run.ready = new Promise((resolve, reject) => {
+    run.readyResolve = resolve;
+    run.readyReject = reject;
+  });
+  run.updateCard = async () => {
+    if (!run.card) return;
+    if (run.activeRunRecorded && run.state.terminal === "running") touchActiveRun(run.messageId);
+    const rendered = renderRunCard(run.state);
+    if (run.state.terminal === "running") {
+      run.card.update(rendered);
+    } else {
+      const ok = await run.card.flush(rendered);
+      run.finalCardFlushOk = ok !== false;
+      run.card.close();
+    }
+  };
+
+  activeGoalRuns.set(chatId, run);
+  run.promise = runGoalLoop(run, goalPatch).catch((error) => {
+    log("ERROR", "goal runner failed unexpectedly", {
+      chatId,
+      messageId,
+      error: String(error.stack || error).slice(0, 2000),
+    });
+  });
+
+  await run.ready;
+  return { run, goal: run.goal, started: true };
+}
+
+async function updateGoalRunGoal(run, goalPatch) {
+  await run.ready.catch(() => {});
+  if (!run.client || !run.threadId || run.done) throw new Error("当前 Codex goal runner 不可用。");
+  const result = await run.client.request("thread/goal/set", { threadId: run.threadId, ...goalPatch }, 60_000);
+  run.goal = setRunGoalState(run.state, result?.goal || previewGoalFromPatch(run.session, goalPatch));
+  updateSessionGoal(run.session, run.goal);
+  run.state.footer = "thinking";
+  await run.updateCard?.();
+  return run.goal;
+}
+
+async function clearGoalRun(run) {
+  await run.ready.catch(() => {});
+  if (!run.client || !run.threadId || run.done) throw new Error("当前 Codex goal runner 不可用。");
+  const result = await run.client.request("thread/goal/clear", { threadId: run.threadId }, 60_000);
+  run.goalCleared = true;
+  run.goal = null;
+  setRunGoalState(run.state, null);
+  updateSessionGoal(run.session, null);
+  run.state.footer = "thinking";
+  await run.updateCard?.();
+  return Boolean(result?.cleared);
+}
+
+async function queueGoalSteer(run, steer, { quiet = false } = {}) {
+  run.pendingSteers.push(steer);
+  if (!quiet) {
+    await sendText(
+      run.chatId,
+      "已收到，作为当前 Codex goal 的补充指令处理。当前 goal 卡片会继续更新。",
+      "goal-steer-ack",
+      steer.messageId || steer.event?.message_id || run.messageId,
+    );
+  }
+  await flushGoalSteers(run);
+}
+
+async function maybeRouteMessageToGoal(chatId, event, session, userContent, messageId) {
+  if (CONFIG.runMode === "exec") return false;
+  const steer = { event, userContent, messageId };
+  const run = activeGoalRunForChat(chatId, session);
+  if (run) {
+    await queueGoalSteer(run, steer);
+    return true;
+  }
+
+  const goal = normalizeGoal(session.lastGoal);
+  if (goal?.status !== "active") return false;
+  const job = activeCodexJobs.get(chatId);
+  if (job && job.mode !== "app-server-goal") return false;
+
+  await startGoalRun(chatId, event, session, { status: "active" }, { initialSteer: steer });
+  return true;
+}
+
+async function flushGoalSteers(run) {
+  if (run.steeringInFlight) return await run.steeringInFlight;
+  if (!run.client || !run.threadId || run.done) return;
+  run.steeringInFlight = (async () => {
+    while (run.pendingSteers.length && !run.done && run.client && run.threadId) {
+      const steer = run.pendingSteers.shift();
+      const submitted = await submitGoalSteer(run, steer);
+      if (submitted === false) {
+        run.pendingSteers.unshift(steer);
+        break;
+      }
+    }
+  })();
+  try {
+    await run.steeringInFlight;
+  } finally {
+    run.steeringInFlight = null;
+  }
+}
+
+async function submitGoalSteer(run, steer) {
+  const event = steer.event;
+  const userContent = steer.userContent ?? userTextFromContent(event.content);
+  const messageId = steer.messageId || event.message_id || event.id || crypto.randomUUID();
+  let submitted = false;
+
+  if (run.turnActive && run.currentTurnId) {
+    try {
+      const result = await run.client.request(
+        "turn/steer",
+        appServerSteerParams(run.threadId, run.currentTurnId, event, userContent),
+        60_000,
+      );
+      run.currentTurnId = result?.turnId || run.currentTurnId;
+      submitted = true;
+    } catch (error) {
+      log("WARN", "goal turn steer failed; falling back to turn/start", {
+        messageId,
+        threadId: run.threadId,
+        turnId: run.currentTurnId,
+        error: String(error.message || error).slice(0, 1000),
+      });
+    }
+  }
+
+  if (!submitted) {
+    try {
+      const turn = await run.client.request(
+        "turn/start",
+        appServerTurnParams(run.threadId, event, userContent, run.session),
+        60_000,
+      );
+      run.currentTurnId = turn?.turn?.id || run.currentTurnId;
+      run.turnActive = Boolean(run.currentTurnId);
+      submitted = true;
+    } catch (error) {
+      if (!run.turnActive && isActiveTurnRaceError(error)) {
+        log("INFO", "goal steer deferred until active turn notification", {
+          messageId,
+          threadId: run.threadId,
+          error: String(error.message || error).slice(0, 500),
+        });
+        return false;
+      }
+      await sendMarkdown(
+        run.chatId,
+        [
+          "**Codex goal 补充指令发送失败**",
+          "",
+          "```",
+          truncateCardText(errorText(error), 1200),
+          "```",
+        ].join("\n"),
+        "goal-steer-error",
+        messageId,
+      );
+      return true;
+    }
+  }
+
+  if (submitted) {
+    run.state.goalSteerCount += 1;
+    run.state.footer = "thinking";
+    appendHistory(run.session, "user", userContent || `${event.attachments?.length || 0} attachment(s)`);
+    await run.updateCard?.();
+  }
+  return true;
+}
+
+function isActiveTurnRaceError(error) {
+  const text = errorText(error).toLowerCase();
+  return text.includes("active turn")
+    || text.includes("in-flight")
+    || text.includes("in flight")
+    || text.includes("not idle")
+    || text.includes("already running")
+    || text.includes("turn is active");
+}
+
+async function runGoalLoop(run, goalPatch) {
+  const { chatId, messageId, session, state } = run;
+  const startedAt = Date.now();
+  const client = new AppServerClient({ cwd: CONFIG.workspace }).start();
+  run.client = client;
+  const activeJob = {
+    pid: client.child.pid,
+    client,
+    messageId,
+    rootMessageId: run.rootMessageId,
+    startedAt,
+    sessionId: session.id,
+    threadId: "",
+    turnId: "",
+    mode: "app-server-goal",
+  };
+  activeCodexJobs.set(chatId, activeJob);
+
+  const watchdog = createRunWatchdog("codex app-server goal", () => {
+    void client.stop();
+    setTimeout(() => terminateProcessTree(client.child?.pid, true), 5000).unref?.();
+  });
+
+  try {
+    const initialized = await initializeAppServerClient(client);
+    watchdog.touch();
+    state.meta.model = initialized.userAgent || state.meta.model;
+
+    const threadId = await startOrResumeAppServerThread(client, session);
+    watchdog.touch();
+    run.threadId = threadId;
+    state.threadId = threadId;
+    activeJob.threadId = threadId;
+
+    const result = await client.request("thread/goal/set", { threadId, ...goalPatch }, 60_000);
+    watchdog.touch();
+    run.goal = setRunGoalState(state, result?.goal || previewGoalFromPatch(session, goalPatch));
+    updateSessionGoal(session, run.goal);
+    settleGoalRunReady(run);
+    await run.updateCard?.();
+    await flushGoalSteers(run);
+
+    while (!watchdog.timedOut) {
+      if (stoppedJobs.has(messageId) || stoppedJobs.has(run.rootMessageId)) {
+        throw new Error("codex job stopped by user");
+      }
+
+      const message = await client.nextNotification(1000);
+      if (!message) {
+        if (client.closed) break;
+        await flushGoalSteers(run);
+        if (goalRunTerminal(run) && !run.turnActive) break;
+        continue;
+      }
+
+      watchdog.touch();
+      const params = message.params || {};
+      if (message.method === "turn/started") {
+        run.currentTurnId = params.turn?.id || params.turnId || run.currentTurnId;
+        run.turnActive = Boolean(run.currentTurnId);
+        activeJob.turnId = run.currentTurnId;
+      }
+
+      let stateChanged = false;
+      if (message.method === "thread/goal/updated") {
+        run.goal = setRunGoalState(state, params.goal || null);
+        stateChanged = true;
+      } else if (message.method === "thread/goal/cleared") {
+        run.goalCleared = true;
+        run.goal = null;
+        setRunGoalState(state, null);
+        stateChanged = true;
+      } else if (message.method === "turn/completed") {
+        const completedTurnId = params.turn?.id || params.turnId || "";
+        if (!completedTurnId || !run.currentTurnId || completedTurnId === run.currentTurnId) {
+          run.turnActive = false;
+          run.currentTurnId = "";
+          activeJob.turnId = "";
+        }
+      } else if (message.method === "error") {
+        const failure = classifyCodexFailure(params, "codex app-server goal error");
+        if (failure.recoverable && params.willRetry === true) continue;
+        throw errorFromFailure(failure);
+      }
+
+      if (reduceAppServerEvent(state, message)) stateChanged = true;
+      if (stateChanged) await run.updateCard?.();
+
+      await flushGoalSteers(run);
+      if (goalRunTerminal(run) && !run.turnActive) break;
+    }
+
+    if (watchdog.timedOut) throw new Error(watchdog.reason || "codex app-server goal timed out");
+    if (stoppedJobs.has(messageId) || stoppedJobs.has(run.rootMessageId)) {
+      throw new Error("codex job stopped by user");
+    }
+
+    const finalText = resultTextFromState(state) || goalRunFinalText(run);
+    ensureRunDone(state, finalText);
+    state.meta.durationMs = Date.now() - startedAt;
+    await run.updateCard?.();
+    if (!run.card || !run.finalCardFlushOk) {
+      await sendMarkdown(chatId, goalRunResultMarkdown(run), "goal-done", messageId);
+    }
+    appendHistory(session, "user", `/goal ${goalPatch.objective || run.goal?.objective || ""}`.trim());
+    appendHistory(session, "assistant", finalText);
+    stats.answered += 1;
+  } catch (error) {
+    settleGoalRunReady(run, error);
+    if (stoppedJobs.has(messageId) || stoppedJobs.has(run.rootMessageId)) {
+      markRunInterrupted(state);
+      await run.updateCard?.();
+      log("INFO", "codex goal stopped by user", { messageId, chatId });
+    } else {
+      stats.failed += 1;
+      const failure = classifyCodexFailure(error);
+      recordFailureStats(failure);
+      markRunError(state, error);
+      await run.updateCard?.();
+      if (!run.card || !run.finalCardFlushOk) {
+        await sendMarkdown(
+          chatId,
+          [
+            "**Codex goal 运行失败**",
+            "",
+            failureShortText(failure),
+            "",
+            "```",
+            truncateCardText(errorText(error), 1500),
+            "```",
+          ].join("\n"),
+          "goal-error",
+          messageId,
+        );
+      }
+    }
+  } finally {
+    watchdog.clear();
+    run.done = true;
+    const job = activeCodexJobs.get(chatId);
+    if (job?.pid === client.child?.pid) activeCodexJobs.delete(chatId);
+    const currentRun = activeGoalRuns.get(chatId);
+    if (currentRun === run) activeGoalRuns.delete(chatId);
+    if (run.activeRunRecorded) clearActiveRun(messageId);
+    await client.stop();
+  }
 }
 
 async function withConfigClient(fn) {
@@ -4925,6 +5470,9 @@ async function handleEvent(rawEvent) {
 
   await syncChatSessionsWithCodex(chatId);
   const session = getSession(chatId);
+  if (await maybeRouteMessageToGoal(chatId, event, session, userContent, messageId)) {
+    return;
+  }
   const cardState = createRunState(session, event, userContent);
   let card = null;
   let activeRunRecorded = false;
@@ -5589,39 +6137,44 @@ async function handleGoalCommand(chatId, rest, messageId) {
   const session = getSession(chatId);
   const text = String(rest || "").trim();
   const action = text.toLowerCase();
+  const activeRun = activeGoalRunForChat(chatId, session);
 
   try {
     if (!text || action === "status" || action === "view") {
-      const goal = await getAppServerGoal(session);
+      const goal = activeRun ? activeRun.goal || session.lastGoal : await getAppServerGoal(session);
       await sendMarkdown(chatId, goalMarkdown(session, goal), "goal-status", messageId);
       return;
     }
 
     if (action === "clear" || action === "delete" || action === "remove") {
-      const cleared = await clearAppServerGoal(session);
+      const cleared = activeRun ? await clearGoalRun(activeRun) : await clearAppServerGoal(session);
       await sendText(chatId, cleared ? "已清除当前 Codex goal。" : "当前会话没有可清除的 Codex goal。", "goal-clear", messageId);
       return;
     }
 
     if (action === "pause") {
-      const current = await getAppServerGoal(session);
+      const current = activeRun ? activeRun.goal || session.lastGoal : await getAppServerGoal(session);
       if (!current) {
         await sendText(chatId, "当前会话还没有 Codex goal，先用 /goal <目标> 设置。", "goal-pause-none", messageId);
         return;
       }
-      const goal = await setAppServerGoal(session, { status: "paused" });
+      const goal = activeRun
+        ? await updateGoalRunGoal(activeRun, { status: "paused" })
+        : await setAppServerGoal(session, { status: "paused" });
       await sendMarkdown(chatId, goalMarkdown(session, goal, "已暂停 Codex goal"), "goal-pause", messageId);
       return;
     }
 
     if (action === "resume") {
-      const current = await getAppServerGoal(session);
+      const current = activeRun ? activeRun.goal || session.lastGoal : await getAppServerGoal(session);
       if (!current) {
         await sendText(chatId, "当前会话还没有 Codex goal，先用 /goal <目标> 设置。", "goal-resume-none", messageId);
         return;
       }
-      const goal = await setAppServerGoal(session, { status: "active" });
-      await sendMarkdown(chatId, goalMarkdown(session, goal, "已恢复 Codex goal"), "goal-resume", messageId);
+      const goal = activeRun
+        ? await updateGoalRunGoal(activeRun, { status: "active" })
+        : (await startGoalRun(chatId, { chat_id: chatId, message_id: messageId, id: messageId, content: JSON.stringify({ text: `/goal resume` }) }, session, { status: "active" })).goal;
+      if (activeRun) await sendMarkdown(chatId, goalMarkdown(session, goal, "已恢复 Codex goal"), "goal-resume", messageId);
       return;
     }
 
@@ -5630,8 +6183,16 @@ async function handleGoalCommand(chatId, rest, messageId) {
       return;
     }
 
-    const goal = await setAppServerGoal(session, { objective: text, status: "active" });
-    await sendMarkdown(chatId, goalMarkdown(session, goal, "已设置 Codex goal"), "goal-set", messageId);
+    const job = activeCodexJobs.get(chatId);
+    if (job && job.mode !== "app-server-goal") {
+      await sendText(chatId, "当前 Codex 任务还在运行，等这一轮结束后再设置 goal，或先发送 /stop。", "goal-busy", messageId);
+      return;
+    }
+
+    const goal = activeRun
+      ? await updateGoalRunGoal(activeRun, { objective: text, status: "active" })
+      : (await startGoalRun(chatId, { chat_id: chatId, message_id: messageId, id: messageId, content: JSON.stringify({ text: `/goal ${text}` }) }, session, { objective: text, status: "active" })).goal;
+    if (activeRun) await sendMarkdown(chatId, goalMarkdown(session, goal, "已更新 Codex goal"), "goal-set", messageId);
   } catch (error) {
     const failure = classifyCodexFailure(error);
     await sendMarkdown(
@@ -5976,6 +6537,19 @@ async function stopCurrentJob(chatId, messageId, { clearMode = "" } = {}) {
   stoppedJobs.add(job.messageId);
   if (job.rootMessageId) stoppedJobs.add(job.rootMessageId);
 
+  if (job.mode === "app-server-goal" && job.client && job.threadId) {
+    try {
+      await job.client.request("thread/goal/set", { threadId: job.threadId, status: "paused" }, 15_000);
+    } catch (error) {
+      log("WARN", "codex goal pause during stop failed", {
+        chatId,
+        pid: job.pid,
+        threadId: job.threadId,
+        error: String(error.message || error).slice(0, 1000),
+      });
+    }
+  }
+
   if (job.mode === "app-server" && job.client && job.threadId && job.turnId) {
     try {
       await job.client.request("turn/interrupt", { threadId: job.threadId, turnId: job.turnId }, 15_000);
@@ -5992,6 +6566,31 @@ async function stopCurrentJob(chatId, messageId, { clearMode = "" } = {}) {
       return;
     } catch (error) {
       log("WARN", "codex turn interrupt failed; falling back to process termination", {
+        chatId,
+        pid: job.pid,
+        threadId: job.threadId,
+        turnId: job.turnId,
+        error: String(error.message || error).slice(0, 1000),
+      });
+    }
+  }
+
+  if (job.mode === "app-server-goal" && job.client && job.threadId && job.turnId) {
+    try {
+      await job.client.request("turn/interrupt", { threadId: job.threadId, turnId: job.turnId }, 15_000);
+      setTimeout(() => {
+        const current = activeCodexJobs.get(chatId);
+        if (current?.pid === job.pid) terminateProcessTree(job.pid, true);
+      }, 5000).unref?.();
+      await sendText(
+        chatId,
+        `已暂停 Codex goal 并请求停止当前 turn；如果没有及时结束，Bridge 会自动兜底强制停止。${clearMode ? `已清理等待队列 ${cleared} 条。` : ""}`,
+        "stop",
+        messageId,
+      );
+      return;
+    } catch (error) {
+      log("WARN", "codex goal turn interrupt failed; falling back to process termination", {
         chatId,
         pid: job.pid,
         threadId: job.threadId,
@@ -6074,7 +6673,7 @@ function helpMarkdown() {
     "`/now` — 查看当前状态（工作区、会话、任务、队列）",
     "`/how` — 同 `/now`",
     "`/context` — 查看当前 Codex 原生 thread、token 和压缩状态",
-    "`/goal [目标]` — 查看或设置 Codex goal；支持 `/goal pause`、`/goal resume`、`/goal clear`",
+    "`/goal [目标]` — 查看或启动原生 Codex Goal mode；运行中普通消息会作为当前 goal 的补充指令；支持 `/goal pause`、`/goal resume`、`/goal clear`",
     "`/provider [id]` — 查看或切换当前会话 provider；`/provider list` 列出可用 provider",
     "`/model [模型ID] [推理强度]` — 查看或切换当前会话模型；`/model list` 列出模型",
     "`/fast on|off|status` — 切换或查看 Codex Fast 速度模式",
