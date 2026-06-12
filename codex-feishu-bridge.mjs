@@ -519,6 +519,13 @@ function classifyCodexFailure(value, fallback = "Codex 运行失败") {
   return base;
 }
 
+function isNoGoalExistsError(value) {
+  const lower = errorText(value, "").toLowerCase();
+  return lower.includes("no goal exists")
+    || lower.includes("goal does not exist")
+    || lower.includes("no current goal");
+}
+
 function httpStatusFromText(text) {
   const value = String(text || "");
   const match = value.match(/httpStatusCode["']?\s*[:=]\s*(\d{3})/i)
@@ -4258,27 +4265,76 @@ async function withAppServerThread(session, { createIfMissing = true, timeoutMs 
 
 async function getAppServerGoal(session) {
   if (!session.codexThreadId) return null;
-  return await withAppServerThread(session, { createIfMissing: false }, async (client, threadId) => {
-    const result = await client.request("thread/goal/get", { threadId }, 60_000);
-    updateSessionGoal(session, result?.goal || null);
-    return session.lastGoal;
-  });
+  try {
+    return await withAppServerThread(session, { createIfMissing: false }, async (client, threadId) => {
+      const result = await client.request("thread/goal/get", { threadId }, 60_000);
+      updateSessionGoal(session, result?.goal || null);
+      return session.lastGoal;
+    });
+  } catch (error) {
+    if (!isNoGoalExistsError(error)) throw error;
+    updateSessionGoal(session, null);
+    return null;
+  }
 }
 
 async function setAppServerGoal(session, goalPatch) {
-  return await withAppServerThread(session, { createIfMissing: true }, async (client, threadId) => {
-    const result = await client.request("thread/goal/set", { threadId, ...goalPatch }, 60_000);
-    return updateSessionGoal(session, result?.goal || null);
-  });
+  try {
+    return await withAppServerThread(session, { createIfMissing: true }, async (client, threadId) => {
+      const result = await client.request("thread/goal/set", { threadId, ...goalPatch }, 60_000);
+      return updateSessionGoal(session, result?.goal || null);
+    });
+  } catch (error) {
+    if (!isNoGoalExistsError(error)) throw error;
+    updateSessionGoal(session, null);
+    return null;
+  }
 }
 
 async function clearAppServerGoal(session) {
   if (!session.codexThreadId) return false;
-  return await withAppServerThread(session, { createIfMissing: false }, async (client, threadId) => {
-    const result = await client.request("thread/goal/clear", { threadId }, 60_000);
+  try {
+    return await withAppServerThread(session, { createIfMissing: false }, async (client, threadId) => {
+      const result = await client.request("thread/goal/clear", { threadId }, 60_000);
+      updateSessionGoal(session, null);
+      return Boolean(result?.cleared);
+    });
+  } catch (error) {
+    if (!isNoGoalExistsError(error)) throw error;
     updateSessionGoal(session, null);
-    return Boolean(result?.cleared);
-  });
+    return false;
+  }
+}
+
+function applyGoalRunNativeState(run, goal) {
+  const next = normalizeGoal(goal);
+  if (next) {
+    run.goalCleared = false;
+    run.goal = setRunGoalState(run.state, next);
+    updateSessionGoal(run.session, run.goal);
+    return run.goal;
+  }
+
+  run.goalCleared = true;
+  run.goal = null;
+  setRunGoalState(run.state, null);
+  updateSessionGoal(run.session, null);
+  return null;
+}
+
+async function getGoalRunNativeState(run) {
+  if (!run?.client || !run.threadId) return normalizeGoal(run?.goal || run?.session?.lastGoal);
+  try {
+    const result = await run.client.request("thread/goal/get", { threadId: run.threadId }, 60_000);
+    return applyGoalRunNativeState(run, result?.goal || null);
+  } catch (error) {
+    if (!isNoGoalExistsError(error)) throw error;
+    if (goalStatusIsTerminal(normalizeGoal(run.goal)?.status)) {
+      updateSessionGoal(run.session, run.goal);
+      return run.goal;
+    }
+    return applyGoalRunNativeState(run, null);
+  }
 }
 
 function activeGoalRunForChat(chatId, session = null) {
@@ -4469,9 +4525,16 @@ async function startGoalRun(chatId, event, session, goalPatch, options = {}) {
 async function updateGoalRunGoal(run, goalPatch) {
   await run.ready.catch(() => {});
   if (!run.client || !run.threadId || run.done) throw new Error("当前 Codex goal runner 不可用。");
-  const result = await run.client.request("thread/goal/set", { threadId: run.threadId, ...goalPatch }, 60_000);
-  run.goal = setRunGoalState(run.state, result?.goal || previewGoalFromPatch(run.session, goalPatch));
-  updateSessionGoal(run.session, run.goal);
+  let result = null;
+  try {
+    result = await run.client.request("thread/goal/set", { threadId: run.threadId, ...goalPatch }, 60_000);
+  } catch (error) {
+    if (!isNoGoalExistsError(error)) throw error;
+    applyGoalRunNativeState(run, null);
+    await run.updateCard?.();
+    return null;
+  }
+  applyGoalRunNativeState(run, result?.goal || previewGoalFromPatch(run.session, goalPatch));
   run.state.footer = "thinking";
   await run.updateCard?.();
   return run.goal;
@@ -4480,11 +4543,13 @@ async function updateGoalRunGoal(run, goalPatch) {
 async function clearGoalRun(run) {
   await run.ready.catch(() => {});
   if (!run.client || !run.threadId || run.done) throw new Error("当前 Codex goal runner 不可用。");
-  const result = await run.client.request("thread/goal/clear", { threadId: run.threadId }, 60_000);
-  run.goalCleared = true;
-  run.goal = null;
-  setRunGoalState(run.state, null);
-  updateSessionGoal(run.session, null);
+  let result = null;
+  try {
+    result = await run.client.request("thread/goal/clear", { threadId: run.threadId }, 60_000);
+  } catch (error) {
+    if (!isNoGoalExistsError(error)) throw error;
+  }
+  applyGoalRunNativeState(run, null);
   run.state.footer = "thinking";
   await run.updateCard?.();
   return Boolean(result?.cleared);
@@ -4508,16 +4573,25 @@ async function maybeRouteMessageToGoal(chatId, event, session, userContent, mess
   const steer = { event, userContent, messageId };
   const run = activeGoalRunForChat(chatId, session);
   if (run) {
+    if (run.client?.closed) return false;
+    const nativeGoal = await getGoalRunNativeState(run);
+    if (nativeGoal?.status !== "active") return false;
     await queueGoalSteer(run, steer);
     return true;
   }
 
-  const goal = normalizeGoal(session.lastGoal);
+  const goal = await getAppServerGoal(session);
   if (goal?.status !== "active") return false;
   const job = activeCodexJobs.get(chatId);
   if (job && job.mode !== "app-server-goal") return false;
 
-  await startGoalRun(chatId, event, session, { status: "active" }, { initialSteer: steer });
+  try {
+    await startGoalRun(chatId, event, session, { status: "active" }, { initialSteer: steer });
+  } catch (error) {
+    if (!isNoGoalExistsError(error)) throw error;
+    updateSessionGoal(session, null);
+    return false;
+  }
   return true;
 }
 
@@ -4577,6 +4651,11 @@ async function submitGoalSteer(run, steer) {
       run.turnActive = Boolean(run.currentTurnId);
       submitted = true;
     } catch (error) {
+      if (isNoGoalExistsError(error)) {
+        applyGoalRunNativeState(run, null);
+        await run.updateCard?.();
+        return false;
+      }
       if (!run.turnActive && isActiveTurnRaceError(error)) {
         log("INFO", "goal steer deferred until active turn notification", {
           messageId,
@@ -4656,8 +4735,7 @@ async function runGoalLoop(run, goalPatch) {
 
     const result = await client.request("thread/goal/set", { threadId, ...goalPatch }, 60_000);
     watchdog.touch();
-    run.goal = setRunGoalState(state, result?.goal || previewGoalFromPatch(session, goalPatch));
-    updateSessionGoal(session, run.goal);
+    applyGoalRunNativeState(run, result?.goal || previewGoalFromPatch(session, goalPatch));
     settleGoalRunReady(run);
     await run.updateCard?.();
     await flushGoalSteers(run);
@@ -4685,12 +4763,10 @@ async function runGoalLoop(run, goalPatch) {
 
       let stateChanged = false;
       if (message.method === "thread/goal/updated") {
-        run.goal = setRunGoalState(state, params.goal || null);
+        applyGoalRunNativeState(run, params.goal || null);
         stateChanged = true;
       } else if (message.method === "thread/goal/cleared") {
-        run.goalCleared = true;
-        run.goal = null;
-        setRunGoalState(state, null);
+        applyGoalRunNativeState(run, null);
         stateChanged = true;
       } else if (message.method === "turn/completed") {
         const completedTurnId = params.turn?.id || params.turnId || "";
@@ -4716,6 +4792,8 @@ async function runGoalLoop(run, goalPatch) {
     if (stoppedJobs.has(messageId) || stoppedJobs.has(run.rootMessageId)) {
       throw new Error("codex job stopped by user");
     }
+
+    if (!client.closed) await getGoalRunNativeState(run);
 
     const finalText = resultTextFromState(state) || goalRunFinalText(run);
     ensureRunDone(state, finalText);
@@ -6141,7 +6219,7 @@ async function handleGoalCommand(chatId, rest, messageId) {
 
   try {
     if (!text || action === "status" || action === "view") {
-      const goal = activeRun ? activeRun.goal || session.lastGoal : await getAppServerGoal(session);
+      const goal = activeRun ? await getGoalRunNativeState(activeRun) : await getAppServerGoal(session);
       await sendMarkdown(chatId, goalMarkdown(session, goal), "goal-status", messageId);
       return;
     }
@@ -6153,7 +6231,7 @@ async function handleGoalCommand(chatId, rest, messageId) {
     }
 
     if (action === "pause") {
-      const current = activeRun ? activeRun.goal || session.lastGoal : await getAppServerGoal(session);
+      const current = activeRun ? await getGoalRunNativeState(activeRun) : await getAppServerGoal(session);
       if (!current) {
         await sendText(chatId, "当前会话还没有 Codex goal，先用 /goal <目标> 设置。", "goal-pause-none", messageId);
         return;
@@ -6166,7 +6244,7 @@ async function handleGoalCommand(chatId, rest, messageId) {
     }
 
     if (action === "resume") {
-      const current = activeRun ? activeRun.goal || session.lastGoal : await getAppServerGoal(session);
+      const current = activeRun ? await getGoalRunNativeState(activeRun) : await getAppServerGoal(session);
       if (!current) {
         await sendText(chatId, "当前会话还没有 Codex goal，先用 /goal <目标> 设置。", "goal-resume-none", messageId);
         return;
@@ -6539,8 +6617,22 @@ async function stopCurrentJob(chatId, messageId, { clearMode = "" } = {}) {
 
   if (job.mode === "app-server-goal" && job.client && job.threadId) {
     try {
-      await job.client.request("thread/goal/set", { threadId: job.threadId, status: "paused" }, 15_000);
+      const result = await job.client.request("thread/goal/set", { threadId: job.threadId, status: "paused" }, 15_000);
+      const run = activeGoalRuns.get(chatId);
+      if (run) applyGoalRunNativeState(run, result?.goal || null);
+      else {
+        const session = getSession(chatId);
+        if (!job.sessionId || session.id === job.sessionId) updateSessionGoal(session, result?.goal || null);
+      }
     } catch (error) {
+      if (isNoGoalExistsError(error)) {
+        const run = activeGoalRuns.get(chatId);
+        if (run) applyGoalRunNativeState(run, null);
+        else {
+          const session = getSession(chatId);
+          if (!job.sessionId || session.id === job.sessionId) updateSessionGoal(session, null);
+        }
+      }
       log("WARN", "codex goal pause during stop failed", {
         chatId,
         pid: job.pid,
