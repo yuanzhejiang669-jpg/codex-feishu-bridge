@@ -2862,7 +2862,22 @@ function isContextUsageHigher(candidate, baseline) {
   return baselineScore === null || candidateScore > baselineScore;
 }
 
+function nativeGoalCardTitle(state) {
+  const goal = normalizeGoal(state.goal || state.session.lastGoal);
+  if (state.terminal === "error") return "Codex goal 失败";
+  if (goal?.status === "complete") return "Codex goal 已完成";
+  if (goal?.status === "paused") return "Codex goal 已暂停";
+  if (goal?.status === "blocked") return "Codex goal 受阻";
+  if (goal?.status === "usageLimited") return "Codex goal 使用量受限";
+  if (goal?.status === "budgetLimited") return "Codex goal 预算受限";
+  if (goal?.status === "active") return "Codex goal 进行中";
+  if (state.terminal === "interrupted") return "Codex goal 已停止";
+  if (state.terminal === "done") return "Codex goal 已结束";
+  return "Codex goal 进行中";
+}
+
 function cardTitle(state) {
+  if (state.goalMode) return nativeGoalCardTitle(state);
   if (state.goalMode) {
     const goal = normalizeGoal(state.goal || state.session.lastGoal);
     if (state.terminal === "error") return "Codex goal 失败";
@@ -4344,9 +4359,28 @@ function activeGoalRunForChat(chatId, session = null) {
   return run;
 }
 
+async function refreshGoalRunForNativeState(chatId, session, run) {
+  if (!run) return null;
+  if (run.done || run.client?.closed) {
+    if (activeGoalRuns.get(chatId) === run) activeGoalRuns.delete(chatId);
+    return null;
+  }
+  const nativeGoal = await getGoalRunNativeState(run);
+  if (!nativeGoal && run.goalCleared) {
+    if (activeGoalRuns.get(chatId) === run) activeGoalRuns.delete(chatId);
+    return null;
+  }
+  if (session && run.sessionId !== session.id) return null;
+  return run;
+}
+
 function goalStatusIsTerminal(status) {
   const value = String(status || "").trim();
   return Boolean(value && value !== "active");
+}
+
+function goalStatusIsActive(status) {
+  return String(status || "").trim() === "active";
 }
 
 function goalRunTerminal(run) {
@@ -4381,10 +4415,12 @@ function settleGoalRunReady(run, error = null) {
   else run.readyResolve(run);
 }
 
-function goalRunFinalText(run) {
+function nativeGoalRunFinalText(run) {
   const goal = normalizeGoal(run.goal || run.session.lastGoal);
   if (run.goalCleared || !goal) return "Codex goal 已清除。";
   switch (goal.status) {
+    case "active":
+      return "Codex goal 仍在进行中。后续消息会继续作为当前 goal 的补充指令处理。";
     case "complete":
       return "Codex goal 已完成。";
     case "paused":
@@ -4396,20 +4432,40 @@ function goalRunFinalText(run) {
     case "budgetLimited":
       return "Codex goal 因 token 预算限制停止。";
     default:
-      return `Codex goal 已结束，当前状态：${goalStatusLabel(goal.status)}。`;
+      return `Codex goal 当前状态：${goalStatusLabel(goal.status)}。`;
   }
 }
 
-function goalRunResultMarkdown(run) {
-  const text = resultTextFromState(run.state) || goalRunFinalText(run);
+function nativeGoalRunHeading(run) {
+  const goal = normalizeGoal(run.goal || run.session.lastGoal);
+  if (run.goalCleared || !goal) return "Codex goal 已清除";
+  if (goal.status === "active") return "Codex goal 进行中";
+  if (goal.status === "complete") return "Codex goal 已完成";
+  if (goal.status === "paused") return "Codex goal 已暂停";
+  if (goal.status === "blocked") return "Codex goal 受阻";
+  if (goal.status === "usageLimited") return "Codex goal 使用量受限";
+  if (goal.status === "budgetLimited") return "Codex goal 预算受限";
+  return "Codex goal 状态";
+}
+
+function nativeGoalRunResultMarkdown(run) {
+  const text = resultTextFromState(run.state) || nativeGoalRunFinalText(run);
   return [
-    "**Codex goal 已结束**",
+    `**${nativeGoalRunHeading(run)}**`,
     "",
     run.goal ? goalMarkdown(run.session, run.goal).replace(/^.*?\n\n/s, "") : "当前 goal 已清除。",
     "",
     "---",
     text,
   ].join("\n");
+}
+
+function goalRunFinalText(run) {
+  return nativeGoalRunFinalText(run);
+}
+
+function goalRunResultMarkdown(run) {
+  return nativeGoalRunResultMarkdown(run);
 }
 
 async function openGoalRunCard(chatId, messageId, state) {
@@ -4423,7 +4479,7 @@ async function openGoalRunCard(chatId, messageId, state) {
 }
 
 async function startGoalRun(chatId, event, session, goalPatch, options = {}) {
-  const existing = activeGoalRunForChat(chatId, session);
+  const existing = await refreshGoalRunForNativeState(chatId, session, activeGoalRunForChat(chatId, session));
   if (existing) {
     const goal = await updateGoalRunGoal(existing, goalPatch);
     if (options.initialSteer) await queueGoalSteer(existing, options.initialSteer, { quiet: true });
@@ -4485,6 +4541,7 @@ async function startGoalRun(chatId, event, session, goalPatch, options = {}) {
     turnActive: false,
     goal: state.goal,
     goalCleared: false,
+    detached: false,
     pendingSteers: options.initialSteer ? [options.initialSteer] : [],
     steeringInFlight: null,
     done: false,
@@ -4571,9 +4628,8 @@ async function queueGoalSteer(run, steer, { quiet = false } = {}) {
 async function maybeRouteMessageToGoal(chatId, event, session, userContent, messageId) {
   if (CONFIG.runMode === "exec") return false;
   const steer = { event, userContent, messageId };
-  const run = activeGoalRunForChat(chatId, session);
+  const run = await refreshGoalRunForNativeState(chatId, session, activeGoalRunForChat(chatId, session));
   if (run) {
-    if (run.client?.closed) return false;
     const nativeGoal = await getGoalRunNativeState(run);
     if (nativeGoal?.status !== "active") return false;
     await queueGoalSteer(run, steer);
@@ -4736,6 +4792,13 @@ async function runGoalLoop(run, goalPatch) {
     const result = await client.request("thread/goal/set", { threadId, ...goalPatch }, 60_000);
     watchdog.touch();
     applyGoalRunNativeState(run, result?.goal || previewGoalFromPatch(session, goalPatch));
+    log("INFO", "codex goal native state set", {
+      chatId,
+      messageId,
+      threadId,
+      status: run.goal?.status || "",
+      objectiveLength: String(run.goal?.objective || "").length,
+    });
     settleGoalRunReady(run);
     await run.updateCard?.();
     await flushGoalSteers(run);
@@ -4747,7 +4810,18 @@ async function runGoalLoop(run, goalPatch) {
 
       const message = await client.nextNotification(1000);
       if (!message) {
-        if (client.closed) break;
+        if (client.closed) {
+          if (goalStatusIsActive(normalizeGoal(run.goal || session.lastGoal)?.status)) {
+            run.detached = true;
+            log("INFO", "codex goal runner detached while native goal remains active", {
+              chatId,
+              messageId,
+              threadId,
+              status: normalizeGoal(run.goal || session.lastGoal)?.status || "",
+            });
+          }
+          break;
+        }
         await flushGoalSteers(run);
         if (goalRunTerminal(run) && !run.turnActive) break;
         continue;
@@ -6215,7 +6289,14 @@ async function handleGoalCommand(chatId, rest, messageId) {
   const session = getSession(chatId);
   const text = String(rest || "").trim();
   const action = text.toLowerCase();
-  const activeRun = activeGoalRunForChat(chatId, session);
+  let activeRun = await refreshGoalRunForNativeState(chatId, session, activeGoalRunForChat(chatId, session));
+  log("INFO", "codex goal command received", {
+    chatId,
+    sessionId: session.id,
+    action: action || "status",
+    hasActiveRun: Boolean(activeRun),
+    textLength: text.length,
+  });
 
   try {
     if (!text || action === "status" || action === "view") {
@@ -6267,9 +6348,17 @@ async function handleGoalCommand(chatId, rest, messageId) {
       return;
     }
 
-    const goal = activeRun
-      ? await updateGoalRunGoal(activeRun, { objective: text, status: "active" })
-      : (await startGoalRun(chatId, { chat_id: chatId, message_id: messageId, id: messageId, content: JSON.stringify({ text: `/goal ${text}` }) }, session, { objective: text, status: "active" })).goal;
+    let goal = null;
+    if (activeRun) {
+      goal = await updateGoalRunGoal(activeRun, { objective: text, status: "active" });
+      if (!goal && activeRun.goalCleared) {
+        if (activeGoalRuns.get(chatId) === activeRun) activeGoalRuns.delete(chatId);
+        activeRun = null;
+      }
+    }
+    if (!activeRun) {
+      goal = (await startGoalRun(chatId, { chat_id: chatId, message_id: messageId, id: messageId, content: JSON.stringify({ text: `/goal ${text}` }) }, session, { objective: text, status: "active" })).goal;
+    }
     if (activeRun) await sendMarkdown(chatId, goalMarkdown(session, goal, "已更新 Codex goal"), "goal-set", messageId);
   } catch (error) {
     const failure = classifyCodexFailure(error);
@@ -6609,6 +6698,28 @@ async function stopCurrentJob(chatId, messageId, { clearMode = "" } = {}) {
   const cleared = clearMode ? clearPendingEventsForChat(chatId, { all: clearMode === "all" }) : 0;
   const job = activeCodexJobs.get(chatId);
   if (!job) {
+    try {
+      await syncChatSessionsWithCodex(chatId);
+      const session = getSession(chatId);
+      const goal = await getAppServerGoal(session);
+      if (goalStatusIsActive(goal?.status)) {
+        const paused = await setAppServerGoal(session, { status: "paused" });
+        await sendMarkdown(
+          chatId,
+          goalMarkdown(session, paused || goal, `已暂停 Codex goal${clearMode ? `，并清理等待队列 ${cleared} 条` : ""}`),
+          "stop-goal-pause",
+          messageId,
+        );
+        return;
+      }
+    } catch (error) {
+      if (!isNoGoalExistsError(error)) {
+        log("WARN", "native goal pause without active job failed", {
+          chatId,
+          error: String(error.message || error).slice(0, 1000),
+        });
+      }
+    }
     await sendText(chatId, `当前没有运行中的 Codex 任务。${clearMode ? `已清理等待队列 ${cleared} 条。` : ""}`, "stop-none", messageId);
     return;
   }
@@ -6632,13 +6743,19 @@ async function stopCurrentJob(chatId, messageId, { clearMode = "" } = {}) {
           const session = getSession(chatId);
           if (!job.sessionId || session.id === job.sessionId) updateSessionGoal(session, null);
         }
+        log("INFO", "codex goal already absent during stop", {
+          chatId,
+          pid: job.pid,
+          threadId: job.threadId,
+        });
+      } else {
+        log("WARN", "codex goal pause during stop failed", {
+          chatId,
+          pid: job.pid,
+          threadId: job.threadId,
+          error: String(error.message || error).slice(0, 1000),
+        });
       }
-      log("WARN", "codex goal pause during stop failed", {
-        chatId,
-        pid: job.pid,
-        threadId: job.threadId,
-        error: String(error.message || error).slice(0, 1000),
-      });
     }
   }
 
