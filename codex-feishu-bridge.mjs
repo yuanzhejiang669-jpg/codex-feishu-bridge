@@ -86,6 +86,7 @@ fs.writeFileSync(pidPath, String(process.pid), "utf8");
 const shutdownCallbacks = new Set();
 const activeChildren = new Map();
 const activeCodexJobs = new Map();
+const activeGoalRuns = new Map();
 const pendingAttachmentsByChat = new Map();
 const pendingDeleteConfirmations = new Map();
 const stoppedJobs = new Set();
@@ -321,10 +322,10 @@ function effectiveSessionSettings(session) {
 function settingsSummary(session) {
   const settings = effectiveSessionSettings(session);
   return [
-    `provider \`${settings.provider || "默认"}\``,
-    `model \`${settings.model || "默认"}\``,
-    `reasoning \`${settings.reasoning || "默认"}\``,
-    `speed \`${displayServiceTier(settings.serviceTier) || "默认"}\``,
+    `provider ${settings.provider || "默认"}`,
+    `model ${settings.model || "默认"}`,
+    `reasoning ${settings.reasoning || "默认"}`,
+    `speed ${displayServiceTier(settings.serviceTier) || "默认"}`,
   ].join(" · ");
 }
 
@@ -516,6 +517,13 @@ function classifyCodexFailure(value, fallback = "Codex 运行失败") {
   }
 
   return base;
+}
+
+function isNoGoalExistsError(value) {
+  const lower = errorText(value, "").toLowerCase();
+  return lower.includes("no goal exists")
+    || lower.includes("goal does not exist")
+    || lower.includes("no current goal");
 }
 
 function httpStatusFromText(text) {
@@ -1659,6 +1667,9 @@ function createRunState(session, event, userContent) {
     event,
     userContent,
     threadId: "",
+    goalMode: false,
+    goal: null,
+    goalSteerCount: 0,
     errorMsg: "",
     failure: null,
     meta: {
@@ -1701,6 +1712,7 @@ function ensureToolBlock(state, item) {
       kind: "tool",
       tool: {
         id: item.id,
+        source: toolSourceFromAppServerItem(item),
         name: toolNameFromAppServerItem(item),
         input: toolInputFromAppServerItem(item),
         output: "",
@@ -1715,6 +1727,7 @@ function ensureToolBlock(state, item) {
 function updateToolFromAppServerItem(state, item) {
   const block = ensureToolBlock(state, item);
   if (!block) return false;
+  block.tool.source = toolSourceFromAppServerItem(item);
   block.tool.name = toolNameFromAppServerItem(item);
   block.tool.input = toolInputFromAppServerItem(item);
   block.tool.status = toolStatusFromAppServerItem(item);
@@ -1756,6 +1769,7 @@ function reduceCodexJsonEvent(state, raw) {
         kind: "tool",
         tool: {
           id: item.id || crypto.randomUUID(),
+          source: toolSourceFromItem(item),
           name,
           input: toolInputFromItem(item),
           status: "running",
@@ -1787,6 +1801,7 @@ function reduceCodexJsonEvent(state, raw) {
         kind: "tool",
         tool: {
           id: item.id || crypto.randomUUID(),
+          source: toolSourceFromItem(item),
           name: item.name || item.type || "tool",
           input: toolInputFromItem(item),
           output: toolOutputFromItem(item),
@@ -2069,6 +2084,7 @@ function recoveryEventFromFailure(event, state, failure, attempt) {
 function renderRunCard(state) {
   const elements = [];
   const elapsed = formatDuration(Date.now() - state.startedAt);
+  const goal = state.goalMode ? normalizeGoal(state.goal || state.session.lastGoal) : null;
 
   if (CONFIG.debugCards) {
     elements.push(noteMd(`会话：${state.session.title} (${state.session.id})`));
@@ -2076,8 +2092,14 @@ function renderRunCard(state) {
     if (state.threadId) elements.push(noteMd(`Codex 线程：${state.threadId}`));
   }
 
+  if (goal) {
+    elements.push(markdown(goalRunHeaderMarkdown(state, goal, elapsed)));
+  }
+
   if (state.blocks.length === 0 && state.terminal === "running") {
-    elements.push(markdown("**正在处理**\n\n我已经收到消息，正在整理回复。"));
+    elements.push(markdown(state.goalMode
+      ? "**正在推进目标**\n\nCodex goal 已进入运行态，后续普通消息会作为当前目标的补充指令处理。"
+      : "**正在处理**\n\n我已经收到消息，正在整理回复。"));
   }
 
   elements.push(...renderRunBlocks(state.blocks, state.terminal !== "running"));
@@ -2110,11 +2132,39 @@ function renderRunCard(state) {
 }
 
 function markdown(content) {
-  return { tag: "markdown", content };
+  return { tag: "markdown", content: cardMarkdownContent(content) };
 }
 
 function noteMd(content) {
-  return { tag: "markdown", content, text_size: "notation" };
+  return { tag: "markdown", content: cardMarkdownContent(content), text_size: "notation" };
+}
+
+function goalRunHeaderMarkdown(state, goal, elapsed) {
+  const parts = [`状态：${goalStatusLabel(goal.status)}`, `运行：${elapsed}`];
+  if (goal.tokensUsed) parts.push(`已用 ${formatNumber(goal.tokensUsed)} tokens`);
+  if (goal.tokenBudget) parts.push(`预算 ${formatNumber(goal.tokenBudget)} tokens`);
+  if (state.goalSteerCount) parts.push(`补充指令 ${formatNumber(state.goalSteerCount)} 条`);
+  return [
+    `**Codex goal：${goalStatusLabel(goal.status)}**`,
+    "",
+    truncateCardText(goal.objective, 800),
+    "",
+    parts.join(" · "),
+    "操作：/goal pause · /goal resume · /goal clear · /stop",
+  ].join("\n");
+}
+
+function cardMarkdownContent(content) {
+  const lines = String(content || "").split(/\r?\n/);
+  let inFence = false;
+  return lines.map((line) => {
+    if (/^\s*(```|~~~)/.test(line)) {
+      inFence = !inFence;
+      return line;
+    }
+    if (inFence) return line;
+    return line.replace(/(^|[^`])`([^`\r\n]+)`(?!`)/g, "$1$2");
+  }).join("\n");
 }
 
 function activeRunKey(messageId) {
@@ -2153,6 +2203,12 @@ function clearActiveRun(messageId) {
   saveActiveRuns();
 }
 
+function staleCardUpdateSequence(record) {
+  const recorded = Math.floor(Number(record?.sequence || 0));
+  const epochSeconds = Math.floor(Date.now() / 1000);
+  return Math.max(1, recorded + 1, epochSeconds);
+}
+
 function renderStaleRunCard(record) {
   const startedAt = Number(record?.startedAt || 0);
   const updatedAt = Number(record?.updatedAt || 0);
@@ -2178,8 +2234,9 @@ function renderStaleRunCard(record) {
   };
 }
 
-async function updateCardById(cardId, card) {
+async function updateCardById(cardId, card, { sequence } = {}) {
   if (!cardId) return false;
+  const nextSequence = Math.max(1, Math.floor(Number(sequence || 0)));
   await larkJson([
     "api",
     "PUT",
@@ -2187,7 +2244,7 @@ async function updateCardById(cardId, card) {
     "--as",
     "bot",
     "--data",
-    JSON.stringify({ card: { type: "card_json", data: JSON.stringify(card) } }),
+    JSON.stringify({ card: { type: "card_json", data: JSON.stringify(card) }, sequence: nextSequence }),
   ], { timeoutMs: 60_000, attempts: 2 });
   return true;
 }
@@ -2197,13 +2254,25 @@ async function repairStaleActiveRunsOnStartup() {
   if (!entries.length) return;
   log("INFO", "repairing stale active runs", { count: entries.length });
   let repaired = 0;
+  const remaining = {};
   for (const record of entries) {
     try {
       if (record?.cardId) {
-        await updateCardById(record.cardId, renderStaleRunCard(record));
+        await updateCardById(record.cardId, renderStaleRunCard(record), {
+          sequence: staleCardUpdateSequence(record),
+        });
       }
       repaired += 1;
     } catch (error) {
+      const key = activeRunKey(record?.messageId);
+      if (key) {
+        remaining[key] = {
+          ...record,
+          repairAttempts: Number(record?.repairAttempts || 0) + 1,
+          lastRepairAt: Date.now(),
+          lastRepairError: String(error.message || error).slice(0, 1000),
+        };
+      }
       log("WARN", "stale active run card update failed", {
         messageId: record?.messageId || "",
         cardId: record?.cardId || "",
@@ -2211,10 +2280,11 @@ async function repairStaleActiveRunsOnStartup() {
       });
     }
   }
-  activeRuns.runs = {};
+  activeRuns.runs = remaining;
   saveActiveRuns();
-  log("INFO", "stale active runs repaired", { repaired });
+  log("INFO", "stale active runs repaired", { repaired, remaining: Object.keys(remaining).length });
 }
+
 
 function renderRunBlocks(blocks, finalized) {
   if (finalized && !CONFIG.debugCards) {
@@ -2289,7 +2359,7 @@ function toolSummaryPanel(tools, finalized) {
     border: { color: counts.error ? "red" : "blue", corner_radius: "5px" },
     vertical_spacing: "8px",
     padding: "8px 8px 8px 8px",
-    elements: [{ tag: "markdown", content: body || "_暂无步骤_", text_size: "notation" }],
+    elements: [{ tag: "markdown", content: cardMarkdownContent(body || "_暂无步骤_"), text_size: "notation" }],
   };
 }
 
@@ -2320,6 +2390,12 @@ function toolSummaryFinalBody(tools, counts) {
   }
   const names = [...new Set(tools.map((tool) => displayToolName(tool)).filter(Boolean))].slice(0, 6);
   if (names.length) lines.push(`工具：${names.join(" · ")}`);
+  const auditLines = tools.map((tool, index) => `${index + 1}. ${toolHeaderText(tool, false)}`);
+  if (auditLines.length) {
+    lines.push("");
+    lines.push("调用明细：");
+    lines.push(truncateCardText(auditLines.join("\n"), 6000));
+  }
   return lines.join("\n");
 }
 
@@ -2333,13 +2409,13 @@ function toolCardPanel(tool, expanded = false) {
     border: { color: tool.status === "error" ? "red" : "grey", corner_radius: "5px" },
     vertical_spacing: "8px",
     padding: "8px 8px 8px 8px",
-    elements: [{ tag: "markdown", content: body, text_size: "notation" }],
+    elements: [{ tag: "markdown", content: cardMarkdownContent(body), text_size: "notation" }],
   };
 }
 
 function panelHeader(content) {
   return {
-    title: { tag: "markdown", content },
+    title: { tag: "markdown", content: cardMarkdownContent(content) },
     vertical_align: "center",
     icon: { tag: "standard_icon", token: "down-small-ccm_outlined", size: "16px 16px" },
     icon_position: "follow_text",
@@ -2448,21 +2524,49 @@ function displayToolName(toolOrName) {
   const raw = typeof toolOrName === "object"
     ? String(toolOrName?.name || "tool")
     : String(toolOrName || "tool");
+  const source = typeof toolOrName === "object" ? String(toolOrName?.source || "") : "";
   const lower = raw.toLowerCase();
-  if (lower === "app_server_fallback") return "原生通道回退";
+  if (lower === "app_server_fallback") return "Bridge · app_server_fallback";
   if (lower === "command_execution" || lower === "exec_command" || lower === "bash") {
-    return classifyCommandToolName(commandTextFromInput(toolOrName?.input));
+    return `${classifyCommandToolName(commandTextFromInput(toolOrName?.input))} · ${raw}`;
   }
-  if (lower === "read" || lower === "file_read") return "读取文件";
-  if (lower === "write" || lower === "file_write") return "写入文件";
-  if (lower === "edit" || lower === "apply_patch") return "修改文件";
-  if (lower === "plan") return "更新计划";
-  if (lower === "web_search") return "网页搜索";
-  if (lower === "image_view") return "查看图片";
-  if (lower === "image_generation") return "生成图片";
-  if (lower.includes("mcp")) return "MCP 工具";
-  if (lower.includes("search") || lower === "grep" || lower === "rg") return "搜索";
-  return raw.replace(/_/g, " ");
+  if (source === "mcp") return `MCP · ${raw}`;
+  if (source === "dynamic") return `${dynamicToolDisplayCategory(raw)} · ${raw}`;
+  if (source === "collab_agent") return `Agent · ${raw}`;
+  if (lower === "read" || lower === "file_read") return `File · ${raw}`;
+  if (lower === "write" || lower === "file_write") return `File · ${raw}`;
+  if (lower === "edit" || lower === "apply_patch") return `File · ${raw}`;
+  if (lower === "plan") return `Plan · ${raw}`;
+  if (lower === "web_search") return `Web · ${raw}`;
+  if (lower === "image_view") return `Image · ${raw}`;
+  if (lower === "image_generation") return `Image · ${raw}`;
+  if (lower.includes("mcp") || lower.startsWith("mcp__")) return `MCP · ${raw}`;
+  if (lower.startsWith("skill:") || lower.startsWith("skill.")) return `Skill · ${raw}`;
+  if (lower.startsWith("plugin:") || lower.startsWith("plugin.")) return `Plugin · ${raw}`;
+  if (looksLikeNamespacedTool(raw)) return `${dynamicToolDisplayCategory(raw)} · ${raw}`;
+  if (lower.includes("search") || lower === "grep" || lower === "rg") return `Search · ${raw}`;
+  return `Tool · ${raw}`;
+}
+
+function dynamicToolDisplayCategory(name) {
+  const raw = String(name || "tool");
+  const lower = raw.toLowerCase();
+  const namespace = lower.split(".")[0];
+  if (lower.startsWith("mcp__") || namespace.startsWith("mcp__")) return "MCP";
+  if (namespace === "web") return "Web";
+  if (namespace === "image_gen" || namespace === "imagegen" || namespace === "image") return "Image";
+  if (namespace === "functions") return "Developer Tool";
+  if (namespace === "multi_tool_use") return "Tool";
+  if (namespace === "tool_search") return "Tool Search";
+  if (lower.includes("browser")) return "Browser";
+  if (lower.includes("desktop")) return "Desktop";
+  if (lower.includes("android")) return "Android";
+  if (lower.includes("tavily") || lower.includes("context7") || lower.includes("discord")) return "MCP";
+  return "Tool";
+}
+
+function looksLikeNamespacedTool(name) {
+  return /^[A-Za-z0-9_-]+(?:__[A-Za-z0-9_-]+)?\.[A-Za-z0-9_-]+$/.test(String(name || ""));
 }
 
 function summarizeToolInput(tool) {
@@ -2506,6 +2610,43 @@ function toolOutputFromItem(item) {
     }
   }
   return "";
+}
+
+function toolSourceFromItem(item) {
+  const type = String(item?.type || "").toLowerCase();
+  const name = String(item?.name || "").toLowerCase();
+  if (type.includes("mcp") || name.includes("mcp")) return "mcp";
+  if (type.includes("command") || type === "bash" || name === "bash") return "command";
+  if (type.includes("file") || ["read", "write", "edit", "apply_patch"].includes(name)) return "file";
+  if (type.includes("web") || name.startsWith("web_")) return "web";
+  if (type.includes("image") || name.startsWith("image_")) return "image";
+  if (type.includes("plan") || name === "plan") return "plan";
+  if (type.includes("agent")) return "collab_agent";
+  return "";
+}
+
+function toolSourceFromAppServerItem(item) {
+  switch (item?.type) {
+    case "commandExecution":
+      return "command";
+    case "fileChange":
+      return "file";
+    case "mcpToolCall":
+      return "mcp";
+    case "dynamicToolCall":
+      return "dynamic";
+    case "collabAgentToolCall":
+      return "collab_agent";
+    case "webSearch":
+      return "web";
+    case "imageView":
+    case "imageGeneration":
+      return "image";
+    case "plan":
+      return "plan";
+    default:
+      return toolSourceFromItem(item || {});
+  }
 }
 
 function toolNameFromAppServerItem(item) {
@@ -2722,7 +2863,34 @@ function isContextUsageHigher(candidate, baseline) {
   return baselineScore === null || candidateScore > baselineScore;
 }
 
+function nativeGoalCardTitle(state) {
+  const goal = normalizeGoal(state.goal || state.session.lastGoal);
+  if (state.terminal === "error") return "Codex goal 失败";
+  if (goal?.status === "complete") return "Codex goal 已完成";
+  if (goal?.status === "paused") return "Codex goal 已暂停";
+  if (goal?.status === "blocked") return "Codex goal 受阻";
+  if (goal?.status === "usageLimited") return "Codex goal 使用量受限";
+  if (goal?.status === "budgetLimited") return "Codex goal 预算受限";
+  if (goal?.status === "active") return "Codex goal 进行中";
+  if (state.terminal === "interrupted") return "Codex goal 已停止";
+  if (state.terminal === "done") return "Codex goal 已结束";
+  return "Codex goal 进行中";
+}
+
 function cardTitle(state) {
+  if (state.goalMode) return nativeGoalCardTitle(state);
+  if (state.goalMode) {
+    const goal = normalizeGoal(state.goal || state.session.lastGoal);
+    if (state.terminal === "error") return "Codex goal 失败";
+    if (state.terminal === "interrupted") return "Codex goal 已停止";
+    if (goal?.status === "complete") return "Codex goal 已完成";
+    if (goal?.status === "paused") return "Codex goal 已暂停";
+    if (goal?.status === "blocked") return "Codex goal 受阻";
+    if (goal?.status === "usageLimited") return "Codex goal 使用量受限";
+    if (goal?.status === "budgetLimited") return "Codex goal 预算受限";
+    if (state.terminal === "done") return "Codex goal 已结束";
+    return "Codex goal 进行中";
+  }
   if (state.terminal === "error") return state.failure?.label || "Codex 处理失败";
   if (state.terminal === "interrupted") return "Codex 已停止";
   if (state.terminal === "done") return "Codex 已完成";
@@ -2734,6 +2902,13 @@ function cardTitle(state) {
 }
 
 function cardSummary(state) {
+  if (state.goalMode) {
+    const goal = normalizeGoal(state.goal || state.session.lastGoal);
+    if (state.terminal === "error") return "goal 失败";
+    if (state.terminal === "interrupted") return "goal 已停止";
+    if (goal?.status) return `goal ${goalStatusLabel(goal.status)}`;
+    return state.terminal === "done" ? "goal 已结束" : "goal 进行中";
+  }
   if (state.terminal === "interrupted") return "已停止";
   if (state.terminal === "error") return state.failure?.label || "处理失败";
   if (state.terminal === "done") return "已完成";
@@ -3865,7 +4040,7 @@ function appServerResumeParams(session) {
   return applySessionThreadOverrides(params, session);
 }
 
-function appServerTurnParams(threadId, event, userContent, session) {
+function appServerInputItems(event, userContent) {
   const input = [];
   const text = appServerUserText(event, userContent);
   if (text) input.push({ type: "text", text, text_elements: [] });
@@ -3875,15 +4050,28 @@ function appServerTurnParams(threadId, event, userContent, session) {
     }
   }
   if (!input.length) input.push({ type: "text", text: "(attachment only)", text_elements: [] });
+  return input;
+}
 
+function appServerTurnParams(threadId, event, userContent, session) {
   const params = {
     threadId,
-    input,
+    input: appServerInputItems(event, userContent),
+    clientUserMessageId: event.message_id || event.id || undefined,
     cwd: CONFIG.workspace,
     approvalPolicy: "never",
     sandboxPolicy: { type: "dangerFullAccess" },
   };
   return applySessionTurnOverrides(params, session);
+}
+
+function appServerSteerParams(threadId, turnId, event, userContent) {
+  return {
+    threadId,
+    expectedTurnId: turnId,
+    clientUserMessageId: event.message_id || event.id || crypto.randomUUID(),
+    input: appServerInputItems(event, userContent),
+  };
 }
 
 function appServerUserText(event, userContent) {
@@ -4093,27 +4281,644 @@ async function withAppServerThread(session, { createIfMissing = true, timeoutMs 
 
 async function getAppServerGoal(session) {
   if (!session.codexThreadId) return null;
-  return await withAppServerThread(session, { createIfMissing: false }, async (client, threadId) => {
-    const result = await client.request("thread/goal/get", { threadId }, 60_000);
-    updateSessionGoal(session, result?.goal || null);
-    return session.lastGoal;
-  });
+  try {
+    return await withAppServerThread(session, { createIfMissing: false }, async (client, threadId) => {
+      const result = await client.request("thread/goal/get", { threadId }, 60_000);
+      updateSessionGoal(session, result?.goal || null);
+      return session.lastGoal;
+    });
+  } catch (error) {
+    if (!isNoGoalExistsError(error)) throw error;
+    updateSessionGoal(session, null);
+    return null;
+  }
 }
 
 async function setAppServerGoal(session, goalPatch) {
-  return await withAppServerThread(session, { createIfMissing: true }, async (client, threadId) => {
-    const result = await client.request("thread/goal/set", { threadId, ...goalPatch }, 60_000);
-    return updateSessionGoal(session, result?.goal || null);
-  });
+  try {
+    return await withAppServerThread(session, { createIfMissing: true }, async (client, threadId) => {
+      const result = await client.request("thread/goal/set", { threadId, ...goalPatch }, 60_000);
+      return updateSessionGoal(session, result?.goal || null);
+    });
+  } catch (error) {
+    if (!isNoGoalExistsError(error)) throw error;
+    updateSessionGoal(session, null);
+    return null;
+  }
 }
 
 async function clearAppServerGoal(session) {
   if (!session.codexThreadId) return false;
-  return await withAppServerThread(session, { createIfMissing: false }, async (client, threadId) => {
-    const result = await client.request("thread/goal/clear", { threadId }, 60_000);
+  try {
+    return await withAppServerThread(session, { createIfMissing: false }, async (client, threadId) => {
+      const result = await client.request("thread/goal/clear", { threadId }, 60_000);
+      updateSessionGoal(session, null);
+      return Boolean(result?.cleared);
+    });
+  } catch (error) {
+    if (!isNoGoalExistsError(error)) throw error;
     updateSessionGoal(session, null);
-    return Boolean(result?.cleared);
+    return false;
+  }
+}
+
+function applyGoalRunNativeState(run, goal) {
+  const next = normalizeGoal(goal);
+  if (next) {
+    run.goalCleared = false;
+    run.goal = setRunGoalState(run.state, next);
+    updateSessionGoal(run.session, run.goal);
+    return run.goal;
+  }
+
+  run.goalCleared = true;
+  run.goal = null;
+  setRunGoalState(run.state, null);
+  updateSessionGoal(run.session, null);
+  return null;
+}
+
+async function getGoalRunNativeState(run) {
+  if (!run?.client || !run.threadId) return normalizeGoal(run?.goal || run?.session?.lastGoal);
+  try {
+    const result = await run.client.request("thread/goal/get", { threadId: run.threadId }, 60_000);
+    return applyGoalRunNativeState(run, result?.goal || null);
+  } catch (error) {
+    if (!isNoGoalExistsError(error)) throw error;
+    if (goalStatusIsTerminal(normalizeGoal(run.goal)?.status)) {
+      updateSessionGoal(run.session, run.goal);
+      return run.goal;
+    }
+    return applyGoalRunNativeState(run, null);
+  }
+}
+
+function activeGoalRunForChat(chatId, session = null) {
+  const run = activeGoalRuns.get(chatId);
+  if (!run || run.done) return null;
+  if (session && run.sessionId !== session.id) return null;
+  return run;
+}
+
+async function refreshGoalRunForNativeState(chatId, session, run) {
+  if (!run) return null;
+  if (run.done || run.client?.closed) {
+    if (activeGoalRuns.get(chatId) === run) activeGoalRuns.delete(chatId);
+    return null;
+  }
+  const nativeGoal = await getGoalRunNativeState(run);
+  if (!nativeGoal && run.goalCleared) {
+    if (activeGoalRuns.get(chatId) === run) activeGoalRuns.delete(chatId);
+    return null;
+  }
+  if (session && run.sessionId !== session.id) return null;
+  return run;
+}
+
+function goalStatusIsTerminal(status) {
+  const value = String(status || "").trim();
+  return Boolean(value && value !== "active");
+}
+
+function goalStatusIsActive(status) {
+  return String(status || "").trim() === "active";
+}
+
+function goalRunTerminal(run) {
+  if (run.goalCleared) return true;
+  return goalStatusIsTerminal(normalizeGoal(run.goal || run.session.lastGoal)?.status);
+}
+
+function previewGoalFromPatch(session, patch) {
+  const current = normalizeGoal(session.lastGoal) || {};
+  const objective = String(patch.objective ?? current.objective ?? "").trim();
+  if (!objective) return null;
+  return normalizeGoal({
+    ...current,
+    ...patch,
+    objective,
+    status: patch.status || current.status || "active",
+    threadId: current.threadId || session.codexThreadId || "",
+    updatedAt: Date.now(),
   });
+}
+
+function setRunGoalState(state, goal) {
+  state.goalMode = true;
+  state.goal = normalizeGoal(goal);
+  return state.goal;
+}
+
+function settleGoalRunReady(run, error = null) {
+  if (run.readySettled) return;
+  run.readySettled = true;
+  if (error) run.readyReject(error);
+  else run.readyResolve(run);
+}
+
+function nativeGoalRunFinalText(run) {
+  const goal = normalizeGoal(run.goal || run.session.lastGoal);
+  if (run.goalCleared || !goal) return "Codex goal 已清除。";
+  switch (goal.status) {
+    case "active":
+      return "Codex goal 仍在进行中。后续消息会继续作为当前 goal 的补充指令处理。";
+    case "complete":
+      return "Codex goal 已完成。";
+    case "paused":
+      return "Codex goal 已暂停。后续可用 `/goal resume` 继续。";
+    case "blocked":
+      return "Codex goal 已受阻。";
+    case "usageLimited":
+      return "Codex goal 因使用量限制停止。";
+    case "budgetLimited":
+      return "Codex goal 因 token 预算限制停止。";
+    default:
+      return `Codex goal 当前状态：${goalStatusLabel(goal.status)}。`;
+  }
+}
+
+function nativeGoalRunHeading(run) {
+  const goal = normalizeGoal(run.goal || run.session.lastGoal);
+  if (run.goalCleared || !goal) return "Codex goal 已清除";
+  if (goal.status === "active") return "Codex goal 进行中";
+  if (goal.status === "complete") return "Codex goal 已完成";
+  if (goal.status === "paused") return "Codex goal 已暂停";
+  if (goal.status === "blocked") return "Codex goal 受阻";
+  if (goal.status === "usageLimited") return "Codex goal 使用量受限";
+  if (goal.status === "budgetLimited") return "Codex goal 预算受限";
+  return "Codex goal 状态";
+}
+
+function nativeGoalRunResultMarkdown(run) {
+  const text = resultTextFromState(run.state) || nativeGoalRunFinalText(run);
+  return [
+    `**${nativeGoalRunHeading(run)}**`,
+    "",
+    run.goal ? goalMarkdown(run.session, run.goal).replace(/^.*?\n\n/s, "") : "当前 goal 已清除。",
+    "",
+    "---",
+    text,
+  ].join("\n");
+}
+
+function goalRunFinalText(run) {
+  return nativeGoalRunFinalText(run);
+}
+
+function goalRunResultMarkdown(run) {
+  return nativeGoalRunResultMarkdown(run);
+}
+
+async function openGoalRunCard(chatId, messageId, state) {
+  if (!CONFIG.useCards) return null;
+  return await ManagedCard.open(
+    chatId,
+    CONFIG.replyToMessage || CONFIG.useThreadReply ? messageId : "",
+    renderRunCard(state),
+    messageId,
+  );
+}
+
+async function startGoalRun(chatId, event, session, goalPatch, options = {}) {
+  const existing = await refreshGoalRunForNativeState(chatId, session, activeGoalRunForChat(chatId, session));
+  if (existing) {
+    const goal = await updateGoalRunGoal(existing, goalPatch);
+    if (options.initialSteer) await queueGoalSteer(existing, options.initialSteer, { quiet: true });
+    return { run: existing, goal, started: false };
+  }
+
+  const messageId = event.message_id || event.id || crypto.randomUUID();
+  const userContent = userTextFromContent(event.content) || goalPatch.objective || session.lastGoal?.objective || "Codex goal";
+  const state = createRunState(session, event, userContent);
+  state.goalMode = true;
+  setRunGoalState(state, previewGoalFromPatch(session, goalPatch));
+
+  let card = null;
+  let activeRunRecorded = false;
+  let finalCardFlushOk = true;
+  try {
+    card = await openGoalRunCard(chatId, messageId, state);
+    if (card) {
+      recordActiveRun({
+        chatId,
+        messageId,
+        sessionId: session.id,
+        cardId: card.cardId,
+        cardMessageId: card.messageId,
+        startedAt: state.startedAt,
+      });
+      activeRunRecorded = true;
+    }
+  } catch (error) {
+    log("WARN", "goal card open failed; falling back to markdown", {
+      messageId,
+      error: String(error.message || error).slice(0, 1200),
+    });
+  }
+
+  if (!card) {
+    await sendMarkdown(
+      chatId,
+      goalMarkdown(session, state.goal, "Codex goal 正在启动"),
+      "goal-start",
+      messageId,
+    );
+  }
+
+  const run = {
+    chatId,
+    messageId,
+    rootMessageId: messageId,
+    sessionId: session.id,
+    session,
+    event,
+    state,
+    card,
+    activeRunRecorded,
+    finalCardFlushOk,
+    client: null,
+    threadId: "",
+    currentTurnId: "",
+    turnActive: false,
+    goal: state.goal,
+    goalCleared: false,
+    detached: false,
+    pendingSteers: options.initialSteer ? [options.initialSteer] : [],
+    steeringInFlight: null,
+    done: false,
+    readySettled: false,
+    readyResolve: null,
+    readyReject: null,
+  };
+  run.ready = new Promise((resolve, reject) => {
+    run.readyResolve = resolve;
+    run.readyReject = reject;
+  });
+  run.updateCard = async () => {
+    if (!run.card) return;
+    if (run.activeRunRecorded && run.state.terminal === "running") touchActiveRun(run.messageId);
+    const rendered = renderRunCard(run.state);
+    if (run.state.terminal === "running") {
+      run.card.update(rendered);
+    } else {
+      const ok = await run.card.flush(rendered);
+      run.finalCardFlushOk = ok !== false;
+      run.card.close();
+    }
+  };
+
+  activeGoalRuns.set(chatId, run);
+  run.promise = runGoalLoop(run, goalPatch).catch((error) => {
+    log("ERROR", "goal runner failed unexpectedly", {
+      chatId,
+      messageId,
+      error: String(error.stack || error).slice(0, 2000),
+    });
+  });
+
+  await run.ready;
+  return { run, goal: run.goal, started: true };
+}
+
+async function updateGoalRunGoal(run, goalPatch) {
+  await run.ready.catch(() => {});
+  if (!run.client || !run.threadId || run.done) throw new Error("当前 Codex goal runner 不可用。");
+  let result = null;
+  try {
+    result = await run.client.request("thread/goal/set", { threadId: run.threadId, ...goalPatch }, 60_000);
+  } catch (error) {
+    if (!isNoGoalExistsError(error)) throw error;
+    applyGoalRunNativeState(run, null);
+    await run.updateCard?.();
+    return null;
+  }
+  applyGoalRunNativeState(run, result?.goal || previewGoalFromPatch(run.session, goalPatch));
+  run.state.footer = "thinking";
+  await run.updateCard?.();
+  return run.goal;
+}
+
+async function clearGoalRun(run) {
+  await run.ready.catch(() => {});
+  if (!run.client || !run.threadId || run.done) throw new Error("当前 Codex goal runner 不可用。");
+  let result = null;
+  try {
+    result = await run.client.request("thread/goal/clear", { threadId: run.threadId }, 60_000);
+  } catch (error) {
+    if (!isNoGoalExistsError(error)) throw error;
+  }
+  applyGoalRunNativeState(run, null);
+  run.state.footer = "thinking";
+  await run.updateCard?.();
+  return Boolean(result?.cleared);
+}
+
+async function queueGoalSteer(run, steer, { quiet = false } = {}) {
+  run.pendingSteers.push(steer);
+  if (!quiet) {
+    await sendText(
+      run.chatId,
+      "已收到，作为当前 Codex goal 的补充指令处理。当前 goal 卡片会继续更新。",
+      "goal-steer-ack",
+      steer.messageId || steer.event?.message_id || run.messageId,
+    );
+  }
+  await flushGoalSteers(run);
+}
+
+async function maybeRouteMessageToGoal(chatId, event, session, userContent, messageId) {
+  if (CONFIG.runMode === "exec") return false;
+  const steer = { event, userContent, messageId };
+  const run = await refreshGoalRunForNativeState(chatId, session, activeGoalRunForChat(chatId, session));
+  if (run) {
+    const nativeGoal = await getGoalRunNativeState(run);
+    if (nativeGoal?.status !== "active") return false;
+    await queueGoalSteer(run, steer);
+    return true;
+  }
+
+  const goal = await getAppServerGoal(session);
+  if (goal?.status !== "active") return false;
+  const job = activeCodexJobs.get(chatId);
+  if (job && job.mode !== "app-server-goal") return false;
+
+  try {
+    await startGoalRun(chatId, event, session, { status: "active" }, { initialSteer: steer });
+  } catch (error) {
+    if (!isNoGoalExistsError(error)) throw error;
+    updateSessionGoal(session, null);
+    return false;
+  }
+  return true;
+}
+
+async function flushGoalSteers(run) {
+  if (run.steeringInFlight) return await run.steeringInFlight;
+  if (!run.client || !run.threadId || run.done) return;
+  run.steeringInFlight = (async () => {
+    while (run.pendingSteers.length && !run.done && run.client && run.threadId) {
+      const steer = run.pendingSteers.shift();
+      const submitted = await submitGoalSteer(run, steer);
+      if (submitted === false) {
+        run.pendingSteers.unshift(steer);
+        break;
+      }
+    }
+  })();
+  try {
+    await run.steeringInFlight;
+  } finally {
+    run.steeringInFlight = null;
+  }
+}
+
+async function submitGoalSteer(run, steer) {
+  const event = steer.event;
+  const userContent = steer.userContent ?? userTextFromContent(event.content);
+  const messageId = steer.messageId || event.message_id || event.id || crypto.randomUUID();
+  let submitted = false;
+
+  if (run.turnActive && run.currentTurnId) {
+    try {
+      const result = await run.client.request(
+        "turn/steer",
+        appServerSteerParams(run.threadId, run.currentTurnId, event, userContent),
+        60_000,
+      );
+      run.currentTurnId = result?.turnId || run.currentTurnId;
+      submitted = true;
+    } catch (error) {
+      log("WARN", "goal turn steer failed; falling back to turn/start", {
+        messageId,
+        threadId: run.threadId,
+        turnId: run.currentTurnId,
+        error: String(error.message || error).slice(0, 1000),
+      });
+    }
+  }
+
+  if (!submitted) {
+    try {
+      const turn = await run.client.request(
+        "turn/start",
+        appServerTurnParams(run.threadId, event, userContent, run.session),
+        60_000,
+      );
+      run.currentTurnId = turn?.turn?.id || run.currentTurnId;
+      run.turnActive = Boolean(run.currentTurnId);
+      submitted = true;
+    } catch (error) {
+      if (isNoGoalExistsError(error)) {
+        applyGoalRunNativeState(run, null);
+        await run.updateCard?.();
+        return false;
+      }
+      if (!run.turnActive && isActiveTurnRaceError(error)) {
+        log("INFO", "goal steer deferred until active turn notification", {
+          messageId,
+          threadId: run.threadId,
+          error: String(error.message || error).slice(0, 500),
+        });
+        return false;
+      }
+      await sendMarkdown(
+        run.chatId,
+        [
+          "**Codex goal 补充指令发送失败**",
+          "",
+          "```",
+          truncateCardText(errorText(error), 1200),
+          "```",
+        ].join("\n"),
+        "goal-steer-error",
+        messageId,
+      );
+      return true;
+    }
+  }
+
+  if (submitted) {
+    run.state.goalSteerCount += 1;
+    run.state.footer = "thinking";
+    appendHistory(run.session, "user", userContent || `${event.attachments?.length || 0} attachment(s)`);
+    await run.updateCard?.();
+  }
+  return true;
+}
+
+function isActiveTurnRaceError(error) {
+  const text = errorText(error).toLowerCase();
+  return text.includes("active turn")
+    || text.includes("in-flight")
+    || text.includes("in flight")
+    || text.includes("not idle")
+    || text.includes("already running")
+    || text.includes("turn is active");
+}
+
+async function runGoalLoop(run, goalPatch) {
+  const { chatId, messageId, session, state } = run;
+  const startedAt = Date.now();
+  const client = new AppServerClient({ cwd: CONFIG.workspace }).start();
+  run.client = client;
+  const activeJob = {
+    pid: client.child.pid,
+    client,
+    messageId,
+    rootMessageId: run.rootMessageId,
+    startedAt,
+    sessionId: session.id,
+    threadId: "",
+    turnId: "",
+    mode: "app-server-goal",
+  };
+  activeCodexJobs.set(chatId, activeJob);
+
+  const watchdog = createRunWatchdog("codex app-server goal", () => {
+    void client.stop();
+    setTimeout(() => terminateProcessTree(client.child?.pid, true), 5000).unref?.();
+  });
+
+  try {
+    const initialized = await initializeAppServerClient(client);
+    watchdog.touch();
+    state.meta.model = initialized.userAgent || state.meta.model;
+
+    const threadId = await startOrResumeAppServerThread(client, session);
+    watchdog.touch();
+    run.threadId = threadId;
+    state.threadId = threadId;
+    activeJob.threadId = threadId;
+
+    const result = await client.request("thread/goal/set", { threadId, ...goalPatch }, 60_000);
+    watchdog.touch();
+    applyGoalRunNativeState(run, result?.goal || previewGoalFromPatch(session, goalPatch));
+    log("INFO", "codex goal native state set", {
+      chatId,
+      messageId,
+      threadId,
+      status: run.goal?.status || "",
+      objectiveLength: String(run.goal?.objective || "").length,
+    });
+    settleGoalRunReady(run);
+    await run.updateCard?.();
+    await flushGoalSteers(run);
+
+    while (!watchdog.timedOut) {
+      if (stoppedJobs.has(messageId) || stoppedJobs.has(run.rootMessageId)) {
+        throw new Error("codex job stopped by user");
+      }
+
+      const message = await client.nextNotification(1000);
+      if (!message) {
+        if (client.closed) {
+          if (goalStatusIsActive(normalizeGoal(run.goal || session.lastGoal)?.status)) {
+            run.detached = true;
+            log("INFO", "codex goal runner detached while native goal remains active", {
+              chatId,
+              messageId,
+              threadId,
+              status: normalizeGoal(run.goal || session.lastGoal)?.status || "",
+            });
+          }
+          break;
+        }
+        await flushGoalSteers(run);
+        if (goalRunTerminal(run) && !run.turnActive) break;
+        continue;
+      }
+
+      watchdog.touch();
+      const params = message.params || {};
+      if (message.method === "turn/started") {
+        run.currentTurnId = params.turn?.id || params.turnId || run.currentTurnId;
+        run.turnActive = Boolean(run.currentTurnId);
+        activeJob.turnId = run.currentTurnId;
+      }
+
+      let stateChanged = false;
+      if (message.method === "thread/goal/updated") {
+        applyGoalRunNativeState(run, params.goal || null);
+        stateChanged = true;
+      } else if (message.method === "thread/goal/cleared") {
+        applyGoalRunNativeState(run, null);
+        stateChanged = true;
+      } else if (message.method === "turn/completed") {
+        const completedTurnId = params.turn?.id || params.turnId || "";
+        if (!completedTurnId || !run.currentTurnId || completedTurnId === run.currentTurnId) {
+          run.turnActive = false;
+          run.currentTurnId = "";
+          activeJob.turnId = "";
+        }
+      } else if (message.method === "error") {
+        const failure = classifyCodexFailure(params, "codex app-server goal error");
+        if (failure.recoverable && params.willRetry === true) continue;
+        throw errorFromFailure(failure);
+      }
+
+      if (reduceAppServerEvent(state, message)) stateChanged = true;
+      if (stateChanged) await run.updateCard?.();
+
+      await flushGoalSteers(run);
+      if (goalRunTerminal(run) && !run.turnActive) break;
+    }
+
+    if (watchdog.timedOut) throw new Error(watchdog.reason || "codex app-server goal timed out");
+    if (stoppedJobs.has(messageId) || stoppedJobs.has(run.rootMessageId)) {
+      throw new Error("codex job stopped by user");
+    }
+
+    if (!client.closed) await getGoalRunNativeState(run);
+
+    const finalText = resultTextFromState(state) || goalRunFinalText(run);
+    ensureRunDone(state, finalText);
+    state.meta.durationMs = Date.now() - startedAt;
+    await run.updateCard?.();
+    if (!run.card || !run.finalCardFlushOk) {
+      await sendMarkdown(chatId, goalRunResultMarkdown(run), "goal-done", messageId);
+    }
+    appendHistory(session, "user", `/goal ${goalPatch.objective || run.goal?.objective || ""}`.trim());
+    appendHistory(session, "assistant", finalText);
+    stats.answered += 1;
+  } catch (error) {
+    settleGoalRunReady(run, error);
+    if (stoppedJobs.has(messageId) || stoppedJobs.has(run.rootMessageId)) {
+      markRunInterrupted(state);
+      await run.updateCard?.();
+      log("INFO", "codex goal stopped by user", { messageId, chatId });
+    } else {
+      stats.failed += 1;
+      const failure = classifyCodexFailure(error);
+      recordFailureStats(failure);
+      markRunError(state, error);
+      await run.updateCard?.();
+      if (!run.card || !run.finalCardFlushOk) {
+        await sendMarkdown(
+          chatId,
+          [
+            "**Codex goal 运行失败**",
+            "",
+            failureShortText(failure),
+            "",
+            "```",
+            truncateCardText(errorText(error), 1500),
+            "```",
+          ].join("\n"),
+          "goal-error",
+          messageId,
+        );
+      }
+    }
+  } finally {
+    watchdog.clear();
+    run.done = true;
+    const job = activeCodexJobs.get(chatId);
+    if (job?.pid === client.child?.pid) activeCodexJobs.delete(chatId);
+    const currentRun = activeGoalRuns.get(chatId);
+    if (currentRun === run) activeGoalRuns.delete(chatId);
+    if (run.activeRunRecorded) clearActiveRun(messageId);
+    await client.stop();
+  }
 }
 
 async function withConfigClient(fn) {
@@ -4672,7 +5477,7 @@ function enqueue(event) {
 }
 
 function isOutOfBandCommand(command) {
-  return ["/stop", "/clearqueue", "/queue", "/goal", "/provider", "/model", "/fast"].includes(command?.name);
+  return Boolean(command?.name);
 }
 
 async function handleOutOfBandCommand(rawEvent, command) {
@@ -4818,6 +5623,9 @@ async function handleEvent(rawEvent) {
 
   await syncChatSessionsWithCodex(chatId);
   const session = getSession(chatId);
+  if (await maybeRouteMessageToGoal(chatId, event, session, userContent, messageId)) {
+    return;
+  }
   const cardState = createRunState(session, event, userContent);
   let card = null;
   let activeRunRecorded = false;
@@ -4853,8 +5661,8 @@ async function handleEvent(rawEvent) {
       [
         "**Codex 正在处理**",
         "",
-        `会话：\`${session.title}\` (${session.id})`,
-        `工作区：\`${CONFIG.workspace}\``,
+        `会话：${session.title} (${session.id})`,
+        `工作区：${CONFIG.workspace}`,
         `设置：${settingsSummary(session)}`,
       ].join("\n"),
       "ack",
@@ -5108,14 +5916,210 @@ function deletePreviewMarkdown({ entry, record, index, expiresAt }) {
   ].join("\n");
 }
 
+function parseDeleteSelectionSpec(value) {
+  const text = String(value || "").trim();
+  const tokens = text.split(/[\s,，、]+/).filter(Boolean);
+  if (!tokens.length) return { error: "empty" };
+
+  const indexes = [];
+  const invalid = [];
+  const nonNumeric = [];
+  let hasRange = false;
+  for (const token of tokens) {
+    const rangeMatch = token.match(/^(\d+)\s*[-~～]\s*(\d+)$/);
+    if (rangeMatch) {
+      hasRange = true;
+      const start = Number(rangeMatch[1]);
+      const end = Number(rangeMatch[2]);
+      if (!Number.isInteger(start) || !Number.isInteger(end) || start < 1 || end < 1 || start > end) {
+        invalid.push(token);
+        continue;
+      }
+      for (let index = start; index <= end; index += 1) indexes.push(index);
+      continue;
+    }
+
+    if (/^\d+$/.test(token)) {
+      const index = Number(token);
+      if (Number.isInteger(index) && index >= 1) {
+        indexes.push(index);
+      } else {
+        invalid.push(token);
+      }
+      continue;
+    }
+
+    nonNumeric.push(token);
+  }
+
+  if (invalid.length) return { error: `无效序号或区间：${invalid.join("、")}` };
+  if (nonNumeric.length) {
+    if (tokens.length === 1 && !hasRange && indexes.length === 0) return { target: nonNumeric[0] };
+    return { error: `批量删除只支持序号和区间，无法混用 ID：${nonNumeric.join("、")}` };
+  }
+
+  const unique = [];
+  const seenIndexes = new Set();
+  for (const index of indexes) {
+    if (seenIndexes.has(index)) continue;
+    seenIndexes.add(index);
+    unique.push(index);
+  }
+  return { indexes: unique, isBatch: unique.length > 1 || hasRange || tokens.length > 1 };
+}
+
+function compressIndexes(indexes) {
+  const sorted = [...new Set(indexes)].sort((a, b) => a - b);
+  const parts = [];
+  let start = null;
+  let prev = null;
+  for (const index of sorted) {
+    if (start === null) {
+      start = index;
+      prev = index;
+      continue;
+    }
+    if (index === prev + 1) {
+      prev = index;
+      continue;
+    }
+    parts.push(start === prev ? String(start) : `${start}-${prev}`);
+    start = index;
+    prev = index;
+  }
+  if (start !== null) parts.push(start === prev ? String(start) : `${start}-${prev}`);
+  return parts.join(" ");
+}
+
+async function resolveDeleteItemsByIndexes(chatId, indexes) {
+  const list = await listChatSessionsSynced(chatId);
+  const items = [];
+  const errors = [];
+  for (const index of indexes) {
+    if (index < 1 || index > list.length) {
+      errors.push(`序号 ${index} 超出当前列表范围。`);
+      continue;
+    }
+
+    const entry = list[index - 1];
+    const threadId = String(entry.codexThreadId || "").trim();
+    if (!threadId) {
+      errors.push(`序号 ${index} 还没有 Codex 原生 thread。`);
+      continue;
+    }
+    if (activeJobUsesThread(threadId)) {
+      errors.push(`序号 ${index} 正在运行中。`);
+      continue;
+    }
+
+    const record = await loadCodexThreadRecord(threadId);
+    if (!record) {
+      errors.push(`序号 ${index} 的 Codex 本地 thread 已不存在，请重新 /list。`);
+      continue;
+    }
+
+    items.push({
+      index,
+      threadId,
+      sessionId: entry.id || "",
+      title: entry.title || record.title || "",
+      rolloutPath: record.rollout_path || "",
+    });
+  }
+
+  return { items, errors, list };
+}
+
+function deleteBatchPreviewMarkdown({ items, expiresAt, confirmText }) {
+  const lines = [
+    "**Codex 会话批量删除确认**",
+    "",
+    "这会执行 Codex++ 等价的本地删除：删除 Codex 本地索引记录、清理关联表、删除 rollout 会话文件，并移除飞书绑定。",
+    "",
+    `待删除：${items.length} 条`,
+    `确认有效期：${formatTime(expiresAt)}`,
+    "",
+    ...items.map((item) => `${item.index}. ${item.title || "未命名会话"} · ${codexThreadLink(item.threadId)}`),
+    "",
+    `确认删除请输入：\`/confirm delete ${confirmText}\``,
+  ];
+  return lines.join("\n");
+}
+
+function pendingDeleteItems(pending) {
+  if (Array.isArray(pending?.items) && pending.items.length) return pending.items;
+  if (pending?.threadId) {
+    return [{
+      index: pending.index,
+      threadId: pending.threadId,
+      sessionId: pending.sessionId || "",
+      title: pending.title || "",
+      rolloutPath: pending.rolloutPath || "",
+    }];
+  }
+  return [];
+}
+
 async function handleDeleteCommand(chatId, target, messageId) {
   if (!target) {
-    await sendText(chatId, "用法：/delete <序号或ID>。先发送 /list 查看会话；删除需要二次确认。", "delete-usage", messageId);
+    await sendText(chatId, "用法：/delete <序号或ID>、/delete 1 2 3、/delete 1-18、/delete 3-7 8-12。先发送 /list 查看会话；删除需要二次确认。", "delete-usage", messageId);
     return;
   }
 
   await syncChatSessionsWithCodex(chatId);
-  const match = await findSessionEntry(chatId, target);
+  const selection = parseDeleteSelectionSpec(target);
+  if (selection.error) {
+    await sendText(chatId, selection.error, "delete-selection-error", messageId);
+    return;
+  }
+
+  if (selection.indexes) {
+    const { items, errors } = await resolveDeleteItemsByIndexes(chatId, selection.indexes);
+    if (errors.length || items.length !== selection.indexes.length) {
+      await sendMarkdown(
+        chatId,
+        [
+          "**Codex 会话删除预检失败**",
+          "",
+          ...errors.map((line) => `- ${line}`),
+          "",
+          "请重新发送 `/list` 确认序号后再删除。",
+        ].join("\n"),
+        "delete-precheck-error",
+        messageId,
+      );
+      return;
+    }
+
+    const expiresAt = Date.now() + CONFIG.deleteConfirmTtlMs;
+    const confirmText = compressIndexes(items.map((item) => item.index));
+    const key = deleteConfirmationKey(chatId, confirmText);
+    cleanupPendingDeleteConfirmations();
+    pendingDeleteConfirmations.set(key, {
+      chatId,
+      index: confirmText,
+      items,
+      createdAt: Date.now(),
+      expiresAt,
+    });
+
+    await sendMarkdown(
+      chatId,
+      items.length === 1
+        ? deletePreviewMarkdown({
+            entry: { ...items[0], id: items[0].sessionId, codexThreadId: items[0].threadId },
+            record: { id: items[0].threadId, title: items[0].title, rollout_path: items[0].rolloutPath },
+            index: items[0].index,
+            expiresAt,
+          })
+        : deleteBatchPreviewMarkdown({ items, expiresAt, confirmText }),
+      "delete-preview",
+      messageId,
+    );
+    return;
+  }
+
+  const match = await findSessionEntry(chatId, selection.target);
   if (!match) {
     await sendText(chatId, "没有找到这个会话。发送 /list 查看可删除的会话。", "delete-miss", messageId);
     return;
@@ -5161,50 +6165,82 @@ async function handleDeleteCommand(chatId, target, messageId) {
 }
 
 async function handleConfirmCommand(chatId, rest, messageId) {
-  const [actionRaw, indexRaw] = String(rest || "").trim().split(/\s+/);
+  const [actionRaw, ...targetParts] = String(rest || "").trim().split(/\s+/);
   const action = String(actionRaw || "").toLowerCase();
-  const indexText = String(indexRaw || "").trim();
-  const index = Number(indexText);
-  if (action !== "delete" || !Number.isInteger(index) || index < 1) {
-    await sendText(chatId, "用法：/confirm delete <序号>。先用 /delete <序号或ID> 发起删除确认。", "confirm-usage", messageId);
+  const targetText = targetParts.join(" ").trim();
+  const selection = parseDeleteSelectionSpec(targetText);
+  const confirmText = selection.indexes ? compressIndexes(selection.indexes) : targetText;
+  if (action !== "delete" || !confirmText || selection.error || selection.target) {
+    await sendText(chatId, "用法：/confirm delete <序号或区间>。先用 /delete <序号或区间> 发起删除确认。", "confirm-usage", messageId);
     return;
   }
 
   cleanupPendingDeleteConfirmations();
-  const key = deleteConfirmationKey(chatId, index);
+  const key = deleteConfirmationKey(chatId, confirmText);
   const pending = pendingDeleteConfirmations.get(key);
   if (!pending || pending.chatId !== chatId) {
-    await sendText(chatId, "删除确认不存在或已过期。请重新发送 /delete <序号或ID>。", "confirm-miss", messageId);
+    await sendText(chatId, "删除确认不存在或已过期。请重新发送 /delete <序号或区间>。", "confirm-miss", messageId);
     return;
   }
 
-  const currentMatch = await findSessionEntry(chatId, String(pending.index));
-  if (!currentMatch || String(currentMatch.entry.codexThreadId || "").trim() !== pending.threadId) {
+  const items = pendingDeleteItems(pending);
+  if (!items.length) {
     pendingDeleteConfirmations.delete(key);
-    await sendText(chatId, "会话列表顺序已经变化，为避免删错，请重新发送 /list 和 /delete。", "confirm-list-changed", messageId);
+    await sendText(chatId, "删除确认内容为空或损坏。请重新发送 /delete。", "confirm-miss", messageId);
     return;
   }
 
-  if (activeJobUsesThread(pending.threadId)) {
-    await sendText(chatId, "这个会话正在运行中，先 /stop 或等待任务结束后再删除。", "confirm-busy", messageId);
-    return;
+  const changed = [];
+  const busy = [];
+  for (const item of items) {
+    const currentMatch = await findSessionEntry(chatId, String(item.index));
+    if (!currentMatch || String(currentMatch.entry.codexThreadId || "").trim() !== item.threadId) {
+      changed.push(item.index);
+      continue;
+    }
+    if (activeJobUsesThread(item.threadId)) busy.push(item.index);
   }
-
-  let result;
-  try {
-    result = await deleteCodexLocalThread(pending.threadId);
-  } catch (error) {
+  if (changed.length) {
     pendingDeleteConfirmations.delete(key);
+    await sendText(chatId, `会话列表顺序已经变化，为避免删错，请重新发送 /list 和 /delete。变化序号：${changed.join("、")}`, "confirm-list-changed", messageId);
+    return;
+  }
+  if (busy.length) {
+    await sendText(chatId, `这些会话正在运行中，先 /stop 或等待任务结束后再删除：${busy.join("、")}`, "confirm-busy", messageId);
+    return;
+  }
+
+  const successes = [];
+  const failures = [];
+  let bridgeRemovedTotal = 0;
+  for (const item of items) {
+    try {
+      const result = await deleteCodexLocalThread(item.threadId);
+      const bridgeRemoved = removeThreadFromBridgeSessions(item.threadId);
+      bridgeRemovedTotal += bridgeRemoved;
+      forgetDeleteConfirmationsForThread(item.threadId);
+      successes.push({ item, result, bridgeRemoved });
+      log("INFO", "codex local thread deleted", {
+        chatId,
+        threadId: item.threadId,
+        rolloutDeleted: result.rolloutDeleted,
+        rolloutMissing: result.rolloutMissing,
+        rolloutError: result.rolloutError,
+        bridgeRemoved,
+      });
+    } catch (error) {
+      failures.push({ item, error });
+    }
+  }
+  pendingDeleteConfirmations.delete(key);
+
+  if (failures.length && !successes.length) {
     await sendMarkdown(
       chatId,
       [
         "**Codex 会话删除失败**",
         "",
-        `Thread：${codexThreadLink(pending.threadId)}`,
-        "",
-        "```",
-        String(error.message || error).slice(0, 1500),
-        "```",
+        ...failures.map(({ item, error }) => `${item.index}. ${item.title || "未命名会话"} · ${codexThreadLink(item.threadId)}\n\`\`\`\n${String(error.message || error).slice(0, 1000)}\n\`\`\``),
       ].join("\n"),
       "delete-error",
       messageId,
@@ -5212,30 +6248,38 @@ async function handleConfirmCommand(chatId, rest, messageId) {
     return;
   }
 
-  const bridgeRemoved = removeThreadFromBridgeSessions(pending.threadId);
-  forgetDeleteConfirmationsForThread(pending.threadId);
-  log("INFO", "codex local thread deleted", {
-    chatId,
-    threadId: pending.threadId,
-    rolloutDeleted: result.rolloutDeleted,
-    rolloutMissing: result.rolloutMissing,
-    rolloutError: result.rolloutError,
-    bridgeRemoved,
-  });
-
-  const status = result.rolloutError ? "Codex 会话已从本地库删除，但 rollout 文件删除失败" : "Codex 会话已删除";
+  const single = successes.length === 1 && failures.length === 0;
+  const status = single && successes[0].result.rolloutError
+    ? "Codex 会话已从本地库删除，但 rollout 文件删除失败"
+    : single
+      ? "Codex 会话已删除"
+      : failures.length
+        ? "Codex 会话批量删除部分完成"
+        : "Codex 会话批量删除完成";
   await sendMarkdown(
     chatId,
-    [
-      `**${status}**`,
-      "",
-      `标题：${pending.title || result.title || "未命名会话"}`,
-      `Thread：${codexThreadLink(pending.threadId)}`,
-      `飞书绑定清理：${bridgeRemoved} 条`,
-      `Rollout：${result.rolloutDeleted ? "已删除" : result.rolloutMissing ? "原本不存在" : result.rolloutError ? "删除失败" : "未记录"}`,
-      result.rolloutPath ? `路径：\`${result.rolloutPath}\`` : "",
-      result.rolloutError ? ["", "```", result.rolloutError.slice(0, 1200), "```"].join("\n") : "",
-    ].filter(Boolean).join("\n"),
+    single
+      ? [
+          `**${status}**`,
+          "",
+          `标题：${successes[0].item.title || successes[0].result.title || "未命名会话"}`,
+          `Thread：${codexThreadLink(successes[0].item.threadId)}`,
+          `飞书绑定清理：${successes[0].bridgeRemoved} 条`,
+          `Rollout：${successes[0].result.rolloutDeleted ? "已删除" : successes[0].result.rolloutMissing ? "原本不存在" : successes[0].result.rolloutError ? "删除失败" : "未记录"}`,
+          successes[0].result.rolloutPath ? `路径：\`${successes[0].result.rolloutPath}\`` : "",
+          successes[0].result.rolloutError ? ["", "```", successes[0].result.rolloutError.slice(0, 1200), "```"].join("\n") : "",
+        ].filter(Boolean).join("\n")
+      : [
+          `**${status}**`,
+          "",
+          `成功：${successes.length} 条`,
+          `失败：${failures.length} 条`,
+          `飞书绑定清理：${bridgeRemovedTotal} 条`,
+          "",
+          ...successes.map(({ item }) => `- 已删除 ${item.index}. ${item.title || "未命名会话"} · ${compactThreadId(item.threadId)}`),
+          failures.length ? "" : "",
+          ...failures.map(({ item, error }) => `- 删除失败 ${item.index}. ${item.title || "未命名会话"} · ${compactThreadId(item.threadId)}：${String(error.message || error).slice(0, 300)}`),
+        ].filter(Boolean).join("\n"),
     "delete-done",
     messageId,
   );
@@ -5246,39 +6290,51 @@ async function handleGoalCommand(chatId, rest, messageId) {
   const session = getSession(chatId);
   const text = String(rest || "").trim();
   const action = text.toLowerCase();
+  let activeRun = await refreshGoalRunForNativeState(chatId, session, activeGoalRunForChat(chatId, session));
+  log("INFO", "codex goal command received", {
+    chatId,
+    sessionId: session.id,
+    action: action || "status",
+    hasActiveRun: Boolean(activeRun),
+    textLength: text.length,
+  });
 
   try {
     if (!text || action === "status" || action === "view") {
-      const goal = await getAppServerGoal(session);
+      const goal = activeRun ? await getGoalRunNativeState(activeRun) : await getAppServerGoal(session);
       await sendMarkdown(chatId, goalMarkdown(session, goal), "goal-status", messageId);
       return;
     }
 
     if (action === "clear" || action === "delete" || action === "remove") {
-      const cleared = await clearAppServerGoal(session);
+      const cleared = activeRun ? await clearGoalRun(activeRun) : await clearAppServerGoal(session);
       await sendText(chatId, cleared ? "已清除当前 Codex goal。" : "当前会话没有可清除的 Codex goal。", "goal-clear", messageId);
       return;
     }
 
     if (action === "pause") {
-      const current = await getAppServerGoal(session);
+      const current = activeRun ? await getGoalRunNativeState(activeRun) : await getAppServerGoal(session);
       if (!current) {
         await sendText(chatId, "当前会话还没有 Codex goal，先用 /goal <目标> 设置。", "goal-pause-none", messageId);
         return;
       }
-      const goal = await setAppServerGoal(session, { status: "paused" });
+      const goal = activeRun
+        ? await updateGoalRunGoal(activeRun, { status: "paused" })
+        : await setAppServerGoal(session, { status: "paused" });
       await sendMarkdown(chatId, goalMarkdown(session, goal, "已暂停 Codex goal"), "goal-pause", messageId);
       return;
     }
 
     if (action === "resume") {
-      const current = await getAppServerGoal(session);
+      const current = activeRun ? await getGoalRunNativeState(activeRun) : await getAppServerGoal(session);
       if (!current) {
         await sendText(chatId, "当前会话还没有 Codex goal，先用 /goal <目标> 设置。", "goal-resume-none", messageId);
         return;
       }
-      const goal = await setAppServerGoal(session, { status: "active" });
-      await sendMarkdown(chatId, goalMarkdown(session, goal, "已恢复 Codex goal"), "goal-resume", messageId);
+      const goal = activeRun
+        ? await updateGoalRunGoal(activeRun, { status: "active" })
+        : (await startGoalRun(chatId, { chat_id: chatId, message_id: messageId, id: messageId, content: JSON.stringify({ text: `/goal resume` }) }, session, { status: "active" })).goal;
+      if (activeRun) await sendMarkdown(chatId, goalMarkdown(session, goal, "已恢复 Codex goal"), "goal-resume", messageId);
       return;
     }
 
@@ -5287,8 +6343,24 @@ async function handleGoalCommand(chatId, rest, messageId) {
       return;
     }
 
-    const goal = await setAppServerGoal(session, { objective: text, status: "active" });
-    await sendMarkdown(chatId, goalMarkdown(session, goal, "已设置 Codex goal"), "goal-set", messageId);
+    const job = activeCodexJobs.get(chatId);
+    if (job && job.mode !== "app-server-goal") {
+      await sendText(chatId, "当前 Codex 任务还在运行，等这一轮结束后再设置 goal，或先发送 /stop。", "goal-busy", messageId);
+      return;
+    }
+
+    let goal = null;
+    if (activeRun) {
+      goal = await updateGoalRunGoal(activeRun, { objective: text, status: "active" });
+      if (!goal && activeRun.goalCleared) {
+        if (activeGoalRuns.get(chatId) === activeRun) activeGoalRuns.delete(chatId);
+        activeRun = null;
+      }
+    }
+    if (!activeRun) {
+      goal = (await startGoalRun(chatId, { chat_id: chatId, message_id: messageId, id: messageId, content: JSON.stringify({ text: `/goal ${text}` }) }, session, { objective: text, status: "active" })).goal;
+    }
+    if (activeRun) await sendMarkdown(chatId, goalMarkdown(session, goal, "已更新 Codex goal"), "goal-set", messageId);
   } catch (error) {
     const failure = classifyCodexFailure(error);
     await sendMarkdown(
@@ -5627,11 +6699,66 @@ async function stopCurrentJob(chatId, messageId, { clearMode = "" } = {}) {
   const cleared = clearMode ? clearPendingEventsForChat(chatId, { all: clearMode === "all" }) : 0;
   const job = activeCodexJobs.get(chatId);
   if (!job) {
+    try {
+      await syncChatSessionsWithCodex(chatId);
+      const session = getSession(chatId);
+      const goal = await getAppServerGoal(session);
+      if (goalStatusIsActive(goal?.status)) {
+        const paused = await setAppServerGoal(session, { status: "paused" });
+        await sendMarkdown(
+          chatId,
+          goalMarkdown(session, paused || goal, `已暂停 Codex goal${clearMode ? `，并清理等待队列 ${cleared} 条` : ""}`),
+          "stop-goal-pause",
+          messageId,
+        );
+        return;
+      }
+    } catch (error) {
+      if (!isNoGoalExistsError(error)) {
+        log("WARN", "native goal pause without active job failed", {
+          chatId,
+          error: String(error.message || error).slice(0, 1000),
+        });
+      }
+    }
     await sendText(chatId, `当前没有运行中的 Codex 任务。${clearMode ? `已清理等待队列 ${cleared} 条。` : ""}`, "stop-none", messageId);
     return;
   }
   stoppedJobs.add(job.messageId);
   if (job.rootMessageId) stoppedJobs.add(job.rootMessageId);
+
+  if (job.mode === "app-server-goal" && job.client && job.threadId) {
+    try {
+      const result = await job.client.request("thread/goal/set", { threadId: job.threadId, status: "paused" }, 15_000);
+      const run = activeGoalRuns.get(chatId);
+      if (run) applyGoalRunNativeState(run, result?.goal || null);
+      else {
+        const session = getSession(chatId);
+        if (!job.sessionId || session.id === job.sessionId) updateSessionGoal(session, result?.goal || null);
+      }
+    } catch (error) {
+      if (isNoGoalExistsError(error)) {
+        const run = activeGoalRuns.get(chatId);
+        if (run) applyGoalRunNativeState(run, null);
+        else {
+          const session = getSession(chatId);
+          if (!job.sessionId || session.id === job.sessionId) updateSessionGoal(session, null);
+        }
+        log("INFO", "codex goal already absent during stop", {
+          chatId,
+          pid: job.pid,
+          threadId: job.threadId,
+        });
+      } else {
+        log("WARN", "codex goal pause during stop failed", {
+          chatId,
+          pid: job.pid,
+          threadId: job.threadId,
+          error: String(error.message || error).slice(0, 1000),
+        });
+      }
+    }
+  }
 
   if (job.mode === "app-server" && job.client && job.threadId && job.turnId) {
     try {
@@ -5649,6 +6776,31 @@ async function stopCurrentJob(chatId, messageId, { clearMode = "" } = {}) {
       return;
     } catch (error) {
       log("WARN", "codex turn interrupt failed; falling back to process termination", {
+        chatId,
+        pid: job.pid,
+        threadId: job.threadId,
+        turnId: job.turnId,
+        error: String(error.message || error).slice(0, 1000),
+      });
+    }
+  }
+
+  if (job.mode === "app-server-goal" && job.client && job.threadId && job.turnId) {
+    try {
+      await job.client.request("turn/interrupt", { threadId: job.threadId, turnId: job.turnId }, 15_000);
+      setTimeout(() => {
+        const current = activeCodexJobs.get(chatId);
+        if (current?.pid === job.pid) terminateProcessTree(job.pid, true);
+      }, 5000).unref?.();
+      await sendText(
+        chatId,
+        `已暂停 Codex goal 并请求停止当前 turn；如果没有及时结束，Bridge 会自动兜底强制停止。${clearMode ? `已清理等待队列 ${cleared} 条。` : ""}`,
+        "stop",
+        messageId,
+      );
+      return;
+    } catch (error) {
+      log("WARN", "codex goal turn interrupt failed; falling back to process termination", {
         chatId,
         pid: job.pid,
         threadId: job.threadId,
@@ -5731,14 +6883,14 @@ function helpMarkdown() {
     "`/now` — 查看当前状态（工作区、会话、任务、队列）",
     "`/how` — 同 `/now`",
     "`/context` — 查看当前 Codex 原生 thread、token 和压缩状态",
-    "`/goal [目标]` — 查看或设置 Codex goal；支持 `/goal pause`、`/goal resume`、`/goal clear`",
+    "`/goal [目标]` — 查看或启动原生 Codex Goal mode；运行中普通消息会作为当前 goal 的补充指令；支持 `/goal pause`、`/goal resume`、`/goal clear`",
     "`/provider [id]` — 查看或切换当前会话 provider；`/provider list` 列出可用 provider",
     "`/model [模型ID] [推理强度]` — 查看或切换当前会话模型；`/model list` 列出模型",
     "`/fast on|off|status` — 切换或查看 Codex Fast 速度模式",
     "`/compact` — 触发当前原生 thread 的上下文压缩",
     "`/sessions` — 列出飞书会话和 Codex 侧边栏可见会话",
     "`/switch <序号或ID>` — 切换到已有 Codex 会话",
-    "`/delete <序号或ID>` — 删除 Codex 本地会话，需 `/confirm delete <序号>` 确认",
+    "`/delete <序号或ID>` — 删除 Codex 本地会话；支持 `1 2 3`、`1-18`、`3-7 8-12`，需 `/confirm delete <序号或区间>` 确认",
     "`/reset` — 清空当前会话上下文",
     "`/stop` — 停止当前 Codex 任务",
     "`/stop queue` — 停止当前任务，并清空当前聊天的等待队列",
@@ -5997,7 +7149,7 @@ async function sessionsMarkdown(chatId) {
     );
   });
   lines.push("");
-  lines.push("使用 `/switch <序号或ID>` 切换会话，使用 `/delete <序号或ID>` 删除会话，删除需 `/confirm delete <序号>` 确认，使用 `/new [标题]` 创建新会话。");
+  lines.push("使用 `/switch <序号或ID>` 切换会话；使用 `/delete <序号或ID>`、`/delete 1 2 3`、`/delete 1-18`、`/delete 3-7 8-12` 删除会话；删除需按预览里的 `/confirm delete <序号或区间>` 确认；使用 `/new [标题]` 创建新会话。");
   return lines.join("\n");
 }
 
