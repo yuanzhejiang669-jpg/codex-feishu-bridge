@@ -708,6 +708,19 @@ function isProcessAlive(pid) {
   }
 }
 
+function pidFileMatches(pid) {
+  try {
+    return fs.existsSync(pidPath) && fs.readFileSync(pidPath, "utf8").trim() === String(pid);
+  } catch {
+    return false;
+  }
+}
+
+function isActiveBridgeLock(current) {
+  if (!current?.pid || !isProcessAlive(current.pid)) return false;
+  return pidFileMatches(current.pid);
+}
+
 function readJsonFile(file) {
   try {
     return JSON.parse(fs.readFileSync(file, "utf8"));
@@ -734,7 +747,7 @@ function acquireSingleInstanceLock() {
     } catch (error) {
       if (error?.code !== "EEXIST") throw error;
       const current = readJsonFile(lockPath);
-      if (current?.pid && isProcessAlive(current.pid)) {
+      if (isActiveBridgeLock(current)) {
         log("ERROR", "another bridge instance is already running for this state dir", {
           currentPid: current.pid,
           currentInstance: current.instance || "",
