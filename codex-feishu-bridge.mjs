@@ -29,7 +29,7 @@ const CONFIG = {
   disableMcp: (process.env.CODEX_FEISHU_DISABLE_MCP || "0") !== "0",
   maxConcurrent: Number(process.env.CODEX_FEISHU_MAX_CONCURRENT || "1"),
   maxReplyChars: Number(process.env.CODEX_FEISHU_MAX_REPLY_CHARS || "6000"),
-  listLimit: Number(process.env.CODEX_FEISHU_LIST_LIMIT || "30"),
+  listLimit: Number(process.env.CODEX_FEISHU_LIST_LIMIT || "100"),
   useCards: (process.env.CODEX_FEISHU_CARD_MODE || "1") !== "0",
   cardThrottleMs: Number(process.env.CODEX_FEISHU_CARD_THROTTLE_MS || "400"),
   debugCards: (process.env.CODEX_FEISHU_CARD_DEBUG || "0") === "1",
@@ -789,7 +789,7 @@ function resetSession(chatId, title = "") {
   const chatState = getChatState(chatId);
   chatState.currentSessionId = session.id;
   chatState.sessions.unshift(session);
-  chatState.sessions = dedupeSessions(chatState.sessions).slice(0, 20);
+  chatState.sessions = dedupeSessions(chatState.sessions).slice(0, sessionListLimit());
   saveSessions();
   return session;
 }
@@ -822,7 +822,7 @@ function getChatState(chatId) {
   }
 
   if (Array.isArray(current.sessions)) {
-    current.sessions = dedupeSessions(current.sessions.map(normalizeSessionData)).slice(0, 20);
+    current.sessions = dedupeSessions(current.sessions.map(normalizeSessionData)).slice(0, sessionListLimit());
     if (!current.currentSessionId && current.sessions[0]) current.currentSessionId = current.sessions[0].id;
     return current;
   }
@@ -1040,15 +1040,19 @@ function dedupeSessions(items) {
 
 function listChatSessions(chatId) {
   const chatState = getChatState(chatId);
-  chatState.sessions = dedupeSessions(chatState.sessions).slice(0, 20);
+  chatState.sessions = dedupeSessions(chatState.sessions).slice(0, sessionListLimit());
   saveSessions();
   return chatState.sessions;
 }
 
 function boundedListLimit(value = CONFIG.listLimit) {
   const number = Number(value);
-  if (!Number.isFinite(number) || number <= 0) return 30;
+  if (!Number.isFinite(number) || number <= 0) return 100;
   return Math.max(1, Math.min(200, Math.floor(number)));
+}
+
+function sessionListLimit() {
+  return boundedListLimit(CONFIG.listLimit);
 }
 
 function codexThreadLink(threadId) {
@@ -1079,9 +1083,11 @@ async function loadVisibleCodexThreads(limit = CONFIG.listLimit) {
   return await sqliteJson(
     codexStateDbPath,
     [
-      "select id, title, first_user_message, preview, rollout_path,",
+      "select id, substr(title, 1, 240) as title,",
+      "substr(first_user_message, 1, 240) as first_user_message,",
+      "substr(preview, 1, 240) as preview,",
       "created_at, updated_at, created_at_ms, updated_at_ms,",
-      "tokens_used, source, model_provider, thread_source",
+      "rollout_path",
       "from threads",
       "where coalesce(archived, 0) = 0",
       "order by coalesce(updated_at_ms, updated_at * 1000, created_at_ms, created_at * 1000, 0) desc",
@@ -1116,7 +1122,7 @@ async function syncChatSessionsWithCodex(chatId, options = {}) {
 
   const before = chatState.sessions.length;
   const beforeCurrent = chatState.currentSessionId || "";
-  const normalized = dedupeSessions(chatState.sessions.map(normalizeSessionData)).slice(0, 20);
+  const normalized = dedupeSessions(chatState.sessions.map(normalizeSessionData)).slice(0, sessionListLimit());
   chatState.sessions = normalized.filter((session) => {
     const threadId = String(session.codexThreadId || "").trim();
     if (threadId) return visibleThreadIds.has(threadId);
@@ -1182,7 +1188,7 @@ function bridgeSessionEntries(chatId, visibleThreadIds = null) {
     const chatState = sourceChatId === chatId ? getChatState(chatId) : sessions.chats[sourceChatId];
     if (!chatState || !Array.isArray(chatState.sessions)) continue;
 
-    const normalized = dedupeSessions(chatState.sessions.map(normalizeSessionData)).slice(0, 20);
+    const normalized = dedupeSessions(chatState.sessions.map(normalizeSessionData)).slice(0, sessionListLimit());
     if (sourceChatId === chatId) chatState.sessions = normalized;
 
     for (const session of normalized) {
@@ -1234,7 +1240,7 @@ async function mergedSessionEntries(chatId) {
 async function listChatSessionsSynced(chatId) {
   await syncChatSessionsWithCodex(chatId);
   const chatState = getChatState(chatId);
-  chatState.sessions = dedupeSessions(chatState.sessions.map(normalizeSessionData)).slice(0, 20);
+  chatState.sessions = dedupeSessions(chatState.sessions.map(normalizeSessionData)).slice(0, sessionListLimit());
   saveSessions();
   return await mergedSessionEntries(chatId);
 }
@@ -1298,7 +1304,7 @@ function materializeSessionForChat(chatId, entry) {
 
   chatState.currentSessionId = match.id;
   match.updatedAt = Date.now();
-  chatState.sessions = dedupeSessions(chatState.sessions).slice(0, 20);
+  chatState.sessions = dedupeSessions(chatState.sessions).slice(0, sessionListLimit());
   saveSessions();
   return match;
 }
@@ -1397,7 +1403,7 @@ async function runLark(args, options = {}) {
 
 function isTransientLarkError(result) {
   const text = `${result?.stderr || ""}\n${result?.stdout || ""}`;
-  return /connectex|ECONN|ETIMEDOUT|open\.feishu\.cn|tenant_access_token|socket/i.test(text);
+  return /connectex|ECONN|ETIMEDOUT|open\.feishu\.cn|tenant_access_token|socket|cardid is invalid|ErrCode:\s*11310/i.test(text);
 }
 
 function terminateProcessTree(pid, force) {
@@ -3454,7 +3460,14 @@ conn = sqlite3.connect(db_path)
 conn.row_factory = sqlite3.Row
 try:
     rows = conn.execute(sql).fetchall()
-    print(json.dumps([dict(row) for row in rows]))
+    def safe_value(value):
+        if isinstance(value, bytes):
+            try:
+                return value.decode("utf-8")
+            except UnicodeDecodeError:
+                return value.hex()
+        return value
+    print(json.dumps([{key: safe_value(row[key]) for key in row.keys()} for row in rows]))
 finally:
     conn.close()
 `.trim();
@@ -7139,7 +7152,7 @@ async function sessionsMarkdown(chatId) {
     ].join("\n");
     return "还没有记录过 Codex 会话。直接发送普通消息会自动创建。";
   }
-  const lines = ["**Codex 会话列表**", ""];
+  const lines = [`**Codex 会话列表（共 ${list.length} 个）**`, ""];
   list.forEach((session, index) => {
     const marker = session._isCurrent || session.id === currentId ? " ← 当前" : "";
     const thread = codexThreadLink(session.codexThreadId);
@@ -7204,6 +7217,7 @@ function startConsumer() {
     reasoning: codexReasoningLabel,
     codexTimeoutMs: CONFIG.codexTimeoutMs,
     codexIdleTimeoutMs: CONFIG.codexIdleTimeoutMs,
+    listLimit: CONFIG.listLimit,
     disableMcp: CONFIG.disableMcp,
     maxConcurrent: CONFIG.maxConcurrent,
     cardMode: CONFIG.useCards,

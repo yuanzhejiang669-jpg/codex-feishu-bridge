@@ -9,6 +9,7 @@ param(
   [string]$EventKeys = "im.message.receive_v1",
   [int]$CodexTimeoutSeconds = 0,
   [int]$CodexIdleTimeoutSeconds = 3600,
+  [int]$ListLimit = 100,
   [int]$MaxConcurrent = 1,
   [int]$CardThrottleMs = 400,
   [switch]$NoCard,
@@ -26,6 +27,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $script = Join-Path $PSScriptRoot "codex-feishu-bridge.mjs"
+$workspaceWasProvided = $Workspace.Trim().Length -gt 0
 function Get-SafeInstanceName([string]$RawName) {
   $safe = ($RawName.Trim() -replace '[^A-Za-z0-9_.-]', '-').Trim('-')
   if (-not $safe) {
@@ -52,10 +54,75 @@ if ($Name.Trim()) {
 $stateDir = Join-Path $dataRoot "state"
 $logDir = Join-Path $dataRoot "logs"
 $pidFile = Join-Path $stateDir "bridge.pid"
+$lockFile = Join-Path $stateDir "bridge.lock.json"
+$launchConfigFile = Join-Path $stateDir "launch-config.json"
 $stdoutLog = Join-Path $logDir "bridge.stdout.log"
 $stderrLog = Join-Path $logDir "bridge.stderr.log"
 
-New-Item -ItemType Directory -Force -Path $stateDir, $logDir, $Workspace | Out-Null
+New-Item -ItemType Directory -Force -Path $stateDir, $logDir | Out-Null
+
+function Read-JsonFile {
+  param([string]$Path)
+  if (-not (Test-Path -LiteralPath $Path)) { return $null }
+  try {
+    return Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+  } catch {
+    return $null
+  }
+}
+
+function Get-SavedLarkProfile {
+  param([string]$InstanceName)
+
+  $config = Read-JsonFile $launchConfigFile
+  if ($config -and [string]$config.larkProfile -and ([string]$config.larkProfile).Trim()) {
+    return ([string]$config.larkProfile).Trim()
+  }
+
+  $lock = Read-JsonFile $lockFile
+  if ($lock -and [string]$lock.larkProfile) {
+    $profile = ([string]$lock.larkProfile).Trim()
+    if ($profile -and $profile -ne "default") {
+      return $profile
+    }
+  }
+
+  if ($InstanceName -match '^codex-assistant-(?:old\d+|\d+)$') {
+    return $InstanceName
+  }
+
+  return ""
+}
+
+function Save-LaunchConfig {
+  param(
+    [string]$InstanceName,
+    [string]$WorkspacePath,
+    [string]$Profile
+  )
+
+  $payload = [ordered]@{
+    instance = if ($InstanceName) { $InstanceName } else { "default" }
+    workspace = $WorkspacePath
+    larkProfile = $Profile
+    updatedAt = (Get-Date).ToString("o")
+  }
+  $payload | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $launchConfigFile -Encoding UTF8
+}
+
+$savedLaunchConfig = Read-JsonFile $launchConfigFile
+if (-not $workspaceWasProvided -and $savedLaunchConfig -and [string]$savedLaunchConfig.workspace -and ([string]$savedLaunchConfig.workspace).Trim()) {
+  $Workspace = ([string]$savedLaunchConfig.workspace).Trim()
+}
+New-Item -ItemType Directory -Force -Path $Workspace | Out-Null
+
+$resolvedLarkProfile = $LarkProfile.Trim()
+if (-not $resolvedLarkProfile) {
+  $resolvedLarkProfile = Get-SavedLarkProfile $safeName
+}
+
+$resolvedWorkspace = (Resolve-Path -LiteralPath $Workspace).Path
+Save-LaunchConfig -InstanceName $safeName -WorkspacePath $resolvedWorkspace -Profile $resolvedLarkProfile
 
 function Resolve-OfficialCodexCliBin {
   $packages = @(Get-AppxPackage -Name "OpenAI.Codex" -ErrorAction SilentlyContinue)
@@ -139,10 +206,10 @@ if (Test-Path $pidFile) {
   Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue
 }
 
-$env:CODEX_FEISHU_WORKSPACE = (Resolve-Path -LiteralPath $Workspace).Path
+$env:CODEX_FEISHU_WORKSPACE = $resolvedWorkspace
 $env:CODEX_FEISHU_INSTANCE_NAME = if ($safeName) { $safeName } else { "default" }
-if ($LarkProfile.Trim()) {
-  $env:CODEX_FEISHU_LARK_PROFILE = $LarkProfile.Trim()
+if ($resolvedLarkProfile) {
+  $env:CODEX_FEISHU_LARK_PROFILE = $resolvedLarkProfile
 } else {
   Remove-Item Env:CODEX_FEISHU_LARK_PROFILE -ErrorAction SilentlyContinue
 }
@@ -160,6 +227,7 @@ if ($Reasoning.Trim()) {
 }
 $env:CODEX_FEISHU_CODEX_TIMEOUT_MS = [string]($CodexTimeoutSeconds * 1000)
 $env:CODEX_FEISHU_CODEX_IDLE_TIMEOUT_MS = [string]($CodexIdleTimeoutSeconds * 1000)
+$env:CODEX_FEISHU_LIST_LIMIT = [string]$ListLimit
 $env:CODEX_FEISHU_DISABLE_MCP = if ($DisableMcp) { "1" } else { "0" }
 $env:CODEX_FEISHU_MAX_CONCURRENT = [string]$MaxConcurrent
 $env:CODEX_FEISHU_CARD_MODE = if ($NoCard) { "0" } else { "1" }
@@ -208,6 +276,7 @@ Write-Host "Reasoning: $($env:CODEX_FEISHU_REASONING)"
 Write-Host "Event keys: $($env:CODEX_FEISHU_EVENT_KEYS)"
 Write-Host "Codex total timeout: $(if ($CodexTimeoutSeconds -gt 0) { "$CodexTimeoutSeconds seconds" } else { 'disabled' })"
 Write-Host "Codex idle timeout: $(if ($CodexIdleTimeoutSeconds -gt 0) { "$CodexIdleTimeoutSeconds seconds" } else { 'disabled' })"
+Write-Host "List limit: $($env:CODEX_FEISHU_LIST_LIMIT)"
 Write-Host "MCP: $(if ($env:CODEX_FEISHU_DISABLE_MCP -eq '0') { 'enabled' } else { 'disabled' })"
 Write-Host "Card throttle: $($env:CODEX_FEISHU_CARD_THROTTLE_MS)ms"
 Write-Host "Final steps: $($env:CODEX_FEISHU_SHOW_FINAL_STEPS)"

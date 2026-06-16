@@ -11,6 +11,7 @@ param(
   [string]$EventKeys = "im.message.receive_v1",
   [int]$CodexTimeoutSeconds = 0,
   [int]$CodexIdleTimeoutSeconds = 3600,
+  [int]$ListLimit = 100,
   [int]$RestartCooldownSeconds = 60,
   [int]$WatchdogTimeoutSeconds = 180,
   [switch]$DisableMcp
@@ -46,6 +47,7 @@ $pidFile = Join-Path $stateDir "bridge.pid"
 $lockFile = Join-Path $stateDir "watchdog.lock"
 $logFile = Join-Path $logDir "watchdog.log"
 $lastRestartFile = Join-Path $stateDir "watchdog-last-restart.txt"
+$activeRunsFile = Join-Path $stateDir "active-runs.json"
 
 New-Item -ItemType Directory -Force -Path $stateDir, $logDir | Out-Null
 
@@ -115,6 +117,27 @@ function Get-BridgeProcess {
   $cmd = (Get-CimInstance Win32_Process -Filter "ProcessId=$pidText" -ErrorAction SilentlyContinue).CommandLine
   if ($cmd -notlike "*codex-feishu-bridge*") { return $null }
   return $process
+}
+
+function Get-ActiveRunCount {
+  if (-not (Test-Path -LiteralPath $activeRunsFile)) { return 0 }
+
+  try {
+    $state = Get-Content -LiteralPath $activeRunsFile -Raw -ErrorAction Stop | ConvertFrom-Json
+  } catch {
+    Write-WatchdogLog "active run check failed: $($_.Exception.Message)"
+    return 0
+  }
+
+  if (-not $state) { return 0 }
+  $runs = $state.runs
+  if (-not $runs) { return 0 }
+
+  if ($runs -is [System.Collections.IDictionary]) {
+    return @($runs.Keys).Count
+  }
+
+  return @($runs.PSObject.Properties | Where-Object { $null -ne $_.Value }).Count
 }
 
 function Get-LarkCliCommand {
@@ -199,10 +222,7 @@ function Test-LarkConsumer {
     $statusArgs += @("--profile", $LarkProfile.Trim())
   }
   $statusArgs += @("event", "status")
-  if ($LarkProfile.Trim()) {
-    $statusArgs += "--current"
-  }
-  $statusArgs += "--json"
+  $statusArgs += @("--current", "--json")
 
   $processFile = $larkCli
   $processArgs = $statusArgs
@@ -330,7 +350,9 @@ function Restart-Bridge {
       "-CodexTimeoutSeconds",
       $CodexTimeoutSeconds,
       "-CodexIdleTimeoutSeconds",
-      $CodexIdleTimeoutSeconds
+      $CodexIdleTimeoutSeconds,
+      "-ListLimit",
+      $ListLimit
     )
     if ($safeName) { $startArgs += @("-Name", $safeName) }
     if ($LarkProfile.Trim()) { $startArgs += @("-LarkProfile", $LarkProfile.Trim()) }
@@ -373,6 +395,11 @@ try {
   }
 
   if (-not $consumer.Ok) {
+    $activeRunCount = Get-ActiveRunCount
+    if ($activeRunCount -gt 0) {
+      Write-WatchdogLog "restart deferred; activeRuns=$activeRunCount; reason=lark consumer unhealthy: $($consumer.Reason)"
+      exit 0
+    }
     Restart-Bridge "lark consumer unhealthy: $($consumer.Reason)"
     exit 0
   }
