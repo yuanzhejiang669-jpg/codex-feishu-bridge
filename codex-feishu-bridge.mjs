@@ -5531,7 +5531,12 @@ async function handleOutOfBandCommand(rawEvent, command) {
     eventId: event.event_id,
     messageId,
     chatId,
+    chatType: event.chat_type,
+    senderId: event.sender_id,
+    messageType: event.message_type,
     command: command.name,
+    commandText: String(command.text || "").slice(0, 200),
+    contentPreview: userTextFromContent(event.content).slice(0, 200),
   });
   await handleCommand(event, command);
 }
