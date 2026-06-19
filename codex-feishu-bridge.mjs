@@ -52,7 +52,7 @@ const CONFIG = {
   syncSidebar: (process.env.CODEX_FEISHU_SYNC_SIDEBAR || "0") !== "0",
   syncSessionsFromCodex: (process.env.CODEX_FEISHU_SYNC_SESSIONS_FROM_CODEX || "1") !== "0",
   keepEmptySessionMs: Number(process.env.CODEX_FEISHU_KEEP_EMPTY_SESSION_MS || `${10 * 60_000}`),
-  codexHome: process.env.CODEX_HOME || path.join(os.homedir(), ".codex"),
+  codexHome: path.resolve(process.env.CODEX_HOME || path.join(os.homedir(), ".codex")),
 };
 
 const logPath = path.join(CONFIG.logDir, "codex-feishu-bridge.log");
@@ -7006,6 +7006,7 @@ async function statusMarkdown(chatId) {
     `失败统计：${failureStatsSummary()}`,
     "",
     `工作区：\`${CONFIG.workspace}\``,
+    `Codex Home：\`${CONFIG.codexHome}\``,
     `设置：${settingsSummary(session)}`,
     `运行模式：\`${CONFIG.runMode}\` · 沙箱：\`${CONFIG.codexSandbox}\` · MCP：${CONFIG.disableMcp ? "禁用" : "启用"}`,
     `超时：总时长 ${durationConfigLabel(CONFIG.codexTimeoutMs)} · 无进展 ${durationConfigLabel(CONFIG.codexIdleTimeoutMs)}`,
@@ -7128,6 +7129,7 @@ async function nowMarkdown(chatId) {
     "**Codex Bot 状态**",
     "",
     `工作区：\`${CONFIG.workspace}\``,
+    `Codex Home：\`${CONFIG.codexHome}\``,
     `会话：\`${session.title}\` (${session.id})`,
     `原生 thread：${session.codexThreadId ? `\`${session.codexThreadId}\`` : "未创建"}`,
     `Goal：${goalSummary(session.lastGoal)}`,
@@ -7226,6 +7228,7 @@ function delay(ms) {
 function startConsumer() {
   log("INFO", "starting bridge", {
     workspace: CONFIG.workspace,
+    codexHome: CONFIG.codexHome,
     eventKeys: CONFIG.eventKeys,
     larkProfile: CONFIG.larkProfile || "default",
     larkCli: toolLabel(CONFIG.larkCli),

@@ -1,6 +1,6 @@
 Option Explicit
 
-Dim fso, shell, scriptDir, watchdogScript, workspace, instanceName, larkProfile
+Dim fso, shell, scriptDir, watchdogScript, workspace, instanceName, larkProfile, codexHome
 Dim codexTimeoutSeconds, codexIdleTimeoutSeconds, watchdogTimeoutSeconds, eventKeys, command
 
 Set fso = CreateObject("Scripting.FileSystemObject")
@@ -36,9 +36,16 @@ eventKeys = "im.message.receive_v1"
 If WScript.Arguments.Count > 6 Then
   eventKeys = WScript.Arguments(6)
 End If
+codexHome = ""
+If WScript.Arguments.Count > 7 Then
+  codexHome = WScript.Arguments(7)
+End If
 
 command = "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File " & _
   Quote(watchdogScript) & " -Workspace " & Quote(workspace)
+If codexHome <> "" Then
+  command = command & " -CodexHome " & Quote(codexHome)
+End If
 If instanceName <> "" Then
   command = command & " -Name " & Quote(instanceName)
 End If

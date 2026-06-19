@@ -2,6 +2,7 @@ param(
   [string]$Name = "",
   [string]$LarkProfile = "",
   [string]$Workspace = "",
+  [string]$CodexHome = "",
   [string]$StartScript = (Join-Path $PSScriptRoot "start-codex-feishu-bridge.ps1"),
   [string]$StopScript = (Join-Path $PSScriptRoot "stop-codex-feishu-bridge.ps1"),
   [string]$Sandbox = "danger-full-access",
@@ -48,8 +49,24 @@ $lockFile = Join-Path $stateDir "watchdog.lock"
 $logFile = Join-Path $logDir "watchdog.log"
 $lastRestartFile = Join-Path $stateDir "watchdog-last-restart.txt"
 $activeRunsFile = Join-Path $stateDir "active-runs.json"
+$launchConfigFile = Join-Path $stateDir "launch-config.json"
 
 New-Item -ItemType Directory -Force -Path $stateDir, $logDir | Out-Null
+
+function Read-JsonFile {
+  param([string]$Path)
+  if (-not (Test-Path -LiteralPath $Path)) { return $null }
+  try {
+    return Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+  } catch {
+    return $null
+  }
+}
+
+$savedLaunchConfig = Read-JsonFile $launchConfigFile
+if (-not $CodexHome.Trim() -and $savedLaunchConfig -and [string]$savedLaunchConfig.codexHome -and ([string]$savedLaunchConfig.codexHome).Trim()) {
+  $CodexHome = ([string]$savedLaunchConfig.codexHome).Trim()
+}
 
 function Write-WatchdogLog {
   param([string]$Message)
@@ -357,6 +374,7 @@ function Restart-Bridge {
     if ($safeName) { $startArgs += @("-Name", $safeName) }
     if ($LarkProfile.Trim()) { $startArgs += @("-LarkProfile", $LarkProfile.Trim()) }
     if ($Workspace.Trim()) { $startArgs += @("-Workspace", $Workspace) }
+    if ($CodexHome.Trim()) { $startArgs += @("-CodexHome", $CodexHome.Trim()) }
     if ($DisableMcp) { $startArgs += "-DisableMcp" }
     & powershell.exe @startArgs | ForEach-Object {
       Write-WatchdogLog "start: $_"

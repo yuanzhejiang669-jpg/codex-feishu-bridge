@@ -5,6 +5,7 @@ param(
   [string]$DisplayName = "",
   [string]$Description = "Remote control local Codex sessions from Feishu.",
   [string]$Workspace = "",
+  [string]$CodexHome = "",
   [string]$Source = "codex",
   [ValidateSet("feishu", "lark")]
   [string]$Brand = "feishu",
@@ -63,6 +64,7 @@ if ($Profile.Trim()) { $argsList += @("--profile", $Profile.Trim()) }
 if ($DisplayName.Trim()) { $argsList += @("--display-name", $DisplayName.Trim()) }
 if ($Description.Trim()) { $argsList += @("--description", $Description.Trim()) }
 if ($Workspace.Trim()) { $argsList += @("--workspace", $Workspace.Trim()) }
+if ($CodexHome.Trim()) { $argsList += @("--codex-home", $CodexHome.Trim()) }
 if ($NoOpenQr) { $argsList += "--no-open-qr" }
 if ($NoStart) { $argsList += "--no-start" }
 if ($InstallStartup) { $argsList += "--install-startup" }

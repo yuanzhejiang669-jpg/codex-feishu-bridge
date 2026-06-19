@@ -38,7 +38,7 @@ Bridge 面向本机可信环境设计：
 6. Codex 完成后，Bridge 将最终回答发回飞书，并在本机记录 session 状态。
 7. Windows 计划任务 watchdog 检查 Bridge 进程和飞书事件 consumer，并在不健康时自动重启实例。
 
-建议每个机器人实例使用独立的飞书应用/profile、workspace、状态目录、日志目录和 watchdog 任务。
+建议每个机器人实例使用独立的飞书应用/profile、workspace、状态目录、日志目录和 watchdog 任务。也可以通过 `-CodexHome` 给实例指定独立的 Codex home；多个相关 Bot 可以共用一个 Codex home，从而共用同一套 Codex 配置、AGENTS 规则、skills、MCP 设置和 Codex session/state，同时保持飞书 profile 与 Bridge 运行状态隔离。
 
 ## 功能能力
 
@@ -181,6 +181,8 @@ $Workspace = "$env:USERPROFILE\Documents\Codex\workspaces\feishu-bridge-$BotName
   -InstallStartup
 ```
 
+省略 `-CodexHome` 时，Bot 使用默认用户 Codex home。只有当这个 Bot 需要读取专用或共享 Codex 配置时，再额外加上 `-CodexHome "$env:USERPROFILE\Documents\Codex\codex-homes\<name>"`。
+
 二维码流程完成后，在飞书中验证：
 
 ```text
@@ -262,17 +264,20 @@ Watchdog 会注册为 Windows 计划任务，在登录、解锁以及周期触�
   -Workspace "$env:USERPROFILE\Documents\Codex\workspaces\feishu-bridge-codex-assistant-1"
 ```
 
+如果该实例使用专用 Codex home，手动启动、安装 watchdog、手动检查 watchdog 时都传入同一个 `-CodexHome` 值。
+
 ## 多实例部署
 
-每个机器人建议使用独立的实例名、飞书应用/profile、workspace 和 watchdog。
+每个机器人建议使用独立的实例名、飞书应用/profile、workspace 和 watchdog。需要让某个 Bot 读取非默认 Codex home 时，传入 `-CodexHome`。如果要做某个工作流的一组 Bot，可以让每个 Bot 使用自己的 workspace，但全部指向同一个 Codex home。
 
 示例命名：
 
-| 实例 | 飞书展示名 | Workspace |
-|---|---|---|
-| `codex-assistant-1` | `Codex Assistant 1` | `%USERPROFILE%\Documents\Codex\workspaces\feishu-bridge-codex-assistant-1` |
-| `codex-assistant-2` | `Codex Assistant 2` | `%USERPROFILE%\Documents\Codex\workspaces\feishu-bridge-codex-assistant-2` |
-| `codex-assistant-lab1` | `Codex Assistant Lab 1` | `%USERPROFILE%\Documents\Codex\workspaces\feishu-bridge-codex-assistant-lab1` |
+| 实例 | 飞书展示名 | Workspace | Codex home |
+|---|---|---|---|
+| `codex-assistant-1` | `Codex Assistant 1` | `%USERPROFILE%\Documents\Codex\workspaces\feishu-bridge-codex-assistant-1` | 默认用户 Codex home |
+| `codex-assistant-2` | `Codex Assistant 2` | `%USERPROFILE%\Documents\Codex\workspaces\feishu-bridge-codex-assistant-2` | 默认用户 Codex home |
+| `codex-assistant-old-baike` | `codex助手old-百科` | `%USERPROFILE%\Documents\Codex\workspaces\feishu-bridge-codex-assistant-old-baike` | `%USERPROFILE%\Documents\Codex\codex-homes\codex-assistant-old-baike` |
+| `codex-assistant-old-baike-1` | `codex助手old-百科-1` | `%USERPROFILE%\Documents\Codex\workspaces\feishu-bridge-codex-assistant-old-baike-1` | `%USERPROFILE%\Documents\Codex\codex-homes\codex-assistant-old-baike` |
 
 注册另一个实例：
 
@@ -280,11 +285,13 @@ Watchdog 会注册为 Windows 计划任务，在登录、解锁以及周期触�
 $BotName = "codex-assistant-2"
 $BotDisplayName = "Codex Assistant 2"
 $Workspace = "$env:USERPROFILE\Documents\Codex\workspaces\feishu-bridge-$BotName"
+$CodexHome = "$env:USERPROFILE\Documents\Codex\codex-homes\shared-workflow"
 
 .\register-codex-feishu-bot.ps1 `
   -Name $BotName `
   -DisplayName $BotDisplayName `
   -Workspace $Workspace `
+  -CodexHome $CodexHome `
   -RunMode app-server `
   -Reasoning xhigh `
   -CodexTimeoutSeconds 0 `
@@ -336,6 +343,7 @@ $Workspace = "$env:USERPROFILE\Documents\Codex\workspaces\feishu-bridge-$BotName
 | `-Name` | 空，即 default 实例 | start、stop、watchdog、registration | 实例名。命名实例使用独立运行目录。 |
 | `-LarkProfile` | 当前或默认 profile | start、watchdog | `lark-cli` profile 名称，通常与 `-Name` 相同。 |
 | `-Workspace` | 按实例生成的默认目录 | start、watchdog、registration | Codex 运行和附件保存目录。 |
+| `-CodexHome` | 默认用户 Codex home | start、watchdog、registration | 可选 Codex home。它决定派生出的 Codex 进程读取哪套 Codex 配置、AGENTS 规则、skills、MCP 设置和本地 Codex sessions。 |
 | `-Sandbox` | `danger-full-access` | start、watchdog、registration | Codex sandbox 模式。 |
 | `-RunMode` | `app-server` | start、watchdog、registration | Codex 运行模式。 |
 | `-Reasoning` | `xhigh` | start、watchdog、registration | 传给 Codex 的 reasoning 设置。 |
@@ -351,6 +359,7 @@ $Workspace = "$env:USERPROFILE\Documents\Codex\workspaces\feishu-bridge-$BotName
 | 变量 | 默认值 | 说明 |
 |---|---|---|
 | `CODEX_FEISHU_WORKSPACE` | 当前目录或脚本传入 workspace | Codex workspace。 |
+| `CODEX_HOME` | 默认用户 Codex home | 传给派生 Codex 进程的 Codex home。提供 `-CodexHome` 时由启动脚本设置。 |
 | `CODEX_FEISHU_INSTANCE_NAME` | `default` | 运行实例名。 |
 | `CODEX_FEISHU_LARK_PROFILE` | 空 | `lark-cli` profile。 |
 | `CODEX_FEISHU_SANDBOX` | `danger-full-access` | Codex sandbox 模式。 |
@@ -395,6 +404,16 @@ Workspace 附件目录：
 
 ```text
 <Workspace>\.codex-feishu-attachments\<date>\<message-id>\
+```
+
+使用 `-CodexHome` 时的专用 Codex home：
+
+```text
+<CodexHome>\config.toml
+<CodexHome>\AGENTS.md
+<CodexHome>\skills\
+<CodexHome>\sessions\
+<CodexHome>\state_5.sqlite
 ```
 
 `exec` fallback 的 prompt/output 目录：

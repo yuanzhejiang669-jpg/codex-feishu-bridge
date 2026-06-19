@@ -2,6 +2,7 @@ param(
   [string]$Name = "",
   [string]$LarkProfile = "",
   [string]$Workspace = "",
+  [string]$CodexHome = "",
   [string]$Sandbox = "danger-full-access",
   [ValidateSet("app-server", "auto", "exec")]
   [string]$RunMode = "app-server",
@@ -28,6 +29,7 @@ $ErrorActionPreference = "Stop"
 
 $script = Join-Path $PSScriptRoot "codex-feishu-bridge.mjs"
 $workspaceWasProvided = $Workspace.Trim().Length -gt 0
+$codexHomeWasProvided = $CodexHome.Trim().Length -gt 0
 function Get-SafeInstanceName([string]$RawName) {
   $safe = ($RawName.Trim() -replace '[^A-Za-z0-9_.-]', '-').Trim('-')
   if (-not $safe) {
@@ -98,13 +100,15 @@ function Save-LaunchConfig {
   param(
     [string]$InstanceName,
     [string]$WorkspacePath,
-    [string]$Profile
+    [string]$Profile,
+    [string]$CodexHomePath
   )
 
   $payload = [ordered]@{
     instance = if ($InstanceName) { $InstanceName } else { "default" }
     workspace = $WorkspacePath
     larkProfile = $Profile
+    codexHome = $CodexHomePath
     updatedAt = (Get-Date).ToString("o")
   }
   $payload | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $launchConfigFile -Encoding UTF8
@@ -114,6 +118,9 @@ $savedLaunchConfig = Read-JsonFile $launchConfigFile
 if (-not $workspaceWasProvided -and $savedLaunchConfig -and [string]$savedLaunchConfig.workspace -and ([string]$savedLaunchConfig.workspace).Trim()) {
   $Workspace = ([string]$savedLaunchConfig.workspace).Trim()
 }
+if (-not $codexHomeWasProvided -and $savedLaunchConfig -and [string]$savedLaunchConfig.codexHome -and ([string]$savedLaunchConfig.codexHome).Trim()) {
+  $CodexHome = ([string]$savedLaunchConfig.codexHome).Trim()
+}
 New-Item -ItemType Directory -Force -Path $Workspace | Out-Null
 
 $resolvedLarkProfile = $LarkProfile.Trim()
@@ -122,7 +129,12 @@ if (-not $resolvedLarkProfile) {
 }
 
 $resolvedWorkspace = (Resolve-Path -LiteralPath $Workspace).Path
-Save-LaunchConfig -InstanceName $safeName -WorkspacePath $resolvedWorkspace -Profile $resolvedLarkProfile
+$resolvedCodexHome = ""
+if ($CodexHome.Trim()) {
+  New-Item -ItemType Directory -Force -Path $CodexHome | Out-Null
+  $resolvedCodexHome = (Resolve-Path -LiteralPath $CodexHome).Path
+}
+Save-LaunchConfig -InstanceName $safeName -WorkspacePath $resolvedWorkspace -Profile $resolvedLarkProfile -CodexHomePath $resolvedCodexHome
 
 function Resolve-OfficialCodexCliBin {
   $packages = @(Get-AppxPackage -Name "OpenAI.Codex" -ErrorAction SilentlyContinue)
@@ -208,6 +220,9 @@ if (Test-Path $pidFile) {
 
 $env:CODEX_FEISHU_WORKSPACE = $resolvedWorkspace
 $env:CODEX_FEISHU_INSTANCE_NAME = if ($safeName) { $safeName } else { "default" }
+if ($resolvedCodexHome) {
+  $env:CODEX_HOME = $resolvedCodexHome
+}
 if ($resolvedLarkProfile) {
   $env:CODEX_FEISHU_LARK_PROFILE = $resolvedLarkProfile
 } else {
@@ -269,6 +284,7 @@ Write-Host "Codex Feishu Bridge started. PID: $bridgePid"
 Write-Host "Instance: $($env:CODEX_FEISHU_INSTANCE_NAME)"
 Write-Host "Lark profile: $(if ($env:CODEX_FEISHU_LARK_PROFILE) { $env:CODEX_FEISHU_LARK_PROFILE } else { 'default/current' })"
 Write-Host "Workspace: $($env:CODEX_FEISHU_WORKSPACE)"
+Write-Host "Codex home: $(if ($env:CODEX_HOME) { $env:CODEX_HOME } else { 'default' })"
 Write-Host "Codex CLI: $($env:CODEX_CLI_BIN)"
 Write-Host "Run mode: $($env:CODEX_FEISHU_RUN_MODE)"
 Write-Host "Sandbox: $($env:CODEX_FEISHU_SANDBOX)"

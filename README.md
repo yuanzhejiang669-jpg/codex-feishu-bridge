@@ -38,7 +38,7 @@ The bridge is designed for a local trusted machine:
 6. The bridge posts the final answer to Feishu and records session state locally.
 7. A Windows Scheduled Task watchdog checks the bridge and Feishu event consumer and restarts unhealthy instances.
 
-Each bot instance should use its own Feishu app/profile, workspace, state directory, log directory, and watchdog task.
+Each bot instance should use its own Feishu app/profile, workspace, state directory, log directory, and watchdog task. Instances may also set a dedicated Codex home with `-CodexHome`; multiple related bots can share one Codex home to use the same Codex config, AGENTS instructions, skills, MCP settings, and Codex session store while keeping Feishu profiles and Bridge runtime state isolated.
 
 ## Capabilities
 
@@ -181,6 +181,8 @@ $Workspace = "$env:USERPROFILE\Documents\Codex\workspaces\feishu-bridge-$BotName
   -InstallStartup
 ```
 
+When `-CodexHome` is omitted, the bot uses the normal user Codex home. Add `-CodexHome "$env:USERPROFILE\Documents\Codex\codex-homes\<name>"` only when the bot should read a dedicated or shared Codex configuration.
+
 After the QR flow completes, verify from Feishu:
 
 ```text
@@ -262,17 +264,20 @@ Run one watchdog check manually:
   -Workspace "$env:USERPROFILE\Documents\Codex\workspaces\feishu-bridge-codex-assistant-1"
 ```
 
+If the instance uses a dedicated Codex home, pass the same `-CodexHome` value to manual start and watchdog install/check commands.
+
 ## Multi-Instance Deployment
 
-Use a separate instance name, Feishu app/profile, workspace, and watchdog for each bot.
+Use a separate instance name, Feishu app/profile, workspace, and watchdog for each bot. Use `-CodexHome` when a bot should run against a non-default Codex home. To build a bot family for one workflow, give each bot a separate workspace but point all of them at the same Codex home.
 
 Example naming:
 
-| Instance | Feishu display name | Workspace |
-|---|---|---|
-| `codex-assistant-1` | `Codex Assistant 1` | `%USERPROFILE%\Documents\Codex\workspaces\feishu-bridge-codex-assistant-1` |
-| `codex-assistant-2` | `Codex Assistant 2` | `%USERPROFILE%\Documents\Codex\workspaces\feishu-bridge-codex-assistant-2` |
-| `codex-assistant-lab1` | `Codex Assistant Lab 1` | `%USERPROFILE%\Documents\Codex\workspaces\feishu-bridge-codex-assistant-lab1` |
+| Instance | Feishu display name | Workspace | Codex home |
+|---|---|---|---|
+| `codex-assistant-1` | `Codex Assistant 1` | `%USERPROFILE%\Documents\Codex\workspaces\feishu-bridge-codex-assistant-1` | default user Codex home |
+| `codex-assistant-2` | `Codex Assistant 2` | `%USERPROFILE%\Documents\Codex\workspaces\feishu-bridge-codex-assistant-2` | default user Codex home |
+| `codex-assistant-old-baike` | `codex助手old-百科` | `%USERPROFILE%\Documents\Codex\workspaces\feishu-bridge-codex-assistant-old-baike` | `%USERPROFILE%\Documents\Codex\codex-homes\codex-assistant-old-baike` |
+| `codex-assistant-old-baike-1` | `codex助手old-百科-1` | `%USERPROFILE%\Documents\Codex\workspaces\feishu-bridge-codex-assistant-old-baike-1` | `%USERPROFILE%\Documents\Codex\codex-homes\codex-assistant-old-baike` |
 
 Register another instance:
 
@@ -280,11 +285,13 @@ Register another instance:
 $BotName = "codex-assistant-2"
 $BotDisplayName = "Codex Assistant 2"
 $Workspace = "$env:USERPROFILE\Documents\Codex\workspaces\feishu-bridge-$BotName"
+$CodexHome = "$env:USERPROFILE\Documents\Codex\codex-homes\shared-workflow"
 
 .\register-codex-feishu-bot.ps1 `
   -Name $BotName `
   -DisplayName $BotDisplayName `
   -Workspace $Workspace `
+  -CodexHome $CodexHome `
   -RunMode app-server `
   -Reasoning xhigh `
   -CodexTimeoutSeconds 0 `
@@ -336,6 +343,7 @@ Queue behavior:
 | `-Name` | empty/default instance | start, stop, watchdog, registration | Instance name. Named instances use isolated runtime directories. |
 | `-LarkProfile` | current/default profile | start, watchdog | `lark-cli` profile name. Usually the same as `-Name`. |
 | `-Workspace` | instance-specific default | start, watchdog, registration | Directory where Codex runs and attachments are stored. |
+| `-CodexHome` | user default Codex home | start, watchdog, registration | Optional Codex home. This controls which Codex config, AGENTS instructions, skills, MCP settings, and local Codex sessions are visible to the spawned Codex process. |
 | `-Sandbox` | `danger-full-access` | start, watchdog, registration | Codex sandbox mode. |
 | `-RunMode` | `app-server` | start, watchdog, registration | Codex runtime mode. |
 | `-Reasoning` | `xhigh` | start, watchdog, registration | Reasoning setting passed to Codex. |
@@ -351,6 +359,7 @@ Queue behavior:
 | Variable | Default | Description |
 |---|---|---|
 | `CODEX_FEISHU_WORKSPACE` | current directory or script workspace | Codex workspace. |
+| `CODEX_HOME` | normal user Codex home | Codex home passed to the spawned Codex process. Set by `-CodexHome` when provided. |
 | `CODEX_FEISHU_INSTANCE_NAME` | `default` | Runtime instance name. |
 | `CODEX_FEISHU_LARK_PROFILE` | empty | `lark-cli` profile. |
 | `CODEX_FEISHU_SANDBOX` | `danger-full-access` | Codex sandbox mode. |
@@ -395,6 +404,16 @@ Workspace attachment directory:
 
 ```text
 <Workspace>\.codex-feishu-attachments\<date>\<message-id>\
+```
+
+Dedicated Codex home, when `-CodexHome` is used:
+
+```text
+<CodexHome>\config.toml
+<CodexHome>\AGENTS.md
+<CodexHome>\skills\
+<CodexHome>\sessions\
+<CodexHome>\state_5.sqlite
 ```
 
 `exec` fallback prompt/output directory:

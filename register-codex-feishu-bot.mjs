@@ -18,6 +18,7 @@ Options:
   --display-name <name>         Feishu app/bot display name shown during QR registration.
   --description <text>          Feishu app description shown during QR registration.
   --workspace <path>            Bridge workspace. Defaults to Documents\\Codex\\workspaces\\feishu-bridge-<name>.
+  --codex-home <path>           Codex home used by this bot. Defaults to the normal user Codex home.
   --source <source>             Lark registerApp source. Defaults to codex.
   --brand <feishu|lark>         lark-cli profile brand. Defaults to feishu.
   --timeout-seconds <seconds>   Registration timeout. Defaults to 600.
@@ -54,6 +55,8 @@ async function main() {
   const profile = String(options.profile || name).trim();
   if (!profile) throw new Error("missing --profile");
   const workspace = path.resolve(options.workspace || defaultWorkspace(name));
+  const codexHomeRaw = String(options.codexHome || "").trim();
+  const codexHome = codexHomeRaw ? path.resolve(codexHomeRaw) : "";
   const brand = String(options.brand || "feishu").trim().toLowerCase();
   if (!["feishu", "lark"].includes(brand)) throw new Error("--brand must be feishu or lark");
 
@@ -64,10 +67,12 @@ async function main() {
   await assertProfileAvailable(larkCli, profile, options.forceProfile);
 
   fs.mkdirSync(workspace, { recursive: true });
+  if (codexHome) fs.mkdirSync(codexHome, { recursive: true });
 
   console.log(`Instance: ${name}`);
   console.log(`Lark profile: ${profile}`);
   console.log(`Workspace: ${workspace}`);
+  console.log(`Codex home: ${codexHome || "default"}`);
   console.log(`Register source: ${source}`);
   console.log("");
 
@@ -88,11 +93,11 @@ async function main() {
   console.log(`Created lark-cli profile: ${profile}`);
 
   if (!options.noStart) {
-    await startBridge({ name, profile, workspace, options });
+    await startBridge({ name, profile, workspace, codexHome, options });
   }
 
   if (options.installStartup) {
-    await installStartup({ name, profile, workspace, options });
+    await installStartup({ name, profile, workspace, codexHome, options });
   }
 
   console.log("");
@@ -302,7 +307,7 @@ async function addLarkProfile(larkCli, { profile, appId, appSecret, brand }) {
   });
 }
 
-async function startBridge({ name, profile, workspace, options }) {
+async function startBridge({ name, profile, workspace, codexHome, options }) {
   const script = path.join(ROOT, "start-codex-feishu-bridge.ps1");
   const args = [
     "-NoProfile",
@@ -317,6 +322,7 @@ async function startBridge({ name, profile, workspace, options }) {
     "-Workspace",
     workspace,
   ];
+  addOptionalPowerShellArg(args, "-CodexHome", codexHome);
   addOptionalPowerShellArg(args, "-Sandbox", options.sandbox);
   addOptionalPowerShellArg(args, "-RunMode", options.runMode);
   addOptionalPowerShellArg(args, "-Reasoning", options.reasoning);
@@ -336,7 +342,7 @@ async function startBridge({ name, profile, workspace, options }) {
   console.log(`Bridge started: ${name}`);
 }
 
-async function installStartup({ name, profile, workspace, options }) {
+async function installStartup({ name, profile, workspace, codexHome, options }) {
   const script = path.join(ROOT, "install-codex-feishu-watchdog.ps1");
   const args = [
     "-NoProfile",
@@ -351,6 +357,7 @@ async function installStartup({ name, profile, workspace, options }) {
     "-Workspace",
     workspace,
   ];
+  addOptionalPowerShellArg(args, "-CodexHome", codexHome);
   addOptionalPowerShellArg(args, "-CodexTimeoutSeconds", options.codexTimeoutSeconds);
   addOptionalPowerShellArg(args, "-CodexIdleTimeoutSeconds", options.codexIdleTimeoutSeconds);
   addOptionalPowerShellArg(args, "-EventKeys", options.eventKeys);

@@ -2,6 +2,7 @@ param(
   [string]$Name = "",
   [string]$LarkProfile = "",
   [string]$Workspace = "",
+  [string]$CodexHome = "",
   [string]$TaskName = "",
   [string]$EventKeys = "im.message.receive_v1",
   [int]$CodexTimeoutSeconds = 0,
@@ -68,7 +69,8 @@ $argumentParts = @(
   $CodexTimeoutSeconds,
   $CodexIdleTimeoutSeconds,
   $WatchdogTimeoutSeconds,
-  "`"$EventKeys`""
+  "`"$EventKeys`"",
+  "`"$CodexHome`""
 )
 $arguments = $argumentParts -join " "
 
@@ -156,6 +158,7 @@ Write-Host "Installed scheduled task: $TaskName"
 Write-Host "Instance: $(if ($safeName) { $safeName } else { 'default' })"
 Write-Host "Lark profile: $(if ($LarkProfile.Trim()) { $LarkProfile.Trim() } else { 'default/current' })"
 Write-Host "Workspace: $Workspace"
+Write-Host "Codex home: $(if ($CodexHome.Trim()) { $CodexHome.Trim() } else { 'default' })"
 Write-Host "Codex total timeout: $(if ($CodexTimeoutSeconds -gt 0) { "$CodexTimeoutSeconds seconds" } else { 'disabled' })"
 Write-Host "Codex idle timeout: $(if ($CodexIdleTimeoutSeconds -gt 0) { "$CodexIdleTimeoutSeconds seconds" } else { 'disabled' })"
 Write-Host "Watchdog timeout: $(if ($WatchdogTimeoutSeconds -gt 0) { "$WatchdogTimeoutSeconds seconds" } else { 'disabled' })"
