@@ -270,6 +270,15 @@ Watchdog 会注册为 Windows 计划任务，在登录、解锁以及周期触�
 
 每个机器人建议使用独立的实例名、飞书应用/profile、workspace 和 watchdog。需要让某个 Bot 读取非默认 Codex home 时，传入 `-CodexHome`。如果要做某个工作流的一组 Bot，可以让每个 Bot 使用自己的 workspace，但全部指向同一个 Codex home。
 
+这种模式适合把一组 Bot 做成同一个工作流家族：Bridge 代码仍然共用，飞书应用/profile、附件目录、运行日志和队列状态仍然按实例隔离；Codex 配置、AGENTS 规则、skills、MCP 配置和本地 Codex sessions 则由共享的 Codex home 统一管理。
+
+共享 Codex home 的建议：
+
+- 把工作流专用的 `AGENTS.md`、`config.toml`、`skills` 放在专用 Codex home 下。
+- 工作流专用 skills 建议使用真实目录，避免误删全局 skills 时导致专用 Home 失效。
+- 外部工具不需要放进 Codex home；通过该 Home 的 `config.toml` 注册为 MCP 即可。
+- 用 `start-codex-feishu-bridge.ps1` 或注册脚本启动一次后，实例的 `launch-config.json` 会记录 workspace、profile 和 Codex home。后续 watchdog 和手动启动应继续传入同一个 `-CodexHome`。
+
 示例命名：
 
 | 实例 | 飞书展示名 | Workspace | Codex home |
@@ -278,6 +287,10 @@ Watchdog 会注册为 Windows 计划任务，在登录、解锁以及周期触�
 | `codex-assistant-2` | `Codex Assistant 2` | `%USERPROFILE%\Documents\Codex\workspaces\feishu-bridge-codex-assistant-2` | 默认用户 Codex home |
 | `codex-assistant-old-baike` | `codex助手old-百科` | `%USERPROFILE%\Documents\Codex\workspaces\feishu-bridge-codex-assistant-old-baike` | `%USERPROFILE%\Documents\Codex\codex-homes\codex-assistant-old-baike` |
 | `codex-assistant-old-baike-1` | `codex助手old-百科-1` | `%USERPROFILE%\Documents\Codex\workspaces\feishu-bridge-codex-assistant-old-baike-1` | `%USERPROFILE%\Documents\Codex\codex-homes\codex-assistant-old-baike` |
+| `codex-assistant-old-baike-2` | `codex助手old-百科-2` | `%USERPROFILE%\Documents\Codex\workspaces\feishu-bridge-codex-assistant-old-baike-2` | `%USERPROFILE%\Documents\Codex\codex-homes\codex-assistant-old-baike` |
+| `codex-assistant-old-baike-3` | `codex助手old-百科-3` | `%USERPROFILE%\Documents\Codex\workspaces\feishu-bridge-codex-assistant-old-baike-3` | `%USERPROFILE%\Documents\Codex\codex-homes\codex-assistant-old-baike` |
+| `codex-assistant-old-baike-4` | `codex助手old-百科-4` | `%USERPROFILE%\Documents\Codex\workspaces\feishu-bridge-codex-assistant-old-baike-4` | `%USERPROFILE%\Documents\Codex\codex-homes\codex-assistant-old-baike` |
+| `codex-assistant-old-baike-5` | `codex助手old-百科-5` | `%USERPROFILE%\Documents\Codex\workspaces\feishu-bridge-codex-assistant-old-baike-5` | `%USERPROFILE%\Documents\Codex\codex-homes\codex-assistant-old-baike` |
 
 注册另一个实例：
 
@@ -415,6 +428,8 @@ Workspace 附件目录：
 <CodexHome>\sessions\
 <CodexHome>\state_5.sqlite
 ```
+
+如果多个实例共用同一个 Codex home，它们会看到同一套 Codex 配置、skills、MCP 和本地 Codex session/state；但 Bridge 自己的运行状态仍在 `%LOCALAPPDATA%\CodexFeishuBridge\instances\<Name>\...` 下按实例隔离。
 
 `exec` fallback 的 prompt/output 目录：
 

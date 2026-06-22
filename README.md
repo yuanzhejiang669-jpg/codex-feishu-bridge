@@ -270,6 +270,15 @@ If the instance uses a dedicated Codex home, pass the same `-CodexHome` value to
 
 Use a separate instance name, Feishu app/profile, workspace, and watchdog for each bot. Use `-CodexHome` when a bot should run against a non-default Codex home. To build a bot family for one workflow, give each bot a separate workspace but point all of them at the same Codex home.
 
+This pattern is useful for workflow-specific bot families: the bridge code stays shared, while Feishu profiles, attachment directories, runtime logs, and queue state stay isolated per instance. Codex config, AGENTS instructions, skills, MCP settings, and local Codex sessions are managed by the shared Codex home.
+
+Shared Codex home recommendations:
+
+- Put workflow-specific `AGENTS.md`, `config.toml`, and `skills` under the dedicated Codex home.
+- Keep workflow-specific skills as real directories when the workflow must survive changes to the default global skills directory.
+- External tools do not need to live inside the Codex home; register them as MCP servers in that home `config.toml`.
+- After a first start through `start-codex-feishu-bridge.ps1` or the registration script, the instance `launch-config.json` records workspace, profile, and Codex home. Watchdog and manual starts should keep using the same `-CodexHome`.
+
 Example naming:
 
 | Instance | Feishu display name | Workspace | Codex home |
@@ -278,6 +287,10 @@ Example naming:
 | `codex-assistant-2` | `Codex Assistant 2` | `%USERPROFILE%\Documents\Codex\workspaces\feishu-bridge-codex-assistant-2` | default user Codex home |
 | `codex-assistant-old-baike` | `codex助手old-百科` | `%USERPROFILE%\Documents\Codex\workspaces\feishu-bridge-codex-assistant-old-baike` | `%USERPROFILE%\Documents\Codex\codex-homes\codex-assistant-old-baike` |
 | `codex-assistant-old-baike-1` | `codex助手old-百科-1` | `%USERPROFILE%\Documents\Codex\workspaces\feishu-bridge-codex-assistant-old-baike-1` | `%USERPROFILE%\Documents\Codex\codex-homes\codex-assistant-old-baike` |
+| `codex-assistant-old-baike-2` | `codex助手old-百科-2` | `%USERPROFILE%\Documents\Codex\workspaces\feishu-bridge-codex-assistant-old-baike-2` | `%USERPROFILE%\Documents\Codex\codex-homes\codex-assistant-old-baike` |
+| `codex-assistant-old-baike-3` | `codex助手old-百科-3` | `%USERPROFILE%\Documents\Codex\workspaces\feishu-bridge-codex-assistant-old-baike-3` | `%USERPROFILE%\Documents\Codex\codex-homes\codex-assistant-old-baike` |
+| `codex-assistant-old-baike-4` | `codex助手old-百科-4` | `%USERPROFILE%\Documents\Codex\workspaces\feishu-bridge-codex-assistant-old-baike-4` | `%USERPROFILE%\Documents\Codex\codex-homes\codex-assistant-old-baike` |
+| `codex-assistant-old-baike-5` | `codex助手old-百科-5` | `%USERPROFILE%\Documents\Codex\workspaces\feishu-bridge-codex-assistant-old-baike-5` | `%USERPROFILE%\Documents\Codex\codex-homes\codex-assistant-old-baike` |
 
 Register another instance:
 
@@ -415,6 +428,8 @@ Dedicated Codex home, when `-CodexHome` is used:
 <CodexHome>\sessions\
 <CodexHome>\state_5.sqlite
 ```
+
+When multiple instances share one Codex home, they see the same Codex config, skills, MCP settings, and local Codex session/state. The bridge runtime state still remains isolated per instance under `%LOCALAPPDATA%\CodexFeishuBridge\instances\<Name>\...`.
 
 `exec` fallback prompt/output directory:
 
