@@ -21,13 +21,35 @@
 
 ## 旧设备的执行形态
 
-旧设备至少有三种 Bridge 执行形态：
+旧设备历史上出现过 root/default Bridge、普通命名 Bot、百科 Bot 组三种 Bridge 执行形态。当前这台旧设备在 2026-06-23 核对时：
 
-1. root/default Bridge：共享默认 workspace，使用 root runtime 目录。
-2. 普通命名 Bot：每个实例独立 workspace、state、logs，使用默认 Codex Home。
-3. 百科 Bot 组：每个实例独立 workspace、state、logs，但共享百科专用 Codex Home，并镜像到默认 Codex Home 供桌面侧边栏显示。
+1. root/default 数据根目录存在，但当前没有可核到的 root/default `state` 和 `logs` 目录。
+2. 普通命名 Bot 仍然存在：每个实例独立 workspace、state、logs，使用默认 Codex Home。
+3. 百科 Bot 组仍然存在：每个实例独立 workspace、state、logs，但共享百科专用 Codex Home，并镜像到默认 Codex Home 供桌面侧边栏显示。
 
 比较行为时必须比较同一种执行形态。不要把 Desktop 原生线程、root/default Bridge、普通命名 Bot、百科 Bot 的结果混在一起判断。
+
+当前可核到的命名实例：
+
+```text
+codex-assistant-mobile
+codex-assistant-old
+codex-assistant-old1
+codex-assistant-old2
+codex-assistant-old3
+codex-assistant-old4
+codex-assistant-old5
+codex-assistant-old6
+codex-assistant-old7
+codex-assistant-old8
+codex-assistant-old9
+codex-assistant-old-baike
+codex-assistant-old-baike-1
+codex-assistant-old-baike-2
+codex-assistant-old-baike-3
+codex-assistant-old-baike-4
+codex-assistant-old-baike-5
+```
 
 ## 普通实例
 
