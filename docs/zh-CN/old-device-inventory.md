@@ -124,3 +124,23 @@ C:\Users\12644\Documents\Codex\tools\baike-entry-automation
 - 当前 thread 是否续接了旧上下文
 
 同一问题在 Desktop 原生窗口、普通 Bridge、百科 Bridge 上表现不同是可能的，先对齐执行形态再判断。
+
+## GitHub 推送权限
+
+2026-06-23 旧设备新增了一把 GitHub 专用 SSH key，用于从旧设备直接推送本仓库：
+
+| 项 | 值 |
+|---|---|
+| 公钥标题 | `Codex old device 2026-06-23` |
+| Fingerprint | `SHA256:hY5Uil7T+e+ds0GjH2vV4p5q9d6i9Ji2x7t19cMWYuc` |
+| 私钥路径 | `C:\Users\12644\.ssh\id_ed25519_github` |
+| 公钥路径 | `C:\Users\12644\.ssh\id_ed25519_github.pub` |
+| SSH config | `C:\Users\12644\.ssh\config` |
+
+同时修复了 `C:\Users\12644\.ssh\config` 开头的 UTF-8 BOM 问题，修复前备份为：
+
+```text
+C:\Users\12644\.ssh\config.bak-20260623214916
+```
+
+这项变更只影响旧设备本机的 GitHub SSH 推送能力，不会改变新设备已有的 GitHub key 或读取能力。私钥不得提交到任何仓库。

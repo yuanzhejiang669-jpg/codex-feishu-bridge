@@ -22,6 +22,20 @@
 4. `new-device-codex-feishu-bridge-inventory` 和 `old-device-codex-feishu-bridge-inventory` 只作为历史快照。
 5. 运行日志、数据库、session、附件、token、二维码和个人聊天内容永远不进入 GitHub。
 
+## 检查后的更新清单
+
+每次完成一次检查、修复、迁移、部署调整或权限修复后，都按这个表判断要不要更新文档：
+
+| 检查或变更内容 | 必须同步更新 |
+|---|---|
+| Bridge 代码、启动参数、watchdog、侧边栏镜像逻辑变化 | `README.md`、`architecture.md` |
+| 旧设备实例、百科 Bot、旧设备路径、旧设备故障结论变化 | `old-device-inventory.md` |
+| 新设备实例、新设备路径、新设备工具链或新设备对比结论变化 | `new-device-inventory.md` |
+| 凭据、SSH key、GitHub 权限、脱敏范围、禁止提交范围变化 | `security-and-redaction.md` |
+| 文档入口、阅读顺序、飞书入口说明变化 | `README.md`、本文件 |
+
+如果检查后没有事实变化，最终说明里要写清楚“无需更新文档”。如果有事实变化但暂时没有更新文档，也要写明原因。
+
 ## 建议的飞书入口
 
 飞书入口文档可以压缩成下面这类短文本：

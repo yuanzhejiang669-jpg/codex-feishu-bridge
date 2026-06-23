@@ -27,6 +27,20 @@ Codex Feishu Bridge 用来把飞书机器人连接到本机 Codex。它接收飞
 
 不要再把同一套事实分别维护在飞书文档、主项目 README、两个 inventory 仓库里。以后先更新本仓库，再让飞书入口链接到本仓库。
 
+## 检查后的更新规则
+
+每次完成本机检查、Bridge 修复、部署调整、设备迁移或 GitHub 权限修复后，都必须同步检查是否要更新文档。按下面的清单处理：
+
+| 检查或变更内容 | 必须同步更新 |
+|---|---|
+| Bridge 代码、启动参数、watchdog、侧边栏镜像逻辑变化 | `README.md`、`docs/zh-CN/architecture.md` |
+| 旧设备实例、百科 Bot、旧设备路径、旧设备故障结论变化 | `docs/zh-CN/old-device-inventory.md` |
+| 新设备实例、新设备路径、新设备工具链或新设备对比结论变化 | `docs/zh-CN/new-device-inventory.md` |
+| 凭据、SSH key、GitHub 权限、脱敏范围、禁止提交范围变化 | `docs/zh-CN/security-and-redaction.md` |
+| 文档入口、阅读顺序、飞书入口说明变化 | `README.md`、`docs/zh-CN/README.md` |
+
+如果一次检查没有改变事实，也要在最终说明里明确“无需更新文档”。如果改变了事实但暂时不更新文档，必须说明原因。
+
 ## 核心架构
 
 Bridge 面向本机可信环境：

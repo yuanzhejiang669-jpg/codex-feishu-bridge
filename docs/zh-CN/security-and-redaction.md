@@ -67,3 +67,13 @@ Get-ChildItem -Recurse -File | Select-String -Pattern "app_secret|tenant_access_
 ```text
 本仓库已停止作为主要文档源。最新中文说明请查看 codex-feishu-bridge 主仓库的 docs/zh-CN/。
 ```
+
+## 权限修复记录要求
+
+如果为了推送或读取仓库而新增、删除或更换 GitHub SSH key、GitHub token、remote URL、credential helper 或 SSH config，必须更新：
+
+- `README.md` 的“检查后的更新规则”是否仍准确。
+- 本文件的安全边界和禁止提交范围。
+- 对应设备 inventory 中的 GitHub/SSH 权限说明，旧设备写入 `old-device-inventory.md`，新设备写入 `new-device-inventory.md`。
+
+只记录公钥标题、用途、fingerprint 和配置位置；不要记录私钥内容、token、验证码、cookie 或浏览器会话信息。
