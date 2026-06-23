@@ -50,9 +50,13 @@ const CONFIG = {
   streamRecoveryEnabled: (process.env.CODEX_FEISHU_STREAM_RECOVERY || "1") !== "0",
   streamRecoveryMaxAttempts: Number(process.env.CODEX_FEISHU_STREAM_RECOVERY_MAX_ATTEMPTS || "1"),
   syncSidebar: (process.env.CODEX_FEISHU_SYNC_SIDEBAR || "0") !== "0",
+  sidebarReconcileIntervalMs: parseDurationMs(process.env.CODEX_FEISHU_SIDEBAR_RECONCILE_INTERVAL_MS, 60_000),
   syncSessionsFromCodex: (process.env.CODEX_FEISHU_SYNC_SESSIONS_FROM_CODEX || "1") !== "0",
   keepEmptySessionMs: Number(process.env.CODEX_FEISHU_KEEP_EMPTY_SESSION_MS || `${10 * 60_000}`),
   codexHome: path.resolve(process.env.CODEX_HOME || path.join(os.homedir(), ".codex")),
+  desktopCodexHome: String(process.env.CODEX_FEISHU_DESKTOP_CODEX_HOME || "").trim()
+    ? path.resolve(String(process.env.CODEX_FEISHU_DESKTOP_CODEX_HOME).trim())
+    : "",
 };
 
 const logPath = path.join(CONFIG.logDir, "codex-feishu-bridge.log");
@@ -62,12 +66,22 @@ const activeRunsPath = path.join(CONFIG.stateDir, "active-runs.json");
 const pidPath = path.join(CONFIG.stateDir, "bridge.pid");
 const lockPath = path.join(CONFIG.stateDir, "bridge.lock.json");
 const stopPath = path.join(CONFIG.stateDir, "bridge.stop");
-const eventLocksDir = path.join(CONFIG.stateDir, "event-locks");
+const eventLockScope = resolveLarkEventLockScope(CONFIG.larkProfile);
+const eventLocksDir = path.join(DEFAULT_DATA_ROOT, "event-locks", eventLockScope);
 const runtimeDir = path.join(CONFIG.workspace, ".codex-feishu-runtime");
 const outputDir = path.join(runtimeDir, "codex-output");
 const promptDir = path.join(runtimeDir, "codex-prompts");
 const attachmentDir = path.join(CONFIG.workspace, CONFIG.attachmentRelDir);
 const codexStateDbPath = path.join(CONFIG.codexHome, "state_5.sqlite");
+const codexSessionIndexPath = path.join(CONFIG.codexHome, "session_index.jsonl");
+const codexGlobalStatePath = path.join(CONFIG.codexHome, ".codex-global-state.json");
+const codexSidebarLockPath = path.join(CONFIG.codexHome, ".codex-feishu-sidebar-sync.lock");
+const desktopCodexStateDbPath = CONFIG.desktopCodexHome ? path.join(CONFIG.desktopCodexHome, "state_5.sqlite") : "";
+const desktopCodexSessionIndexPath = CONFIG.desktopCodexHome ? path.join(CONFIG.desktopCodexHome, "session_index.jsonl") : "";
+const desktopCodexGlobalStatePath = CONFIG.desktopCodexHome ? path.join(CONFIG.desktopCodexHome, ".codex-global-state.json") : "";
+const desktopCodexSidebarLockPath = CONFIG.desktopCodexHome ? path.join(CONFIG.desktopCodexHome, ".codex-feishu-sidebar-sync.lock") : "";
+const shouldMirrorDesktopCodexHome = Boolean(CONFIG.desktopCodexHome)
+  && !sameResolvedPath(CONFIG.desktopCodexHome, CONFIG.codexHome);
 const codexReasoningLabel = CONFIG.codexReasoning || "config";
 const codexModelLabel = CONFIG.codexModel || resolveCodexConfigModel() || "默认模型";
 
@@ -93,8 +107,11 @@ const stoppedJobs = new Set();
 const REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh"]);
 const FAST_SERVICE_TIER = "fast";
 const STANDARD_SERVICE_TIER = "standard";
+const MIN_SIDEBAR_RECONCILE_INTERVAL_MS = 5_000;
 let shuttingDown = false;
 let activeJobs = 0;
+let sidebarReconcileInFlight = false;
+let sidebarReconcileQueuedReason = "";
 const pendingEvents = [];
 const recalledMessages = new Map();
 const seen = loadSeen();
@@ -110,6 +127,13 @@ const stats = {
   recovered: 0,
   failuresByKind: {},
 };
+
+function sameResolvedPath(left, right) {
+  const normalize = (value) => stripWindowsLongPathPrefix(path.resolve(String(value || "")));
+  const a = normalize(left);
+  const b = normalize(right);
+  return process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b;
+}
 
 function resolveDefaultTools() {
   if (process.platform !== "win32") {
@@ -207,6 +231,27 @@ function withLarkProfile(tool, profile) {
   const name = String(profile || "").trim();
   if (!name) return tool;
   return { ...tool, argsPrefix: [...(tool.argsPrefix || []), "--profile", name] };
+}
+
+function resolveLarkEventLockScope(profile) {
+  const appId = resolveLarkConfigAppId(profile);
+  const raw = appId ? `app-${appId}` : `profile-${String(profile || "default").trim() || "default"}`;
+  return raw.replace(/[^a-zA-Z0-9_.-]/g, "-").slice(0, 96) || "default";
+}
+
+function resolveLarkConfigAppId(profile) {
+  const wanted = String(profile || "").trim();
+  try {
+    const configPath = path.join(os.homedir(), ".lark-cli", "config.json");
+    const parsed = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    const apps = Array.isArray(parsed?.apps) ? parsed.apps : [];
+    const app = wanted
+      ? apps.find((item) => String(item?.name || "").trim() === wanted)
+      : (apps.find((item) => !String(item?.name || "").trim()) || apps[0]);
+    return String(app?.appId || app?.app_id || "").trim();
+  } catch {
+    return "";
+  }
 }
 
 function normalizeRunMode(value) {
@@ -734,6 +779,7 @@ function acquireSingleInstanceLock() {
     pid: process.pid,
     instance: process.env.CODEX_FEISHU_INSTANCE_NAME || "",
     workspace: CONFIG.workspace,
+    codexHome: CONFIG.codexHome,
     larkProfile: CONFIG.larkProfile || "default",
     startedAt: Date.now(),
   };
@@ -3390,46 +3436,30 @@ function buildPrompt(event, session) {
     .map((msg) => `${msg.role === "user" ? "用户" : "助手"}：${msg.content}`)
     .join("\n\n");
 
-  return [
-    "你是通过飞书消息被唤起的本机 Codex。请以接近 Codex 原生 Agent 的方式完成用户任务，而不是只做轻量聊天回复。",
-    "",
-    "执行准则：",
-    "- 默认使用中文，除非用户明确要求其他语言。",
-    "- 对需要检查、研究、网页核验、文件处理、代码修改或多步骤推进的任务，要主动使用可用的工具、MCP、Skills、浏览器控制和本地脚本，而不是只凭记忆回答。",
-    "- 先读取相关 Skill/AGENTS/项目文件，遵循现有流程和工作区约定；尤其是百科、飞书、浏览器、文档、图片等任务，要优先使用对应 Skill 或本地工具链。",
-    "- 需要事实核验时保留可追溯证据；不要把未逐条核验的结论说成已确认。",
-    "- 可以在当前工作区创建、修改、下载或生成任务需要的文件；改动要小而清晰，并在最终回复列出文件变化。",
-    "- 长任务可以分阶段推进，但每一轮都要尽量完成一个可验证节点，不要只给计划。",
-    "- 不要调用 lark-cli、飞书 API 或任何工具把最终答案发回飞书；桥接器会负责发送你的最终回复。",
-    "- 不要在最终回复中描述桥接器流程、读取任务文件、飞书 IM skill 或发送方式；可以简洁说明你使用了哪些用户可理解的工具/Skill/MCP 来完成任务。",
-    "- 如果用户只是打招呼或闲聊，直接自然回复，不要执行额外检查。",
-    "- 不要泄露本机密钥、token、配置文件秘密或飞书 app secret。",
-    "- 如果需要危险写操作、删除、群发、读取大量私人数据，先要求用户明确确认。",
-    "- 最终回复要适合发回飞书：结果优先、证据和文件变化清楚、避免冗长内部日志。",
-    "",
-    "当前会话：",
-    `- id: ${session.id}`,
-    `- title: ${session.title}`,
-    `- workspace: ${CONFIG.workspace}`,
-    "",
-    history ? `最近上下文：\n${history}` : "最近上下文：无",
-    "",
-    "飞书事件信息：",
-    `- chat_type: ${event.chat_type || ""}`,
-    `- chat_id: ${event.chat_id || ""}`,
-    `- sender_id: ${event.sender_id || ""}`,
-    `- message_id: ${event.message_id || event.id || ""}`,
-    `- message_type: ${event.message_type || ""}`,
-    "",
-    attachmentPromptBlock(attachments),
-    "",
-    "用户消息：",
-    content || (attachments.length ? "(attachment only)" : "(empty message)"),
-  ].join("\n");
+  const parts = [];
+  if (history) parts.push(`最近上下文：\n${history}`);
+  parts.push(content || (attachments.length ? "(attachment only)" : "(empty message)"));
+  if (attachments.length) parts.push(attachmentPromptBlock(attachments));
+  return parts.join("\n\n");
 }
 
 function shellQuote(value) {
   return `'${String(value ?? "").replace(/'/g, "''")}'`;
+}
+
+function sqliteLiteral(value) {
+  if (value === null || value === undefined) return "NULL";
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  if (typeof value === "boolean") return value ? "1" : "0";
+  return shellQuote(value);
+}
+
+function replaceWindowsLongPathPrefix(value) {
+  const text = String(value || "");
+  if (process.platform !== "win32") return text;
+  if (/^\\\\\?\\UNC\\/i.test(text)) return `\\\\${text.slice(8)}`;
+  if (/^\\\\\?\\/i.test(text)) return text.slice(4);
+  return text;
 }
 
 function normalizeSpaces(value) {
@@ -3497,6 +3527,45 @@ try:
 finally:
     conn.close()
 `.trim();
+const PYTHON_SQLITE_THREAD_UPSERT_SCRIPT = `
+import json
+import sqlite3
+import sys
+
+db_path = sys.argv[1]
+payload = json.load(sys.stdin)
+columns = payload["columns"]
+values = payload["values"]
+if not columns or "id" not in columns:
+    raise SystemExit("invalid columns")
+
+def safe_value(value):
+    if isinstance(value, str):
+        return value.encode("utf-8", "replace").decode("utf-8")
+    return value
+
+values = [safe_value(value) for value in values]
+
+quoted = ['"' + name.replace('"', '""') + '"' for name in columns]
+placeholders = ", ".join("?" for _ in columns)
+updates = ", ".join(f'{name} = excluded.{name}' for name in quoted if name != '"id"')
+sql = (
+    f'insert into threads ({", ".join(quoted)}) values ({placeholders}) '
+    f'on conflict(id) do update set {updates}'
+)
+
+conn = sqlite3.connect(db_path)
+try:
+    conn.execute("pragma busy_timeout=10000")
+    conn.execute("begin immediate")
+    conn.execute(sql, values)
+    conn.commit()
+except Exception:
+    conn.rollback()
+    raise
+finally:
+    conn.close()
+`.trim();
 
 function pythonSqliteTools() {
   const tools = process.platform === "win32"
@@ -3537,6 +3606,15 @@ async function runSqliteExecTool(tool, dbPath, sql) {
   return await runTool(tool, args, { stdin: sql, timeoutMs: 10_000, attempts: 1 });
 }
 
+async function runSqliteThreadUpsertTool(tool, dbPath, payload) {
+  if (tool === SQLITE3_TOOL) throw new Error("sqlite3 CLI is not used for parameterized thread upserts");
+  return await runTool(tool, ["-c", PYTHON_SQLITE_THREAD_UPSERT_SCRIPT, dbPath], {
+    stdin: JSON.stringify(payload),
+    timeoutMs: 10_000,
+    attempts: 1,
+  });
+}
+
 async function sqliteJson(dbPath, sql) {
   if (!fs.existsSync(dbPath)) return [];
   const tools = [SQLITE3_TOOL, ...pythonSqliteTools()];
@@ -3574,6 +3652,22 @@ async function runSqliteExec(dbPath, sql) {
   return { ok: false, error: failures.join(" | ") };
 }
 
+async function runSqliteThreadUpsert(dbPath, payload) {
+  if (!fs.existsSync(dbPath)) return { ok: false, error: `SQLite database not found: ${dbPath}` };
+  const tools = pythonSqliteTools();
+  const failures = [];
+  for (const tool of tools) {
+    try {
+      const result = await runSqliteThreadUpsertTool(tool, dbPath, payload);
+      if (result.code === 0) return { ok: true, result };
+      failures.push(sqliteFailureText(tool, result));
+    } catch (error) {
+      failures.push(sqliteFailureText(tool, error));
+    }
+  }
+  return { ok: false, error: failures.join(" | ") };
+}
+
 async function sqliteExec(dbPath, sql) {
   const result = await runSqliteExec(dbPath, sql);
   if (!result.ok) log("WARN", "sqlite exec failed", { dbPath, error: result.error });
@@ -3587,17 +3681,494 @@ async function sqliteExecChecked(dbPath, sql) {
 }
 
 async function loadCodexThreadRecord(threadId) {
+  return await loadCodexThreadRecordFromDb(threadId, codexStateDbPath);
+}
+
+async function loadCodexThreadRecordFromDb(threadId, dbPath = codexStateDbPath) {
   const rows = await sqliteJson(
-    codexStateDbPath,
+    dbPath,
     [
-      "select id, title, rollout_path, cwd, model_provider, archived,",
-      "created_at, updated_at, created_at_ms, updated_at_ms",
+      "select *",
       "from threads",
       `where id = ${shellQuote(threadId)}`,
       "limit 1;",
     ].join(" "),
   );
   return rows[0] || null;
+}
+
+function codexThreadBelongsToThisBridge(record) {
+  if (!record) return false;
+  const cwd = stripWindowsLongPathPrefix(record.cwd || "");
+  const workspace = stripWindowsLongPathPrefix(CONFIG.workspace || "");
+  if (!cwd || !workspace) return false;
+  const cwdResolved = path.resolve(cwd).toLowerCase();
+  const workspaceResolved = path.resolve(workspace).toLowerCase();
+  return cwdResolved === workspaceResolved;
+}
+
+function codexThreadHasVisibleText(record) {
+  return Boolean(String(record?.preview || record?.title || "").trim());
+}
+
+function codexThreadTitleForIndex(record, preferredTitle = "") {
+  return cleanCodexThreadTitle(preferredTitle)
+    || cleanCodexThreadTitle(record?.title)
+    || cleanCodexThreadTitle(record?.first_user_message)
+    || cleanCodexThreadTitle(record?.preview)
+    || "Untitled";
+}
+
+function codexThreadUpdatedIso(record) {
+  const ms = codexThreadTime(record, "updated") || codexThreadTime(record, "created") || Date.now();
+  return new Date(ms).toISOString();
+}
+
+function codexWorkspaceRootHint() {
+  const workspace = stripWindowsLongPathPrefix(CONFIG.workspace || "");
+  const documentsCodex = path.join(os.homedir(), "Documents", "Codex");
+  const workspaceRoot = path.join(documentsCodex, "workspaces");
+  const resolvedWorkspace = path.resolve(workspace || CONFIG.workspace);
+  const relativeToWorkspaceRoot = path.relative(workspaceRoot, resolvedWorkspace);
+  if (relativeToWorkspaceRoot && !relativeToWorkspaceRoot.startsWith("..") && !path.isAbsolute(relativeToWorkspaceRoot)) {
+    return documentsCodex;
+  }
+  return path.dirname(resolvedWorkspace);
+}
+
+async function withCodexSidebarLock(fn, codexHome = CONFIG.codexHome, lockPath = codexSidebarLockPath) {
+  fs.mkdirSync(codexHome, { recursive: true });
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    let fd = null;
+    try {
+      fd = fs.openSync(lockPath, "wx");
+      fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, startedAt: Date.now() }), "utf8");
+      return await fn();
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+      try {
+        const stat = fs.statSync(lockPath);
+        if (Date.now() - stat.mtimeMs > 30_000) fs.rmSync(lockPath, { force: true });
+      } catch {}
+      await delay(100);
+    } finally {
+      if (fd !== null) {
+        try {
+          fs.closeSync(fd);
+        } catch {}
+        try {
+          fs.rmSync(lockPath, { force: true });
+        } catch {}
+      }
+    }
+  }
+  throw new Error(`timed out waiting for Codex sidebar sync lock: ${lockPath}`);
+}
+
+function readCodexSessionIndexTitle(threadId, sessionIndexPath = codexSessionIndexPath) {
+  const id = String(threadId || "").trim();
+  if (!id || !fs.existsSync(sessionIndexPath)) return "";
+
+  const lines = fs.readFileSync(sessionIndexPath, "utf8")
+    .replace(/\r\n/g, "\n")
+    .split("\n");
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    try {
+      const parsed = JSON.parse(line);
+      if (parsed?.id === id) return cleanCodexThreadTitle(parsed.thread_name);
+    } catch {}
+  }
+  return "";
+}
+
+function syncCodexSessionIndex(record, sessionIndexPath = codexSessionIndexPath, options = {}) {
+  const id = String(record?.id || "").trim();
+  if (!id) return false;
+
+  const entry = JSON.stringify({
+    id,
+    thread_name: codexThreadTitleForIndex(record, options.threadName || ""),
+    updated_at: codexThreadUpdatedIso(record),
+  });
+
+  let lines = [];
+  if (fs.existsSync(sessionIndexPath)) {
+    lines = fs.readFileSync(sessionIndexPath, "utf8")
+      .replace(/\r\n/g, "\n")
+      .split("\n");
+    if (lines.at(-1) === "") lines.pop();
+  }
+
+  let replaced = false;
+  const nextLines = [];
+  for (const line of lines) {
+    if (!line.trim()) {
+      nextLines.push(line);
+      continue;
+    }
+    try {
+      const parsed = JSON.parse(line);
+      if (parsed?.id === id) {
+        if (!replaced) {
+          nextLines.push(entry);
+          replaced = true;
+        }
+        continue;
+      }
+    } catch {}
+    nextLines.push(line);
+  }
+  if (!replaced) nextLines.push(entry);
+
+  const next = `${nextLines.join("\n")}\n`;
+  const previous = fs.existsSync(sessionIndexPath) ? fs.readFileSync(sessionIndexPath, "utf8") : "";
+  if (previous === next) return false;
+  fs.writeFileSync(sessionIndexPath, next, "utf8");
+  return true;
+}
+
+function syncCodexGlobalState(record, globalStatePath = codexGlobalStatePath) {
+  const id = String(record?.id || "").trim();
+  if (!id) return false;
+
+  let state = {};
+  if (fs.existsSync(globalStatePath)) {
+    const raw = fs.readFileSync(globalStatePath, "utf8").trim();
+    if (raw) state = JSON.parse(raw);
+  }
+
+  let changed = false;
+  if (!Array.isArray(state["projectless-thread-ids"])) {
+    state["projectless-thread-ids"] = [];
+    changed = true;
+  }
+  if (!state["projectless-thread-ids"].includes(id)) {
+    state["projectless-thread-ids"].push(id);
+    changed = true;
+  }
+
+  const rootHint = codexWorkspaceRootHint();
+  if (!state["thread-workspace-root-hints"] || typeof state["thread-workspace-root-hints"] !== "object") {
+    state["thread-workspace-root-hints"] = {};
+    changed = true;
+  }
+  if (state["thread-workspace-root-hints"][id] !== rootHint) {
+    state["thread-workspace-root-hints"][id] = rootHint;
+    changed = true;
+  }
+
+  const outputPath = path.join(stripWindowsLongPathPrefix(CONFIG.workspace), "outputs");
+  if (!state["thread-projectless-output-directories"] || typeof state["thread-projectless-output-directories"] !== "object") {
+    state["thread-projectless-output-directories"] = {};
+    changed = true;
+  }
+  if (state["thread-projectless-output-directories"][id] !== outputPath) {
+    state["thread-projectless-output-directories"][id] = outputPath;
+    changed = true;
+  }
+
+  if (!changed) return false;
+  fs.writeFileSync(globalStatePath, JSON.stringify(state), "utf8");
+  return true;
+}
+
+async function mirrorCodexThreadRecordToDesktopHome(record) {
+  if (!shouldMirrorDesktopCodexHome) return false;
+  if (!record?.id || !fs.existsSync(desktopCodexStateDbPath)) return false;
+
+  const desktopRecord = {
+    ...record,
+    rollout_path: mirrorCodexRolloutToDesktopHome(record),
+  };
+  const sourceColumns = Object.keys(record);
+  const targetColumns = await sqliteTableColumns("threads", desktopCodexStateDbPath);
+  const columns = sourceColumns.filter((name) => targetColumns.has(name));
+  if (!columns.includes("id") || !columns.includes("rollout_path")) return false;
+
+  const result = await runSqliteThreadUpsert(desktopCodexStateDbPath, {
+    columns,
+    values: columns.map((name) => desktopRecord[name] ?? null),
+  });
+  if (!result.ok) {
+    log("WARN", "desktop Codex home thread mirror failed", {
+      threadId: record.id,
+      sourceCodexHome: CONFIG.codexHome,
+      desktopCodexHome: CONFIG.desktopCodexHome,
+      desktopCodexStateDbPath,
+      error: result.error,
+    });
+    return false;
+  }
+  return true;
+}
+
+function mirrorCodexRolloutToDesktopHome(record) {
+  const sourcePath = replaceWindowsLongPathPrefix(record?.rollout_path || "");
+  if (!sourcePath || !path.isAbsolute(sourcePath) || !fs.existsSync(sourcePath)) return record?.rollout_path || "";
+
+  const sourceSessionsRoot = path.join(CONFIG.codexHome, "sessions");
+  const sourceRootResolved = fs.existsSync(sourceSessionsRoot)
+    ? fs.realpathSync.native(sourceSessionsRoot)
+    : path.resolve(sourceSessionsRoot);
+  const sourceResolved = fs.realpathSync.native(sourcePath);
+  const relative = path.relative(sourceRootResolved, sourceResolved);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
+    log("WARN", "desktop Codex home rollout mirror skipped; source rollout outside source sessions", {
+      threadId: record?.id || "",
+      rolloutPath: sourcePath,
+      sourceSessionsRoot,
+    });
+    return record?.rollout_path || "";
+  }
+
+  const targetPath = path.join(CONFIG.desktopCodexHome, "sessions", relative);
+  fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+  const sourceStat = fs.statSync(sourceResolved);
+  const targetStat = fs.existsSync(targetPath) ? fs.statSync(targetPath) : null;
+  if (!targetStat || targetStat.size !== sourceStat.size || targetStat.mtimeMs < sourceStat.mtimeMs) {
+    fs.copyFileSync(sourceResolved, targetPath);
+  }
+  return targetPath;
+}
+
+async function mirrorCodexDesktopSidebarIndexed(record, reason = "app-server") {
+  if (!shouldMirrorDesktopCodexHome) return false;
+  if (!record?.id) return false;
+  if (!fs.existsSync(desktopCodexStateDbPath)) {
+    log("WARN", "desktop Codex home mirror skipped; target state database not found", {
+      threadId: record.id,
+      desktopCodexHome: CONFIG.desktopCodexHome,
+      desktopCodexStateDbPath,
+    });
+    return false;
+  }
+
+  try {
+    const changed = await withCodexSidebarLock(async () => {
+      const threadRecordChanged = await mirrorCodexThreadRecordToDesktopHome(record);
+      const desktopRecord = await loadCodexThreadRecordFromDb(record.id, desktopCodexStateDbPath) || record;
+      const sourceThreadName = readCodexSessionIndexTitle(record.id, codexSessionIndexPath);
+      const sessionIndexChanged = syncCodexSessionIndex(desktopRecord, desktopCodexSessionIndexPath, {
+        threadName: sourceThreadName,
+      });
+      const globalStateChanged = syncCodexGlobalState(desktopRecord, desktopCodexGlobalStatePath);
+      return { threadRecordChanged, sessionIndexChanged, globalStateChanged };
+    }, CONFIG.desktopCodexHome, desktopCodexSidebarLockPath);
+
+    if (changed.threadRecordChanged || changed.sessionIndexChanged || changed.globalStateChanged) {
+      log("INFO", "desktop Codex home sidebar mirror synced", {
+        threadId: record.id,
+        reason,
+        sourceCodexHome: CONFIG.codexHome,
+        desktopCodexHome: CONFIG.desktopCodexHome,
+        workspace: CONFIG.workspace,
+        threadRecordChanged: changed.threadRecordChanged,
+        sessionIndexChanged: changed.sessionIndexChanged,
+        globalStateChanged: changed.globalStateChanged,
+      });
+      return true;
+    }
+  } catch (error) {
+    log("WARN", "desktop Codex home sidebar mirror failed", {
+      threadId: record.id,
+      reason,
+      sourceCodexHome: CONFIG.codexHome,
+      desktopCodexHome: CONFIG.desktopCodexHome,
+      error: String(error?.stack || error),
+    });
+  }
+  return false;
+}
+
+async function ensureCodexDesktopSidebarIndexed(threadId, reason = "app-server") {
+  const id = String(threadId || "").trim();
+  if (!id || !fs.existsSync(codexStateDbPath)) return false;
+
+  const record = await loadCodexThreadRecord(id);
+  if (!record) return false;
+  if (!codexThreadBelongsToThisBridge(record)) return false;
+  if (Number(record.archived || 0) !== 0) return false;
+  if (!codexThreadHasVisibleText(record)) return false;
+
+  try {
+    const changed = await withCodexSidebarLock(async () => {
+      const sessionIndexChanged = syncCodexSessionIndex(record);
+      const globalStateChanged = syncCodexGlobalState(record);
+      return { sessionIndexChanged, globalStateChanged };
+    });
+    const mirrored = await mirrorCodexDesktopSidebarIndexed(record, reason);
+    if (changed.sessionIndexChanged || changed.globalStateChanged) {
+      log("INFO", "codex desktop sidebar index synced", {
+        threadId: id,
+        reason,
+        codexHome: CONFIG.codexHome,
+        workspace: CONFIG.workspace,
+        sessionIndexChanged: changed.sessionIndexChanged,
+        globalStateChanged: changed.globalStateChanged,
+      });
+      return true;
+    }
+    if (mirrored) return true;
+  } catch (error) {
+    log("WARN", "codex desktop sidebar index sync failed", {
+      threadId: id,
+      reason,
+      codexHome: CONFIG.codexHome,
+      error: String(error?.stack || error),
+    });
+  }
+  return await mirrorCodexDesktopSidebarIndexed(record, reason);
+}
+
+async function ensureAppServerThreadVisible(threadId, reason = "app-server") {
+  const id = String(threadId || "").trim();
+  if (!id || !fs.existsSync(codexStateDbPath)) return false;
+
+  const record = await loadCodexThreadRecord(id);
+  if (!record) return false;
+  if (!codexThreadBelongsToThisBridge(record)) return false;
+  if (Number(record.archived || 0) !== 0) return false;
+  if (!codexThreadHasVisibleText(record)) return false;
+
+  const source = String(record.source || "");
+  const threadSource = String(record.thread_source || "");
+
+  let changed = false;
+  if (Number(record.has_user_event || 0) !== 1 || source !== "vscode" || threadSource !== "user") {
+    const sql = [
+      "pragma busy_timeout=10000;",
+      "begin immediate;",
+      "update threads set",
+      "  has_user_event = 1,",
+      "  source = 'vscode',",
+      "  thread_source = 'user'",
+      `where id = ${shellQuote(id)}`,
+      "  and archived = 0",
+      "  and (preview <> '' or title <> '')",
+      `  and cwd = ${shellQuote(record.cwd || "")};`,
+      "commit;",
+      "",
+    ].join("\n");
+
+    if (await sqliteExec(codexStateDbPath, sql)) {
+      changed = true;
+      log("INFO", "codex app-server thread visibility repaired", {
+        threadId: id,
+        reason,
+        codexHome: CONFIG.codexHome,
+        codexStateDbPath,
+        workspace: CONFIG.workspace,
+        cwd: record.cwd || "",
+        previousHasUserEvent: record.has_user_event ?? "",
+      });
+    }
+  }
+
+  const indexChanged = await ensureCodexDesktopSidebarIndexed(id, reason);
+  return changed || indexChanged;
+}
+
+async function verifyAppServerThreadRegistration(threadId) {
+  const id = String(threadId || "").trim();
+  if (!id) return;
+
+  const record = await loadCodexThreadRecord(id);
+  if (!record) {
+    log("WARN", "codex thread missing from target Codex home", {
+      threadId: id,
+      codexHome: CONFIG.codexHome,
+      codexStateDbPath,
+      workspace: CONFIG.workspace,
+    });
+    return;
+  }
+
+  const rolloutPath = String(record.rollout_path || "");
+  log("INFO", "codex thread registered in target Codex home", {
+    threadId: id,
+    codexHome: CONFIG.codexHome,
+    codexStateDbPath,
+    workspace: CONFIG.workspace,
+    cwd: record.cwd || "",
+    rolloutPath,
+    rolloutExists: rolloutPath ? fs.existsSync(stripWindowsLongPathPrefix(rolloutPath)) : false,
+    archived: record.archived ?? "",
+    hasUserEvent: record.has_user_event ?? "",
+    previewLength: String(record.preview || "").length,
+  });
+}
+
+async function listVisibleCodexThreadRecordsForBridge() {
+  if (!fs.existsSync(codexStateDbPath)) return [];
+
+  const cwd = stripWindowsLongPathPrefix(CONFIG.workspace || "");
+  if (!cwd) return [];
+  const dbCwd = process.platform === "win32" ? `\\\\?\\${cwd}` : cwd;
+  const rows = await sqliteJson(
+    codexStateDbPath,
+    [
+      "select *",
+      "from threads",
+      "where archived = 0",
+      "  and (preview <> '' or title <> '')",
+      `  and (cwd = ${shellQuote(cwd)} or cwd = ${shellQuote(dbCwd)})`,
+      "order by coalesce(updated_at_ms, created_at_ms, 0) desc, updated_at desc",
+      `limit ${Math.max(1, CONFIG.listLimit)};`,
+    ].join(" "),
+  );
+
+  return rows.filter((record) =>
+    codexThreadBelongsToThisBridge(record)
+    && Number(record.archived || 0) === 0
+    && codexThreadHasVisibleText(record)
+  );
+}
+
+async function reconcileCodexDesktopSidebarIndexes(reason = "startup") {
+  if (!fs.existsSync(codexStateDbPath)) return false;
+  if (sidebarReconcileInFlight) {
+    sidebarReconcileQueuedReason = reason;
+    return false;
+  }
+
+  sidebarReconcileInFlight = true;
+  try {
+    const records = await listVisibleCodexThreadRecordsForBridge();
+    let changed = false;
+    for (const record of records) {
+      changed = await ensureCodexDesktopSidebarIndexed(record.id, reason) || changed;
+    }
+    if (records.length || changed) {
+      log("INFO", "codex desktop sidebar indexes reconciled", {
+        reason,
+        codexHome: CONFIG.codexHome,
+        workspace: CONFIG.workspace,
+        checked: records.length,
+        changed,
+      });
+    }
+    return changed;
+  } catch (error) {
+    log("WARN", "codex desktop sidebar reconcile failed", {
+      reason,
+      codexHome: CONFIG.codexHome,
+      workspace: CONFIG.workspace,
+      error: String(error?.stack || error),
+    });
+    return false;
+  } finally {
+    sidebarReconcileInFlight = false;
+    const queuedReason = sidebarReconcileQueuedReason;
+    sidebarReconcileQueuedReason = "";
+    if (queuedReason) {
+      setTimeout(() => {
+        reconcileCodexDesktopSidebarIndexes(`${queuedReason}/queued`).catch((error) => {
+          log("WARN", "queued codex desktop sidebar reconcile failed", { error: String(error?.stack || error) });
+        });
+      }, 250).unref?.();
+    }
+  }
 }
 
 async function codexTableSet() {
@@ -3608,9 +4179,9 @@ async function codexTableSet() {
   return new Set(rows.map((row) => String(row.name || "")).filter(Boolean));
 }
 
-async function sqliteTableColumns(tableName) {
+async function sqliteTableColumns(tableName, dbPath = codexStateDbPath) {
   const safeName = String(tableName || "").replace(/"/g, "\"\"");
-  const rows = await sqliteJson(codexStateDbPath, `PRAGMA table_info("${safeName}");`);
+  const rows = await sqliteJson(dbPath, `PRAGMA table_info("${safeName}");`);
   return new Set(rows.map((row) => String(row.name || "")).filter(Boolean));
 }
 
@@ -3813,10 +4384,14 @@ async function patchCodexRolloutForSidebar(threadId, promptFile, title) {
 }
 
 async function syncCodexSidebarThread({ event, session, promptFile, outFile, stdoutRaw }) {
-  if (!CONFIG.syncSidebar) return;
   const threadId = await findCodexThreadIdForPrompt(promptFile, stdoutRaw);
   if (!threadId) {
     log("WARN", "sidebar sync skipped; codex thread not found", { messageId: event.message_id || event.id, sessionId: session.id, promptFile });
+    return;
+  }
+
+  if (!CONFIG.syncSidebar) {
+    await ensureAppServerThreadVisible(threadId, "exec/completed");
     return;
   }
 
@@ -3855,6 +4430,7 @@ async function syncCodexSidebarThread({ event, session, promptFile, outFile, std
   } catch (error) {
     log("WARN", "sidebar rollout patch failed", { threadId, sessionId: session.id, error: String(error?.stack || error) });
   }
+  await ensureAppServerThreadVisible(threadId, "exec/completed");
 }
 
 class AppServerClient {
@@ -3877,6 +4453,7 @@ class AppServerClient {
       cwd: this.cwd,
       env: {
         ...process.env,
+        CODEX_HOME: CONFIG.codexHome,
         CODEX_FEISHU_BRIDGE: "1",
       },
       windowsHide: true,
@@ -4103,16 +4680,9 @@ function appServerUserText(event, userContent) {
   const text = String(userContent || userTextFromContent(event.content) || "").trim();
   const attachments = Array.isArray(event.attachments) ? event.attachments : [];
   if (!text && !attachments.length) return "";
-  const marker = [
-    "",
-    "---",
-    "来源：飞书消息。请直接按用户意图完成任务，最终回复适合发回飞书；不要调用 lark-cli 或飞书 API 发送最终答案。",
-    `message_id: ${event.message_id || event.id || ""}`,
-  ].join("\n");
   const parts = [];
   if (text) parts.push(text);
   if (attachments.length) parts.push(attachmentPromptBlock(attachments));
-  parts.push(marker.trimStart());
   return parts.join("\n\n");
 }
 
@@ -4976,6 +5546,8 @@ async function startOrResumeAppServerThread(client, session) {
   if (session.codexThreadId) {
     try {
       const resumed = await client.request("thread/resume", appServerResumeParams(session), 60_000);
+      await verifyAppServerThreadRegistration(resumed.thread.id);
+      await ensureAppServerThreadVisible(resumed.thread.id, "thread/resume");
       return resumed.thread.id;
     } catch (error) {
       log("WARN", "app-server thread resume failed; starting new thread", {
@@ -4992,6 +5564,8 @@ async function startOrResumeAppServerThread(client, session) {
   session.codexThreadId = started.thread.id;
   session.updatedAt = Date.now();
   saveSessions();
+  await verifyAppServerThreadRegistration(started.thread.id);
+  await ensureAppServerThreadVisible(started.thread.id, "thread/start");
   return started.thread.id;
 }
 
@@ -5098,6 +5672,7 @@ async function runCodexAppServer(event, session, state = null, onState = null, o
     const finalText = resultTextFromState(liveState);
     ensureRunDone(liveState, finalText);
     liveState.meta.durationMs = durationMs;
+    await ensureAppServerThreadVisible(threadId, "turn/completed");
     if (state) {
       await flushState();
     }
@@ -5205,7 +5780,7 @@ async function runCodex(event, session, state = null, onState = null) {
   }
   if (CONFIG.disableMcp) args.push("-c", "mcp_servers={}");
   args.push("--");
-  args.push(`读取这个 UTF-8 任务文件，并按任务文件中的执行准则完成用户任务。要像 Codex 原生 Agent 一样主动使用可用工具、MCP、Skills、浏览器控制和本地文件完成需要核验或改动的工作。最终只输出要发给飞书用户的回复文本；不要描述读取任务文件、桥接器、飞书 IM skill 或发送流程。任务文件：${promptFile}`);
+  args.push(`读取这个 UTF-8 任务文件，并完成用户任务。任务文件：${promptFile}`);
 
   const startedAt = Date.now();
   log("INFO", "starting codex", {
@@ -5685,7 +6260,7 @@ async function handleEvent(rawEvent) {
     }
   }
 
-  if (!card) {
+  if (false && !card) {
     await sendMarkdown(
       chatId,
       [
@@ -7229,6 +7804,7 @@ function startConsumer() {
   log("INFO", "starting bridge", {
     workspace: CONFIG.workspace,
     codexHome: CONFIG.codexHome,
+    desktopCodexHome: CONFIG.desktopCodexHome || "",
     eventKeys: CONFIG.eventKeys,
     larkProfile: CONFIG.larkProfile || "default",
     larkCli: toolLabel(CONFIG.larkCli),
@@ -7247,8 +7823,10 @@ function startConsumer() {
     showFinalSteps: CONFIG.showFinalSteps,
     replyToMessage: CONFIG.replyToMessage,
     replyInThread: CONFIG.useThreadReply,
+    sidebarReconcileIntervalMs: CONFIG.sidebarReconcileIntervalMs,
   });
 
+  startSidebarReconciler();
   for (const eventKey of CONFIG.eventKeys) startEventConsumer(eventKey);
 
   const stopTimer = setInterval(() => {
@@ -7262,6 +7840,55 @@ function startConsumer() {
   }, 1000);
   stopTimer.unref?.();
   shutdownCallbacks.add(() => clearInterval(stopTimer));
+}
+
+function startSidebarReconciler() {
+  reconcileCodexDesktopSidebarIndexes("startup").catch((error) => {
+    log("WARN", "startup codex desktop sidebar reconcile failed", { error: String(error?.stack || error) });
+  });
+
+  const intervalMs = Math.max(
+    MIN_SIDEBAR_RECONCILE_INTERVAL_MS,
+    Number(CONFIG.sidebarReconcileIntervalMs || 0),
+  );
+  if (intervalMs > 0) {
+    const timer = setInterval(() => {
+      reconcileCodexDesktopSidebarIndexes("interval").catch((error) => {
+        log("WARN", "interval codex desktop sidebar reconcile failed", { error: String(error?.stack || error) });
+      });
+    }, intervalMs);
+    timer.unref?.();
+    shutdownCallbacks.add(() => clearInterval(timer));
+  }
+
+  watchCodexGlobalStateForSidebarReconcile(codexGlobalStatePath, "codex-home");
+  if (shouldMirrorDesktopCodexHome) {
+    watchCodexGlobalStateForSidebarReconcile(desktopCodexGlobalStatePath, "desktop-codex-home");
+  }
+}
+
+function watchCodexGlobalStateForSidebarReconcile(globalStatePath, label) {
+  if (!globalStatePath || !fs.existsSync(path.dirname(globalStatePath))) return;
+  try {
+    const watcher = fs.watch(globalStatePath, { persistent: false }, () => {
+      setTimeout(() => {
+        reconcileCodexDesktopSidebarIndexes(`global-state/${label}`).catch((error) => {
+          log("WARN", "global-state codex desktop sidebar reconcile failed", {
+            label,
+            globalStatePath,
+            error: String(error?.stack || error),
+          });
+        });
+      }, 500).unref?.();
+    });
+    shutdownCallbacks.add(() => watcher.close());
+  } catch (error) {
+    log("WARN", "codex global state watcher unavailable", {
+      label,
+      globalStatePath,
+      error: String(error?.stack || error),
+    });
+  }
 }
 
 function startEventConsumer(eventKey) {

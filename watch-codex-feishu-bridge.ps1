@@ -3,6 +3,7 @@ param(
   [string]$LarkProfile = "",
   [string]$Workspace = "",
   [string]$CodexHome = "",
+  [string]$DesktopCodexHome = "",
   [string]$StartScript = (Join-Path $PSScriptRoot "start-codex-feishu-bridge.ps1"),
   [string]$StopScript = (Join-Path $PSScriptRoot "stop-codex-feishu-bridge.ps1"),
   [string]$Sandbox = "danger-full-access",
@@ -66,6 +67,9 @@ function Read-JsonFile {
 $savedLaunchConfig = Read-JsonFile $launchConfigFile
 if (-not $CodexHome.Trim() -and $savedLaunchConfig -and [string]$savedLaunchConfig.codexHome -and ([string]$savedLaunchConfig.codexHome).Trim()) {
   $CodexHome = ([string]$savedLaunchConfig.codexHome).Trim()
+}
+if (-not $DesktopCodexHome.Trim() -and $savedLaunchConfig -and [string]$savedLaunchConfig.desktopCodexHome -and ([string]$savedLaunchConfig.desktopCodexHome).Trim()) {
+  $DesktopCodexHome = ([string]$savedLaunchConfig.desktopCodexHome).Trim()
 }
 
 function Write-WatchdogLog {
@@ -375,6 +379,7 @@ function Restart-Bridge {
     if ($LarkProfile.Trim()) { $startArgs += @("-LarkProfile", $LarkProfile.Trim()) }
     if ($Workspace.Trim()) { $startArgs += @("-Workspace", $Workspace) }
     if ($CodexHome.Trim()) { $startArgs += @("-CodexHome", $CodexHome.Trim()) }
+    if ($DesktopCodexHome.Trim()) { $startArgs += @("-DesktopCodexHome", $DesktopCodexHome.Trim()) }
     if ($DisableMcp) { $startArgs += "-DisableMcp" }
     & powershell.exe @startArgs | ForEach-Object {
       Write-WatchdogLog "start: $_"

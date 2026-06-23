@@ -3,6 +3,7 @@ param(
   [string]$LarkProfile = "",
   [string]$Workspace = "",
   [string]$CodexHome = "",
+  [string]$DesktopCodexHome = "",
   [string]$Sandbox = "danger-full-access",
   [ValidateSet("app-server", "auto", "exec")]
   [string]$RunMode = "app-server",
@@ -30,6 +31,7 @@ $ErrorActionPreference = "Stop"
 $script = Join-Path $PSScriptRoot "codex-feishu-bridge.mjs"
 $workspaceWasProvided = $Workspace.Trim().Length -gt 0
 $codexHomeWasProvided = $CodexHome.Trim().Length -gt 0
+$desktopCodexHomeWasProvided = $DesktopCodexHome.Trim().Length -gt 0
 function Get-SafeInstanceName([string]$RawName) {
   $safe = ($RawName.Trim() -replace '[^A-Za-z0-9_.-]', '-').Trim('-')
   if (-not $safe) {
@@ -49,7 +51,7 @@ if ($Name.Trim()) {
   $safeName = ""
   $dataRoot = $baseDataRoot
   if (-not $Workspace.Trim()) {
-    $Workspace = (Get-Location).Path
+    $Workspace = Join-Path (Join-Path $env:USERPROFILE "Documents\Codex\workspaces") "feishu-bridge"
   }
 }
 
@@ -101,7 +103,8 @@ function Save-LaunchConfig {
     [string]$InstanceName,
     [string]$WorkspacePath,
     [string]$Profile,
-    [string]$CodexHomePath
+    [string]$CodexHomePath,
+    [string]$DesktopCodexHomePath
   )
 
   $payload = [ordered]@{
@@ -109,6 +112,7 @@ function Save-LaunchConfig {
     workspace = $WorkspacePath
     larkProfile = $Profile
     codexHome = $CodexHomePath
+    desktopCodexHome = $DesktopCodexHomePath
     updatedAt = (Get-Date).ToString("o")
   }
   $payload | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $launchConfigFile -Encoding UTF8
@@ -120,6 +124,9 @@ if (-not $workspaceWasProvided -and $savedLaunchConfig -and [string]$savedLaunch
 }
 if (-not $codexHomeWasProvided -and $savedLaunchConfig -and [string]$savedLaunchConfig.codexHome -and ([string]$savedLaunchConfig.codexHome).Trim()) {
   $CodexHome = ([string]$savedLaunchConfig.codexHome).Trim()
+}
+if (-not $desktopCodexHomeWasProvided -and $savedLaunchConfig -and [string]$savedLaunchConfig.desktopCodexHome -and ([string]$savedLaunchConfig.desktopCodexHome).Trim()) {
+  $DesktopCodexHome = ([string]$savedLaunchConfig.desktopCodexHome).Trim()
 }
 New-Item -ItemType Directory -Force -Path $Workspace | Out-Null
 
@@ -133,8 +140,18 @@ $resolvedCodexHome = ""
 if ($CodexHome.Trim()) {
   New-Item -ItemType Directory -Force -Path $CodexHome | Out-Null
   $resolvedCodexHome = (Resolve-Path -LiteralPath $CodexHome).Path
+} else {
+  $defaultCodexHome = Join-Path $env:USERPROFILE ".codex"
+  New-Item -ItemType Directory -Force -Path $defaultCodexHome | Out-Null
+  $resolvedCodexHome = (Resolve-Path -LiteralPath $defaultCodexHome).Path
 }
-Save-LaunchConfig -InstanceName $safeName -WorkspacePath $resolvedWorkspace -Profile $resolvedLarkProfile -CodexHomePath $resolvedCodexHome
+
+$resolvedDesktopCodexHome = ""
+if ($DesktopCodexHome.Trim()) {
+  New-Item -ItemType Directory -Force -Path $DesktopCodexHome | Out-Null
+  $resolvedDesktopCodexHome = (Resolve-Path -LiteralPath $DesktopCodexHome).Path
+}
+Save-LaunchConfig -InstanceName $safeName -WorkspacePath $resolvedWorkspace -Profile $resolvedLarkProfile -CodexHomePath $resolvedCodexHome -DesktopCodexHomePath $resolvedDesktopCodexHome
 
 function Resolve-OfficialCodexCliBin {
   $packages = @(Get-AppxPackage -Name "OpenAI.Codex" -ErrorAction SilentlyContinue)
@@ -220,8 +237,11 @@ if (Test-Path $pidFile) {
 
 $env:CODEX_FEISHU_WORKSPACE = $resolvedWorkspace
 $env:CODEX_FEISHU_INSTANCE_NAME = if ($safeName) { $safeName } else { "default" }
-if ($resolvedCodexHome) {
-  $env:CODEX_HOME = $resolvedCodexHome
+$env:CODEX_HOME = $resolvedCodexHome
+if ($resolvedDesktopCodexHome) {
+  $env:CODEX_FEISHU_DESKTOP_CODEX_HOME = $resolvedDesktopCodexHome
+} else {
+  Remove-Item Env:CODEX_FEISHU_DESKTOP_CODEX_HOME -ErrorAction SilentlyContinue
 }
 if ($resolvedLarkProfile) {
   $env:CODEX_FEISHU_LARK_PROFILE = $resolvedLarkProfile
@@ -285,6 +305,7 @@ Write-Host "Instance: $($env:CODEX_FEISHU_INSTANCE_NAME)"
 Write-Host "Lark profile: $(if ($env:CODEX_FEISHU_LARK_PROFILE) { $env:CODEX_FEISHU_LARK_PROFILE } else { 'default/current' })"
 Write-Host "Workspace: $($env:CODEX_FEISHU_WORKSPACE)"
 Write-Host "Codex home: $(if ($env:CODEX_HOME) { $env:CODEX_HOME } else { 'default' })"
+Write-Host "Desktop Codex home: $(if ($env:CODEX_FEISHU_DESKTOP_CODEX_HOME) { $env:CODEX_FEISHU_DESKTOP_CODEX_HOME } else { 'disabled' })"
 Write-Host "Codex CLI: $($env:CODEX_CLI_BIN)"
 Write-Host "Run mode: $($env:CODEX_FEISHU_RUN_MODE)"
 Write-Host "Sandbox: $($env:CODEX_FEISHU_SANDBOX)"
