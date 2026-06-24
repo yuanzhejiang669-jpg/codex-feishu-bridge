@@ -72,6 +72,42 @@ sqlite3 --version
 lark-cli event consume im.message.receive_v1 --as bot --timeout 60s
 ```
 
+## 部分 bot 重启后不回复
+
+如果普通 bot 正常，但某一组 bot 重启后不回复，优先检查这组实例有没有对应的 Windows watchdog 计划任务：
+
+```powershell
+Get-ScheduledTask | Where-Object { $_.TaskName -like 'CodexFeishuBridgeWatchdog-*' }
+```
+
+旧设备上每个命名实例都应有自己的任务。任务定义文件位于：
+
+```text
+C:\Windows\System32\Tasks
+```
+
+实际调用的 watchdog 脚本位于：
+
+```text
+C:\Users\12644\Documents\Codex\tools\codex-feishu-bridge\watch-codex-feishu-bridge-hidden.vbs
+```
+
+再检查事件消费者：
+
+```powershell
+lark-cli --profile <profile> event status --current --json
+```
+
+正常应看到 `running: true`，并且 `im.message.receive_v1` 有 active consumer。
+
+百科旧设备实例还要核对 `launch-config.json` 里的 `codexHome`，必须是：
+
+```text
+C:\Users\12644\Documents\Codex\codex-homes\codex-assistant-old-baike
+```
+
+如果发现 stale `bridge.pid`，先用进程命令行确认它确实是 `codex-feishu-bridge.mjs`，再停止；PID 可能被无关进程复用。
+
 ## `/你好` 显示未知命令
 
 以 `/` 开头会被当成桥接器命令。普通任务直接发：

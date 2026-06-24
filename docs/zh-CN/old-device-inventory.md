@@ -51,6 +51,46 @@ codex-assistant-old-baike-4
 codex-assistant-old-baike-5
 ```
 
+## Windows watchdog 计划任务
+
+旧设备当前共有 17 个 `CodexFeishuBridgeWatchdog-*` 计划任务，均位于 Windows 任务计划程序根路径，对应定义文件由 Windows 保存在：
+
+```text
+C:\Windows\System32\Tasks
+```
+
+这些文件是计划任务定义，不是 watchdog 源码。实际调用的脚本是：
+
+```text
+C:\Users\12644\Documents\Codex\tools\codex-feishu-bridge\watch-codex-feishu-bridge-hidden.vbs
+```
+
+计划任务每 5 分钟触发一次。watchdog 内部另有 180 秒 stale watchdog 超时、60 秒重启冷却和 3600 秒 Codex idle timeout。
+
+当前任务分组：
+
+```text
+codex-assistant-mobile
+codex-assistant-old
+codex-assistant-old1 ... codex-assistant-old9
+codex-assistant-old-baike
+codex-assistant-old-baike-1 ... codex-assistant-old-baike-5
+```
+
+合计：
+
+```text
+1 mobile + 10 普通/全局 + 6 百科 = 17
+```
+
+2026-06-24 旧设备恢复时补齐了 6 个百科 watchdog。它们必须传入各自 workspace、匹配的 `LarkProfile`，并共同指向百科共享 Codex Home：
+
+```text
+C:\Users\12644\Documents\Codex\codex-homes\codex-assistant-old-baike
+```
+
+修复或重装这些任务时不要使用 PowerShell 变量名 `$home`，它容易和内置 `$HOME` 混淆；建议使用 `$codexHomePath` 这类明确变量名。
+
 ## 普通实例
 
 普通旧设备实例大多使用默认 Codex Home：
@@ -146,6 +186,29 @@ C:\Users\12644\Documents\Codex\tools\baike-entry-automation
 - 当前 thread 是否续接了旧上下文
 
 同一问题在 Desktop 原生窗口、普通 Bridge、百科 Bridge 上表现不同是可能的，先对齐执行形态再判断。
+
+## 2026-06-24 百科 watchdog 恢复
+
+旧设备重启后曾出现普通 Bot 正常、百科 Bot 不回复的问题。最终定位为 6 个百科实例缺少 Windows 计划任务 watchdog，导致重启后没有恢复 `im.message.receive_v1` consumer。
+
+已补齐的任务：
+
+```text
+CodexFeishuBridgeWatchdog-codex-assistant-old-baike
+CodexFeishuBridgeWatchdog-codex-assistant-old-baike-1
+CodexFeishuBridgeWatchdog-codex-assistant-old-baike-2
+CodexFeishuBridgeWatchdog-codex-assistant-old-baike-3
+CodexFeishuBridgeWatchdog-codex-assistant-old-baike-4
+CodexFeishuBridgeWatchdog-codex-assistant-old-baike-5
+```
+
+详细恢复记录见：
+
+```text
+docs/zh-CN/baike-watchdog-recovery-20260624.md
+```
+
+排查 stale PID 时必须先确认 PID 对应进程命令行包含 `codex-feishu-bridge.mjs`，不要只因为 PID 文件存在就停止进程。
 
 ## GitHub 推送权限
 

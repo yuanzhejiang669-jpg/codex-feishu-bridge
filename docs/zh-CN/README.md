@@ -8,6 +8,7 @@
 |---|---|
 | 整体架构、Workspace、Codex Home、桌面侧边栏镜像 | [架构说明](architecture.md) |
 | 旧设备当前部署、百科 Bot、旧设备特殊问题 | [旧设备部署清单](old-device-inventory.md) |
+| 旧设备百科 Bot 重启后不回复、watchdog 缺失恢复 | [2026-06-24 百科 Watchdog 恢复记录](baike-watchdog-recovery-20260624.md) |
 | 新设备当前部署、实例和工具链状态 | [新设备部署清单](new-device-inventory.md) |
 | 哪些文件能提交，哪些必须排除 | [安全与脱敏边界](security-and-redaction.md) |
 | Windows 安装、飞书 Bot 配置、故障排查 | 根目录 `README.zh-CN.md` 和旧版 `docs/*.md` |
