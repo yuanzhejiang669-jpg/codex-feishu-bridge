@@ -7,6 +7,7 @@
 | 你想了解 | 阅读 |
 |---|---|
 | 整体架构、Workspace、Codex Home、桌面侧边栏镜像 | [架构说明](architecture.md) |
+| 第三方非 GPT 模型、mimo2codex、本地 provider 路由 | [架构说明](architecture.md) 和 [新设备部署清单](new-device-inventory.md) |
 | 旧设备当前部署、百科 Bot、旧设备特殊问题 | [旧设备部署清单](old-device-inventory.md) |
 | 旧设备百科 Bot 重启后不回复、watchdog 缺失恢复 | [2026-06-24 百科 Watchdog 恢复记录](baike-watchdog-recovery-20260624.md) |
 | 新设备当前部署、实例和工具链状态 | [新设备部署清单](new-device-inventory.md) |
@@ -30,6 +31,7 @@
 | 检查或变更内容 | 必须同步更新 |
 |---|---|
 | Bridge 代码、启动参数、watchdog、侧边栏镜像逻辑变化 | `README.md`、`architecture.md` |
+| 第三方模型路由、provider 组合、mimo2codex 拓扑变化 | `README.md`、`architecture.md`、`new-device-inventory.md` |
 | 旧设备实例、百科 Bot、旧设备路径、旧设备故障结论变化 | `old-device-inventory.md` |
 | 新设备实例、新设备路径、新设备工具链或新设备对比结论变化 | `new-device-inventory.md` |
 | 凭据、SSH key、GitHub 权限、脱敏范围、禁止提交范围变化 | `security-and-redaction.md` |

@@ -38,6 +38,43 @@ Codex Feishu Bridge 只有一套 Bridge 代码。通用 Bot、旧设备 Bot、�
 | `CODEX_FEISHU_INSTANCE_NAME` | 当前 Bridge 实例名。 |
 | `CODEX_FEISHU_LARK_PROFILE` | 当前实例使用的 `lark-cli` profile。 |
 | `CODEX_FEISHU_RUN_MODE` | `app-server` 或 `exec`。 |
+| `MIMO2CODEX_KEY` | Codex 访问本机 mimo2codex Responses 兼容代理时使用的本地代理 key。 |
+| `APIDEEPSEEK_API_KEY`、`KIMI_API_KEY`、`GLM_API_KEY` | mimo2codex 上游 provider 使用的真实第三方 API key，只放在 Windows 用户环境变量里。 |
+
+## 第三方模型路由层
+
+非 GPT 第三方模型不直接并入 Bridge 源码。当前架构把 [7as0nch/mimo2codex](https://github.com/7as0nch/mimo2codex) 作为单独本地代理运行，Bridge 只负责让 Codex 指向本地 Responses 兼容端点，并在飞书命令层做组合 provider 切换。
+
+分层关系是：
+
+```text
+飞书 /provider m2c-deepseek
+  -> Bridge session provider bundle
+  -> Codex model_provider = mimo2codex
+  -> http://127.0.0.1:8788/v1
+  -> mimo2codex
+  -> DeepSeek / Kimi / GLM 等上游 Chat Completions 或 Responses API
+```
+
+当前本地代理约定：
+
+| 本地端点 | 数据目录 | 用途 |
+|---|---|---|
+| `http://127.0.0.1:8788/v1` | `%USERPROFILE%\.mimo2codex` | DeepSeek 官方路由，以及可选 Kimi / GLM generic provider。 |
+| `http://127.0.0.1:8789/v1` | `%USERPROFILE%\.mimo2codex-apideepseek` | API DeepSeek 独立路由。 |
+
+Bridge 侧组合 provider 会同时设置底层 provider、模型和推理强度：
+
+| 组合 ID | Codex provider | 模型 | 推理强度 |
+|---|---|---|---|
+| `m2c-deepseek` | `mimo2codex` | `deepseek-v4-pro` | `xhigh` |
+| `m2c-deepseek-flash` | `mimo2codex` | `deepseek-v4-flash` | `xhigh` |
+| `m2c-apideepseek` | `mimo2codex-apideepseek` | `deepseek-v4-pro` | `xhigh` |
+| `m2c-apideepseek-flash` | `mimo2codex-apideepseek` | `deepseek-v4-flash` | `xhigh` |
+| `m2c-kimi` | `mimo2codex` | `kimi-k2.6` | `xhigh` |
+| `m2c-glm` | `mimo2codex` | `glm-5.2` | `xhigh` |
+
+`/provider <id>` 只改变当前 Bridge session；`/provider save <id>` 会额外写入用户级 `%USERPROFILE%\.codex\config.toml`。真实 API key、mimo2codex SQLite 数据库和 Bridge 运行状态都不进入 Git。
 
 ## 通用 Bot
 

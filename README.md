@@ -34,6 +34,7 @@ Codex Feishu Bridge 用来把飞书机器人连接到本机 Codex。它接收飞
 | 检查或变更内容 | 必须同步更新 |
 |---|---|
 | Bridge 代码、启动参数、watchdog、侧边栏镜像逻辑变化 | `README.md`、`docs/zh-CN/architecture.md` |
+| 第三方模型路由、provider 组合、mimo2codex 拓扑变化 | `README.md`、`docs/zh-CN/architecture.md`、`docs/zh-CN/new-device-inventory.md` |
 | 旧设备实例、百科 Bot、旧设备路径、旧设备故障结论变化 | `docs/zh-CN/old-device-inventory.md` |
 | 新设备实例、新设备路径、新设备工具链或新设备对比结论变化 | `docs/zh-CN/new-device-inventory.md` |
 | 凭据、SSH key、GitHub 权限、脱敏范围、禁止提交范围变化 | `docs/zh-CN/security-and-redaction.md` |
@@ -100,6 +101,42 @@ npm run check
 
 如果还需要把专用 Codex Home 里的线程同步到默认 Codex Desktop 侧边栏，使用启动脚本支持的 `-DesktopCodexHome` 参数，并指向默认用户 Codex Home。
 
+## 第三方模型路由
+
+Bridge 支持通过 `/provider` 在普通 Codex provider 和组合 provider 之间切换。组合 provider 是 Bridge 侧维护的一组映射：一次性设置底层 `model_provider`、模型 ID 和推理强度，避免在飞书里分别切 `/provider`、`/model`、`/model effort`。
+
+当前非 GPT 模型接入参考项目是 [7as0nch/mimo2codex](https://github.com/7as0nch/mimo2codex)。它应作为单独本地代理运行，不把源码合并进本仓库；Bridge 只需要在 Codex `config.toml` 里配置指向本地代理的 provider block。
+
+当前组合 provider：
+
+| 组合 ID | 底层 Codex provider | 模型 | 推理强度 |
+|---|---|---|---|
+| `m2c-deepseek` | `mimo2codex` | `deepseek-v4-pro` | `xhigh` |
+| `m2c-deepseek-flash` | `mimo2codex` | `deepseek-v4-flash` | `xhigh` |
+| `m2c-apideepseek` | `mimo2codex-apideepseek` | `deepseek-v4-pro` | `xhigh` |
+| `m2c-apideepseek-flash` | `mimo2codex-apideepseek` | `deepseek-v4-flash` | `xhigh` |
+| `m2c-kimi` | `mimo2codex` | `kimi-k2.6` | `xhigh` |
+| `m2c-glm` | `mimo2codex` | `glm-5.2` | `xhigh` |
+
+典型本地代理拓扑：
+
+```text
+http://127.0.0.1:8788/v1 -> %USERPROFILE%\.mimo2codex
+http://127.0.0.1:8789/v1 -> %USERPROFILE%\.mimo2codex-apideepseek
+```
+
+飞书里使用：
+
+```text
+/provider list
+/provider m2c-deepseek
+/provider save m2c-glm
+/provider clear
+/model
+```
+
+`/provider <id>` 只影响当前 Bridge session；`/provider save <id>` 同时写入用户级 `%USERPROFILE%\.codex\config.toml`。API key 只放在 Windows 用户环境变量里，不写入仓库。
+
 ## 常用飞书命令
 
 | 命令 | 说明 |
@@ -109,6 +146,8 @@ npm run check
 | `/list` 或 `/sessions` | 列出本地 Bridge session 和可见 Codex threads。 |
 | `/switch <序号或 id>` | 切换当前飞书聊天绑定的 session。 |
 | `/context` | 查看当前 Codex thread、context 和 token 状态。 |
+| `/provider [id]` | 查看或切换当前 session 的 Codex provider；支持 `list`、组合 provider、`save` 和 `clear`。 |
+| `/model [模型ID] [推理强度]` | 查看或切换当前 session 的模型和推理强度；支持 `list`、`effort`、`save` 和 `clear`。 |
 | `/stop` | 停止当前正在运行的 Codex 任务。 |
 | `/queue` | 查看尚未执行的队列消息。 |
 | `/clearqueue` | 清空当前聊天的队列消息。 |
@@ -125,6 +164,7 @@ npm run check
 - 飞书附件、截图、二维码、运行时 prompt/output
 - SSH 私钥
 - `%LOCALAPPDATA%\CodexFeishuBridge\state` 或 `instances/*/state`
+- `MIMO2CODEX_KEY`、`APIDEEPSEEK_API_KEY`、`KIMI_API_KEY`、`GLM_API_KEY` 等 provider key
 
 完整规则见 [安全与脱敏边界](docs/zh-CN/security-and-redaction.md)。
 

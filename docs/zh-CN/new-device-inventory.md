@@ -106,6 +106,24 @@ model_reasoning_effort = "xhigh"
 service_tier = "fast"
 ```
 
+当前第三方模型路由还需要下列 Codex provider block 形态：
+
+```text
+[model_providers.mimo2codex]
+base_url = "http://127.0.0.1:8788/v1"
+wire_api = "responses"
+env_key = "MIMO2CODEX_KEY"
+
+[model_providers.mimo2codex-apideepseek]
+base_url = "http://127.0.0.1:8789/v1"
+wire_api = "responses"
+env_key = "MIMO2CODEX_KEY"
+```
+
+Bridge 暴露的组合 provider 包括 `m2c-deepseek`、`m2c-deepseek-flash`、`m2c-apideepseek`、`m2c-apideepseek-flash`、`m2c-kimi` 和 `m2c-glm`。它们通过 `/provider` 切换当前 session，通过 `/provider save` 写入用户级 Codex 配置。
+
+非 GPT 模型接入参考项目是 `7as0nch/mimo2codex`：https://github.com/7as0nch/mimo2codex 。它作为独立本地代理运行，不合并进 Bridge 源码。
+
 已观察到的 MCP：
 
 ```text
@@ -137,6 +155,8 @@ pdf
 |---:|---|
 | `8317` | 本地 CLIProxy 兼容 API endpoint |
 | `8318` | 本地图像或 API endpoint |
+| `8788` | mimo2codex 默认本地 Responses 兼容 endpoint |
+| `8789` | API DeepSeek 专用 mimo2codex endpoint |
 | `18795` | Codex browser-control extension bridge |
 
 当时未观察到 `9222` 监听。

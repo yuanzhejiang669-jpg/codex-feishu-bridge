@@ -274,6 +274,35 @@ $env:CODEX_FEISHU_REPLY_IN_THREAD = if ($ThreadReply -and -not $NoThreadReply) {
 $env:CODEX_FEISHU_STATE_DIR = $stateDir
 $env:CODEX_FEISHU_LOG_DIR = $logDir
 
+function Import-UserEnvIfMissing {
+  param([string[]]$Names)
+  foreach ($name in $Names) {
+    $current = [Environment]::GetEnvironmentVariable($name, "Process")
+    if (-not [string]::IsNullOrWhiteSpace($current)) {
+      continue
+    }
+    $userValue = [Environment]::GetEnvironmentVariable($name, "User")
+    if ([string]::IsNullOrWhiteSpace($userValue)) {
+      continue
+    }
+    [Environment]::SetEnvironmentVariable($name, $userValue, "Process")
+  }
+}
+
+Import-UserEnvIfMissing @(
+  "SUB2API_API_KEY",
+  "LTHOME_API_KEY",
+  "ICOE_API_KEY",
+  "CLIPROXY_API_KEY",
+  "MIMO2CODEX_KEY",
+  "DEEPSEEK_API_KEY",
+  "DS_API_KEY",
+  "APIDEEPSEEK_API_KEY",
+  "KIMI_API_KEY",
+  "GLM_API_KEY",
+  "XAI_API_KEY"
+)
+
 $resolvedCodexCli = Resolve-CodexCliBin
 if ($resolvedCodexCli) {
   $env:CODEX_CLI_BIN = $resolvedCodexCli

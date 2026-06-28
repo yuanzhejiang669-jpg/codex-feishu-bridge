@@ -108,6 +108,51 @@ const REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "
 const FAST_SERVICE_TIER = "fast";
 const STANDARD_SERVICE_TIER = "standard";
 const MIN_SIDEBAR_RECONCILE_INTERVAL_MS = 5_000;
+const PROVIDER_BUNDLES = [
+  {
+    id: "m2c-deepseek",
+    name: "mimo2codex / DeepSeek V4 Pro",
+    provider: "mimo2codex",
+    model: "deepseek-v4-pro",
+    reasoning: "xhigh",
+  },
+  {
+    id: "m2c-deepseek-flash",
+    name: "mimo2codex / DeepSeek V4 Flash",
+    provider: "mimo2codex",
+    model: "deepseek-v4-flash",
+    reasoning: "xhigh",
+  },
+  {
+    id: "m2c-apideepseek",
+    name: "mimo2codex / API DeepSeek V4 Pro",
+    provider: "mimo2codex-apideepseek",
+    model: "deepseek-v4-pro",
+    reasoning: "xhigh",
+  },
+  {
+    id: "m2c-apideepseek-flash",
+    name: "mimo2codex / API DeepSeek V4 Flash",
+    provider: "mimo2codex-apideepseek",
+    model: "deepseek-v4-flash",
+    reasoning: "xhigh",
+  },
+  {
+    id: "m2c-kimi",
+    name: "mimo2codex / Kimi",
+    provider: "mimo2codex",
+    model: "kimi-k2.6",
+    reasoning: "xhigh",
+  },
+  {
+    id: "m2c-glm",
+    name: "mimo2codex / GLM",
+    provider: "mimo2codex",
+    model: "glm-5.2",
+    reasoning: "xhigh",
+  },
+];
+const PROVIDER_BUNDLE_BY_ID = new Map(PROVIDER_BUNDLES.map((item) => [item.id, item]));
 let shuttingDown = false;
 let activeJobs = 0;
 let sidebarReconcileInFlight = false;
@@ -341,6 +386,19 @@ function findCodexProvider(id) {
   return listCodexProviders().find((item) => item.id === target) || null;
 }
 
+function findProviderBundle(id) {
+  const target = String(id || "").trim();
+  if (!target) return null;
+  return PROVIDER_BUNDLE_BY_ID.get(target) || null;
+}
+
+function providerBundleLabel(bundle) {
+  if (!bundle) return "";
+  const parts = [`provider ${bundle.provider}`, `model ${bundle.model}`];
+  if (bundle.reasoning) parts.push(`reasoning ${bundle.reasoning}`);
+  return parts.join("；");
+}
+
 function tomlStringValue(text, key) {
   const match = String(text || "").match(new RegExp(`^\\s*${escapeRegExp(key)}\\s*=\\s*([\"'])(.*?)\\1\\s*(?:#.*)?$`, "m"));
   return match?.[2]?.trim() || "";
@@ -400,6 +458,23 @@ function applySessionTurnOverrides(params, session) {
 
 function setSessionOverride(session, key, value) {
   session[key] = cleanOverride(value);
+  session.updatedAt = Date.now();
+  saveSessions();
+}
+
+function clearProviderBundleOverride(session) {
+  if (!session?.providerBundleOverride) return;
+  session.providerBundleOverride = "";
+  session.modelOverride = "";
+  session.reasoningOverride = "";
+  session.updatedAt = Date.now();
+}
+
+function applyProviderBundleOverride(session, bundle) {
+  session.providerBundleOverride = bundle.id;
+  session.providerOverride = bundle.provider;
+  session.modelOverride = bundle.model;
+  if (bundle.reasoning) session.reasoningOverride = bundle.reasoning;
   session.updatedAt = Date.now();
   saveSessions();
 }
@@ -600,6 +675,29 @@ function errorFromFailure(failure) {
   const error = new Error(failureDetailText(item));
   error.codexFailure = item;
   return error;
+}
+
+function emptyCompletionFailure({ messageId = "", sessionId = "", threadId = "", turnId = "", durationMs = 0, tokens = "" } = {}) {
+  return {
+    kind: "empty_completion",
+    label: "Codex empty completion",
+    recoverable: true,
+    message: "Codex app-server completed the turn without any assistant output.",
+    suggestion: "Bridge will clear this app-server thread and fall back to codex exec.",
+    detail: [
+      messageId ? `messageId: ${messageId}` : "",
+      sessionId ? `sessionId: ${sessionId}` : "",
+      threadId ? `threadId: ${threadId}` : "",
+      turnId ? `turnId: ${turnId}` : "",
+      durationMs ? `durationMs: ${durationMs}` : "",
+      tokens ? `tokens: ${tokens}` : "",
+    ].filter(Boolean).join("\n"),
+    at: Date.now(),
+  };
+}
+
+function emptyCompletionError(context = {}) {
+  return errorFromFailure(emptyCompletionFailure(context));
 }
 
 function recordFailureStats(failure) {
@@ -924,6 +1022,7 @@ function normalizeSessionData(session) {
     modelOverride: cleanOverride(session?.modelOverride),
     reasoningOverride: cleanOverride(session?.reasoningOverride),
     providerOverride: cleanOverride(session?.providerOverride),
+    providerBundleOverride: cleanOverride(session?.providerBundleOverride),
     serviceTierOverride: cleanOverride(session?.serviceTierOverride),
   };
 }
@@ -1388,6 +1487,7 @@ function createSessionData(title) {
     lastContextPeakUsage: null,
     lastCompactedAt: null,
     lastThreadStatus: "",
+    providerBundleOverride: "",
   };
 }
 
@@ -3431,10 +3531,6 @@ function attachmentPromptBlock(attachments) {
 function buildPrompt(event, session) {
   const content = userTextFromContent(event.content);
   const attachments = Array.isArray(event.attachments) ? event.attachments : [];
-  const history = session.messages
-    .slice(-12)
-    .map((msg) => `${msg.role === "user" ? "用户" : "助手"}：${msg.content}`)
-    .join("\n\n");
 
   const parts = [];
   if (history) parts.push(`最近上下文：\n${history}`);
@@ -5670,6 +5766,18 @@ async function runCodexAppServer(event, session, state = null, onState = null, o
 
     const durationMs = Date.now() - startedAt;
     const finalText = resultTextFromState(liveState);
+    if (!finalText) {
+      const context = {
+        messageId,
+        sessionId: session.id,
+        threadId,
+        turnId,
+        durationMs,
+        tokens: tokenStringFromState(liveState),
+      };
+      log("WARN", "codex app-server completed without assistant output", context);
+      throw emptyCompletionError(context);
+    }
     ensureRunDone(liveState, finalText);
     liveState.meta.durationMs = durationMs;
     await ensureAppServerThreadVisible(threadId, "turn/completed");
@@ -5688,7 +5796,13 @@ async function runCodexAppServer(event, session, state = null, onState = null, o
       markRunInterrupted(liveState);
     } else {
       const failure = classifyCodexFailure(error);
-      if (shouldRecoverCodexRun(failure, recoveryAttempt)) {
+      if (failure.kind === "empty_completion") {
+        liveState.terminal = "running";
+        liveState.footer = "thinking";
+        liveState.failure = failure;
+        liveState.errorMsg = failureDetailText(failure).slice(0, 1500);
+        updateSessionFailure(liveState.session, failure);
+      } else if (shouldRecoverCodexRun(failure, recoveryAttempt)) {
         stats.recovered += 1;
         markRunRecovering(liveState, failure, recoveryAttempt + 1);
         if (state) await flushState();
@@ -5724,12 +5838,24 @@ async function runCodex(event, session, state = null, onState = null) {
     try {
       return await runCodexAppServer(event, session, state, onState);
     } catch (error) {
-      if (CONFIG.runMode !== "auto") throw error;
       const failure = classifyCodexFailure(error);
+      const canFallback = CONFIG.runMode === "auto" || failure.kind === "empty_completion";
+      if (!canFallback) throw error;
       if (["auth", "quota", "rate_limit", "user_stop"].includes(failure.kind)) throw error;
+      if (failure.kind === "empty_completion" && session.codexThreadId) {
+        log("WARN", "clearing codex app-server thread after empty completion", {
+          messageId: event.message_id || event.id,
+          sessionId: session.id,
+          threadId: session.codexThreadId,
+        });
+        session.codexThreadId = "";
+        session.updatedAt = Date.now();
+        saveSessions();
+      }
       log("WARN", "app-server mode failed; falling back to codex exec", {
         messageId: event.message_id || event.id,
         sessionId: session.id,
+        kind: failure.kind,
         error: String(error.message || error).slice(0, 1500),
       });
       if (state?.terminal === "running") {
@@ -7007,28 +7133,41 @@ async function handleProviderCommand(chatId, rest, messageId) {
 
   if (["clear", "default", "reset"].includes(action)) {
     setSessionOverride(session, "providerOverride", "");
+    clearProviderBundleOverride(session);
+    saveSessions();
     await sendMarkdown(chatId, providerStatusMarkdown(session, "已清除当前会话的 provider 覆盖，后续使用 Codex 配置默认 provider。"), "provider-clear", messageId);
     return;
   }
 
   const persist = action === "save";
   const providerId = persist ? args[1] : args[0];
-  const provider = findCodexProvider(providerId);
+  const bundle = findProviderBundle(providerId);
+  const provider = bundle ? findCodexProvider(bundle.provider) : findCodexProvider(providerId);
   if (!provider) {
     await sendMarkdown(chatId, providerListMarkdown(session, `没有找到 provider：\`${providerId || ""}\``), "provider-miss", messageId);
     return;
   }
 
   try {
-    if (persist) await writeCodexConfigValue("model_provider", provider.id);
-    setSessionOverride(session, "providerOverride", provider.id);
+    if (bundle) {
+      if (persist) {
+        await writeCodexConfigValue("model_provider", bundle.provider);
+        await writeCodexConfigValue("model", bundle.model);
+        if (bundle.reasoning) await writeCodexConfigValue("model_reasoning_effort", bundle.reasoning);
+      }
+      applyProviderBundleOverride(session, bundle);
+    } else {
+      if (persist) await writeCodexConfigValue("model_provider", provider.id);
+      clearProviderBundleOverride(session);
+      setSessionOverride(session, "providerOverride", provider.id);
+    }
     await sendMarkdown(
       chatId,
       providerStatusMarkdown(
         session,
         persist
-          ? `已切换并写入用户级 config.toml：\`${provider.id}\`。`
-          : `已切换当前飞书会话 provider：\`${provider.id}\`。`,
+          ? `已切换并写入用户级 config.toml：\`${bundle?.id || provider.id}\`。`
+          : `已切换当前飞书会话 provider：\`${bundle?.id || provider.id}\`。`,
       ),
       "provider-set",
       messageId,
@@ -7041,11 +7180,13 @@ async function handleProviderCommand(chatId, rest, messageId) {
 function providerStatusMarkdown(session, title = "Codex provider") {
   const settings = effectiveSessionSettings(session);
   const provider = findCodexProvider(settings.provider);
+  const bundle = findProviderBundle(session.providerBundleOverride);
   const lines = [
     `**${title}**`,
     "",
     `当前会话：\`${session.title || "未命名会话"}\` (${session.id})`,
     `当前 provider：\`${settings.provider || "默认"}\`${session.providerOverride ? "（会话覆盖）" : "（配置默认）"}`,
+    bundle ? `当前组合：\`${bundle.id}\`；${providerBundleLabel(bundle)}` : "",
     provider ? providerDetailLine(provider) : "provider 未在当前 config.toml 中找到；如果它来自 profile 或外部配置，请确认 Bridge 启动参数也选择了对应配置。",
     "",
     `当前运行设置：${settingsSummary(session)}`,
@@ -7059,6 +7200,17 @@ function providerListMarkdown(session, title = "Codex provider 列表") {
   const settings = effectiveSessionSettings(session);
   const providers = listCodexProviders();
   const lines = [`**${title}**`, ""];
+  if (PROVIDER_BUNDLES.length) {
+    lines.push("**组合 provider**");
+    for (const bundle of PROVIDER_BUNDLES) {
+      const marker = bundle.id === session.providerBundleOverride ? " ← 当前" : "";
+      const exists = findCodexProvider(bundle.provider);
+      const availability = exists ? "" : "；底层 provider 未配置";
+      lines.push(`- \`${bundle.id}\`${marker}：${bundle.name}；${providerBundleLabel(bundle)}${availability}`);
+    }
+    lines.push("");
+    lines.push("**Codex provider**");
+  }
   for (const provider of providers) {
     const marker = provider.id === settings.provider ? " ← 当前" : "";
     lines.push(`- \`${provider.id}\`${marker}：${provider.name || provider.id}；${providerDetailLine(provider)}`);
@@ -7146,6 +7298,7 @@ async function handleModelCommand(chatId, rest, messageId) {
       session.modelOverride = model;
       if (persist) await writeCodexConfigValue("model", model);
     }
+    session.providerBundleOverride = "";
     if (effort) {
       session.reasoningOverride = effort;
       if (persist) await writeCodexConfigValue("model_reasoning_effort", effort);
@@ -7605,6 +7758,7 @@ function failureKindLabel(kind) {
     case "feishu_card": return "飞书卡片";
     case "timeout": return "超时";
     case "app_server": return "app-server";
+    case "empty_completion": return "empty";
     case "user_stop": return "用户停止";
     default: return kind || "未知";
   }
