@@ -124,6 +124,34 @@ Bridge 暴露的组合 provider 包括 `m2c-deepseek`、`m2c-deepseek-flash`、`
 
 非 GPT 模型接入参考项目是 `7as0nch/mimo2codex`：https://github.com/7as0nch/mimo2codex 。它作为独立本地代理运行，不合并进 Bridge 源码。
 
+当前新设备已经把 mimo2codex 代理纳入独立 Windows 计划任务守护，避免关机后 8788/8789 本地端点丢失：
+
+| 项 | 值 |
+|---|---|
+| 计划任务名 | `Mimo2CodexProxyWatchdog` |
+| 安装脚本 | `C:\Users\yzjiang\Documents\Codex\tools\codex-feishu-bridge\install-mimo2codex-proxy-watchdog.ps1` |
+| 启动脚本 | `C:\Users\yzjiang\Documents\Codex\tools\codex-feishu-bridge\start-mimo2codex-proxies.ps1` |
+| 触发条件 | 当前用户登录、会话解锁、每 5 分钟健康检查 |
+| 日志目录 | `C:\Users\yzjiang\AppData\Local\CodexFeishuBridge\mimo2codex-proxies\logs` |
+
+新设备恢复时，在安装 `mimo2codex`、写好 `%USERPROFILE%\.mimo2codex\providers.json`、`%USERPROFILE%\.mimo2codex-apideepseek\providers.json` 和 Windows 用户环境变量后执行：
+
+```powershell
+Set-Location "$env:USERPROFILE\Documents\Codex\tools\codex-feishu-bridge"
+.\install-mimo2codex-proxy-watchdog.ps1
+```
+
+验证命令：
+
+```powershell
+Get-ScheduledTask -TaskName Mimo2CodexProxyWatchdog
+Get-ScheduledTaskInfo -TaskName Mimo2CodexProxyWatchdog
+Get-NetTCPConnection -LocalPort 8788,8789
+Get-CimInstance Win32_Process -Filter "Name='node.exe' OR Name='cmd.exe'" |
+  Where-Object { $_.CommandLine -match 'mimo2codex|8788|8789' } |
+  Select-Object ProcessId,CommandLine
+```
+
 已观察到的 MCP：
 
 ```text

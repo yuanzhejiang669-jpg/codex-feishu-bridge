@@ -63,6 +63,25 @@ Codex Feishu Bridge 只有一套 Bridge 代码。通用 Bot、旧设备 Bot、�
 | `http://127.0.0.1:8788/v1` | `%USERPROFILE%\.mimo2codex` | DeepSeek 官方路由，以及可选 Kimi / GLM generic provider。 |
 | `http://127.0.0.1:8789/v1` | `%USERPROFILE%\.mimo2codex-apideepseek` | API DeepSeek 独立路由。 |
 
+这两个本地端点依赖独立的 `mimo2codex` 进程，不属于任何单个 Bridge Bot 实例。为了避免关机重启后 `/provider m2c-*` 能切换但请求打不到本地代理，本仓库提供单独的代理 watchdog：
+
+| 项 | 值 |
+|---|---|
+| 启动脚本 | `C:\Users\yzjiang\Documents\Codex\tools\codex-feishu-bridge\start-mimo2codex-proxies.ps1` |
+| 计划任务安装脚本 | `C:\Users\yzjiang\Documents\Codex\tools\codex-feishu-bridge\install-mimo2codex-proxy-watchdog.ps1` |
+| Windows 计划任务 | `Mimo2CodexProxyWatchdog` |
+| 触发条件 | 当前用户登录、会话解锁、每 5 分钟健康检查 |
+| 日志目录 | `C:\Users\yzjiang\AppData\Local\CodexFeishuBridge\mimo2codex-proxies\logs` |
+
+`start-mimo2codex-proxies.ps1` 的行为是幂等的：如果 `127.0.0.1:8788` 和 `127.0.0.1:8789` 已经监听，就只记录健康状态；如果端口缺失，才按固定参数拉起缺失代理。它会从 Windows 用户环境变量导入 `MIMO2CODEX_KEY`、`DEEPSEEK_API_KEY`、`DS_API_KEY`、`APIDEEPSEEK_API_KEY`、`KIMI_API_KEY`、`GLM_API_KEY`、`XAI_API_KEY` 到当前代理进程，但不会把密钥值写入 Git 或日志。
+
+Bridge watchdog 和 mimo2codex watchdog 是两层不同守护：
+
+| Watchdog | 负责对象 | 影响范围 |
+|---|---|---|
+| `CodexFeishuBridgeWatchdog*` | 每个 Bridge 实例和飞书事件 consumer | 某个 Bot 是否能接收飞书消息并调用 Codex。 |
+| `Mimo2CodexProxyWatchdog` | 本机 `mimo2codex` 8788/8789 代理 | 所有 Bot 切到 `m2c-*` provider 后能否访问非 GPT 上游模型。 |
+
 Bridge 侧组合 provider 会同时设置底层 provider、模型和推理强度：
 
 | 组合 ID | Codex provider | 模型 | 推理强度 |

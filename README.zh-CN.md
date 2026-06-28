@@ -65,6 +65,8 @@ Bridge 面向本机可信环境：
 | `stop-codex-feishu-bridge.ps1` | 停止一个 Bridge 实例。 |
 | `watch-codex-feishu-bridge.ps1` | Watchdog 健康检查和修复脚本。 |
 | `install-codex-feishu-watchdog.ps1` | 安装或卸载 Windows 计划任务 watchdog。 |
+| `start-mimo2codex-proxies.ps1` | 启动并健康检查本机 `mimo2codex` 代理端点。 |
+| `install-mimo2codex-proxy-watchdog.ps1` | 安装或卸载本机 `mimo2codex` 代理的 Windows 计划任务 watchdog。 |
 | `docs/zh-CN/` | 统一中文文档中心。 |
 | `workspace/` | 示例 workspace 占位目录。真实运行文件不应提交。 |
 

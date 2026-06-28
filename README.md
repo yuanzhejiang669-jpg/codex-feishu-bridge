@@ -66,6 +66,8 @@ Bridge 面向本机可信环境：
 | `stop-codex-feishu-bridge.ps1` | 停止一个 Bridge 实例。 |
 | `watch-codex-feishu-bridge.ps1` | Watchdog 健康检查和修复脚本。 |
 | `install-codex-feishu-watchdog.ps1` | 安装或卸载 Windows 计划任务 watchdog。 |
+| `start-mimo2codex-proxies.ps1` | 启动并健康检查本机 `mimo2codex` 代理端点。 |
+| `install-mimo2codex-proxy-watchdog.ps1` | 安装或卸载本机 `mimo2codex` 代理的 Windows 计划任务 watchdog。 |
 | `docs/zh-CN/` | 统一中文文档中心。 |
 | `workspace/` | 示例 workspace 占位目录。真实运行文件不应提交。 |
 
@@ -124,6 +126,15 @@ Bridge 支持通过 `/provider` 在普通 Codex provider 和组合 provider 之�
 http://127.0.0.1:8788/v1 -> %USERPROFILE%\.mimo2codex
 http://127.0.0.1:8789/v1 -> %USERPROFILE%\.mimo2codex-apideepseek
 ```
+
+本地代理必须有独立进程持续运行。安装代理 watchdog：
+
+```powershell
+Set-Location "$env:USERPROFILE\Documents\Codex\tools\codex-feishu-bridge"
+.\install-mimo2codex-proxy-watchdog.ps1
+```
+
+计划任务名是 `Mimo2CodexProxyWatchdog`，会在登录、解锁和每 5 分钟健康检查时运行 `start-mimo2codex-proxies.ps1`。它只负责本机 8788/8789 代理，不替代每个 Bot 自己的 Bridge watchdog。
 
 飞书里使用：
 
