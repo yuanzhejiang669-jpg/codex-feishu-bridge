@@ -8,6 +8,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $startScript = Join-Path $PSScriptRoot "start-mimo2codex-proxies.ps1"
+$hiddenLauncher = Join-Path $PSScriptRoot "start-mimo2codex-proxies-hidden.vbs"
 
 if ($Uninstall) {
   Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
@@ -18,6 +19,9 @@ if ($Uninstall) {
 if (-not (Test-Path -LiteralPath $startScript)) {
   throw "Start script not found: $startScript"
 }
+if (-not (Test-Path -LiteralPath $hiddenLauncher)) {
+  throw "Hidden launcher not found: $hiddenLauncher"
+}
 
 if ($IntervalMinutes -lt 1) {
   throw "IntervalMinutes must be >= 1"
@@ -27,7 +31,7 @@ $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $author = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 $startBoundary = (Get-Date).Date.ToString("yyyy-MM-ddTHH:mm:ss")
 $workingDirectory = $PSScriptRoot
-$arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$startScript`""
+$arguments = "`"$hiddenLauncher`""
 
 function Escape-XmlText {
   param([string]$Text)
@@ -94,7 +98,7 @@ $xml = @"
   </Settings>
   <Actions Context="Author">
     <Exec>
-      <Command>powershell.exe</Command>
+      <Command>wscript.exe</Command>
       <Arguments>$(Escape-XmlText $arguments)</Arguments>
       <WorkingDirectory>$(Escape-XmlText $workingDirectory)</WorkingDirectory>
     </Exec>
@@ -113,6 +117,7 @@ $info = Get-ScheduledTaskInfo -TaskName $TaskName
 
 Write-Host "Installed scheduled task: $TaskName"
 Write-Host "Start script: $startScript"
+Write-Host "Hidden launcher: $hiddenLauncher"
 Write-Host "Interval: $IntervalMinutes minute(s)"
 Write-Host "State: $($task.State)"
 Write-Host "LastRunTime: $($info.LastRunTime)"

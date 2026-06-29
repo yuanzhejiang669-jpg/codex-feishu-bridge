@@ -68,12 +68,13 @@ Codex Feishu Bridge 只有一套 Bridge 代码。通用 Bot、旧设备 Bot、�
 | 项 | 值 |
 |---|---|
 | 启动脚本 | `C:\Users\yzjiang\Documents\Codex\tools\codex-feishu-bridge\start-mimo2codex-proxies.ps1` |
+| 隐藏启动包装 | `C:\Users\yzjiang\Documents\Codex\tools\codex-feishu-bridge\start-mimo2codex-proxies-hidden.vbs` |
 | 计划任务安装脚本 | `C:\Users\yzjiang\Documents\Codex\tools\codex-feishu-bridge\install-mimo2codex-proxy-watchdog.ps1` |
 | Windows 计划任务 | `Mimo2CodexProxyWatchdog` |
 | 触发条件 | 当前用户登录、会话解锁、每 5 分钟健康检查 |
 | 日志目录 | `C:\Users\yzjiang\AppData\Local\CodexFeishuBridge\mimo2codex-proxies\logs` |
 
-`start-mimo2codex-proxies.ps1` 的行为是幂等的：如果 `127.0.0.1:8788` 和 `127.0.0.1:8789` 已经监听，就只记录健康状态；如果端口缺失，才按固定参数拉起缺失代理。它会从 Windows 用户环境变量导入 `MIMO2CODEX_KEY`、`DEEPSEEK_API_KEY`、`DS_API_KEY`、`APIDEEPSEEK_API_KEY`、`KIMI_API_KEY`、`GLM_API_KEY`、`XAI_API_KEY` 到当前代理进程，但不会把密钥值写入 Git 或日志。
+计划任务通过 `wscript.exe` 执行 `start-mimo2codex-proxies-hidden.vbs`，再由 VBS 以隐藏窗口运行 PowerShell 健康检查，避免每 5 分钟弹出 CLI 窗口。`start-mimo2codex-proxies.ps1` 的行为是幂等的：如果 `127.0.0.1:8788` 和 `127.0.0.1:8789` 已经监听，就只记录健康状态；如果端口缺失，才按固定参数拉起缺失代理。它会从 Windows 用户环境变量导入 `MIMO2CODEX_KEY`、`DEEPSEEK_API_KEY`、`DS_API_KEY`、`APIDEEPSEEK_API_KEY`、`KIMI_API_KEY`、`GLM_API_KEY`、`XAI_API_KEY` 到当前代理进程，但不会把密钥值写入 Git 或日志。
 
 Bridge watchdog 和 mimo2codex watchdog 是两层不同守护：
 

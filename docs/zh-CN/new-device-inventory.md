@@ -131,6 +131,7 @@ Bridge 暴露的组合 provider 包括 `m2c-deepseek`、`m2c-deepseek-flash`、`
 | 计划任务名 | `Mimo2CodexProxyWatchdog` |
 | 安装脚本 | `C:\Users\yzjiang\Documents\Codex\tools\codex-feishu-bridge\install-mimo2codex-proxy-watchdog.ps1` |
 | 启动脚本 | `C:\Users\yzjiang\Documents\Codex\tools\codex-feishu-bridge\start-mimo2codex-proxies.ps1` |
+| 隐藏启动包装 | `C:\Users\yzjiang\Documents\Codex\tools\codex-feishu-bridge\start-mimo2codex-proxies-hidden.vbs` |
 | 触发条件 | 当前用户登录、会话解锁、每 5 分钟健康检查 |
 | 日志目录 | `C:\Users\yzjiang\AppData\Local\CodexFeishuBridge\mimo2codex-proxies\logs` |
 
