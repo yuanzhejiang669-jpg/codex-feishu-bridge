@@ -1,0 +1,156 @@
+{
+  "schemaVersion": 1,
+  "device": {
+    "id": "new-pc",
+    "name": "新设备",
+    "description": "当前设备本地运行 10 个 Codex 飞书 Bridge Bot：默认 Bot + codex-assistant-1..9。"
+  },
+  "paths": {
+    "sourceRoot": "C:\\Users\\yzjiang\\Documents\\Codex\\tools\\codex-feishu-bridge",
+    "runtimeRoot": "C:\\Users\\yzjiang\\AppData\\Local\\CodexFeishuBridge",
+    "workspaceRoot": "C:\\Users\\yzjiang\\Documents\\Codex\\workspaces",
+    "codexHome": "C:\\Users\\yzjiang\\.codex",
+    "codexConfig": "C:\\Users\\yzjiang\\.codex\\config.toml",
+    "startupScriptsRoot": "D:\\常用\\自启动脚本汇总\\Codex飞书Bridge新设备控制面板",
+    "obsidianOpsDoc": "D:\\ObsidianVault\\自动化脚本说明\\Codex 飞书 Bridge 新设备控制面板架构与复刻说明.md"
+  },
+  "controlPanel": {
+    "title": "Codex 飞书 Bridge 新设备控制面板",
+    "host": "127.0.0.1",
+    "port": 8320,
+    "url": "http://127.0.0.1:8320/",
+    "taskName": "CodexFeishuBridgeControlPanel",
+    "startScript": "C:\\Users\\yzjiang\\Documents\\Codex\\tools\\codex-feishu-bridge\\start-control-panel.ps1",
+    "stopScript": "C:\\Users\\yzjiang\\Documents\\Codex\\tools\\codex-feishu-bridge\\stop-control-panel.ps1",
+    "pidFile": "C:\\Users\\yzjiang\\AppData\\Local\\CodexFeishuBridge\\control-panel\\state\\control-panel.pid",
+    "logDir": "C:\\Users\\yzjiang\\AppData\\Local\\CodexFeishuBridge\\control-panel\\logs"
+  },
+  "proxies": [
+    {
+      "id": "mimo2codex",
+      "label": "mimo2codex 官方 DeepSeek 路由",
+      "port": 8788,
+      "url": "http://127.0.0.1:8788/v1",
+      "note": "用于官方 DeepSeek，以及可选 Kimi / GLM generic provider。"
+    },
+    {
+      "id": "mimo2codex-apideepseek",
+      "label": "mimo2codex API DeepSeek 独立路由",
+      "port": 8789,
+      "url": "http://127.0.0.1:8789/v1",
+      "note": "用于 apideepseek.com 非官方渠道，和官方 DeepSeek 路由隔离。"
+    }
+  ],
+  "instances": [
+    {
+      "id": "default",
+      "name": "default",
+      "label": "默认 Bot",
+      "larkProfile": "default",
+      "runtimeRoot": "C:\\Users\\yzjiang\\AppData\\Local\\CodexFeishuBridge",
+      "workspace": "C:\\Users\\yzjiang\\Documents\\Codex\\workspaces\\feishu-bridge",
+      "codexHome": "C:\\Users\\yzjiang\\.codex",
+      "desktopCodexHome": "",
+      "taskName": "CodexFeishuBridgeWatchdog"
+    },
+    {
+      "id": "codex-assistant-1",
+      "name": "codex-assistant-1",
+      "label": "Codex 助手 1",
+      "larkProfile": "codex-assistant-1",
+      "runtimeRoot": "C:\\Users\\yzjiang\\AppData\\Local\\CodexFeishuBridge\\instances\\codex-assistant-1",
+      "workspace": "C:\\Users\\yzjiang\\Documents\\Codex\\workspaces\\feishu-bridge-codex-assistant-1",
+      "codexHome": "C:\\Users\\yzjiang\\.codex",
+      "desktopCodexHome": "",
+      "taskName": "CodexFeishuBridgeWatchdog-codex-assistant-1"
+    },
+    {
+      "id": "codex-assistant-2",
+      "name": "codex-assistant-2",
+      "label": "Codex 助手 2",
+      "larkProfile": "codex-assistant-2",
+      "runtimeRoot": "C:\\Users\\yzjiang\\AppData\\Local\\CodexFeishuBridge\\instances\\codex-assistant-2",
+      "workspace": "C:\\Users\\yzjiang\\Documents\\Codex\\workspaces\\feishu-bridge-codex-assistant-2",
+      "codexHome": "C:\\Users\\yzjiang\\.codex",
+      "desktopCodexHome": "",
+      "taskName": "CodexFeishuBridgeWatchdog-codex-assistant-2"
+    },
+    {
+      "id": "codex-assistant-3",
+      "name": "codex-assistant-3",
+      "label": "Codex 助手 3",
+      "larkProfile": "codex-assistant-3",
+      "runtimeRoot": "C:\\Users\\yzjiang\\AppData\\Local\\CodexFeishuBridge\\instances\\codex-assistant-3",
+      "workspace": "C:\\Users\\yzjiang\\Documents\\Codex\\workspaces\\feishu-bridge-codex-assistant-3",
+      "codexHome": "C:\\Users\\yzjiang\\.codex",
+      "desktopCodexHome": "",
+      "taskName": "CodexFeishuBridgeWatchdog-codex-assistant-3"
+    },
+    {
+      "id": "codex-assistant-4",
+      "name": "codex-assistant-4",
+      "label": "Codex 助手 4",
+      "larkProfile": "codex-assistant-4",
+      "runtimeRoot": "C:\\Users\\yzjiang\\AppData\\Local\\CodexFeishuBridge\\instances\\codex-assistant-4",
+      "workspace": "C:\\Users\\yzjiang\\Documents\\Codex\\workspaces\\feishu-bridge-codex-assistant-4",
+      "codexHome": "C:\\Users\\yzjiang\\.codex",
+      "desktopCodexHome": "",
+      "taskName": "CodexFeishuBridgeWatchdog-codex-assistant-4"
+    },
+    {
+      "id": "codex-assistant-5",
+      "name": "codex-assistant-5",
+      "label": "Codex 助手 5",
+      "larkProfile": "codex-assistant-5",
+      "runtimeRoot": "C:\\Users\\yzjiang\\AppData\\Local\\CodexFeishuBridge\\instances\\codex-assistant-5",
+      "workspace": "C:\\Users\\yzjiang\\Documents\\Codex\\workspaces\\feishu-bridge-codex-assistant-5",
+      "codexHome": "C:\\Users\\yzjiang\\.codex",
+      "desktopCodexHome": "",
+      "taskName": "CodexFeishuBridgeWatchdog-codex-assistant-5"
+    },
+    {
+      "id": "codex-assistant-6",
+      "name": "codex-assistant-6",
+      "label": "Codex 助手 6",
+      "larkProfile": "codex-assistant-6",
+      "runtimeRoot": "C:\\Users\\yzjiang\\AppData\\Local\\CodexFeishuBridge\\instances\\codex-assistant-6",
+      "workspace": "C:\\Users\\yzjiang\\Documents\\Codex\\workspaces\\feishu-bridge-codex-assistant-6",
+      "codexHome": "C:\\Users\\yzjiang\\.codex",
+      "desktopCodexHome": "",
+      "taskName": "CodexFeishuBridgeWatchdog-codex-assistant-6"
+    },
+    {
+      "id": "codex-assistant-7",
+      "name": "codex-assistant-7",
+      "label": "Codex 助手 7",
+      "larkProfile": "codex-assistant-7",
+      "runtimeRoot": "C:\\Users\\yzjiang\\AppData\\Local\\CodexFeishuBridge\\instances\\codex-assistant-7",
+      "workspace": "C:\\Users\\yzjiang\\Documents\\Codex\\workspaces\\feishu-bridge-codex-assistant-7",
+      "codexHome": "C:\\Users\\yzjiang\\.codex",
+      "desktopCodexHome": "",
+      "taskName": "CodexFeishuBridgeWatchdog-codex-assistant-7"
+    },
+    {
+      "id": "codex-assistant-8",
+      "name": "codex-assistant-8",
+      "label": "Codex 助手 8",
+      "larkProfile": "codex-assistant-8",
+      "runtimeRoot": "C:\\Users\\yzjiang\\AppData\\Local\\CodexFeishuBridge\\instances\\codex-assistant-8",
+      "workspace": "C:\\Users\\yzjiang\\Documents\\Codex\\workspaces\\feishu-bridge-codex-assistant-8",
+      "codexHome": "C:\\Users\\yzjiang\\.codex",
+      "desktopCodexHome": "",
+      "taskName": "CodexFeishuBridgeWatchdog-codex-assistant-8"
+    },
+    {
+      "id": "codex-assistant-9",
+      "name": "codex-assistant-9",
+      "label": "Codex 助手 9",
+      "larkProfile": "codex-assistant-9",
+      "runtimeRoot": "C:\\Users\\yzjiang\\AppData\\Local\\CodexFeishuBridge\\instances\\codex-assistant-9",
+      "workspace": "C:\\Users\\yzjiang\\Documents\\Codex\\workspaces\\feishu-bridge-codex-assistant-9",
+      "codexHome": "C:\\Users\\yzjiang\\.codex",
+      "desktopCodexHome": "",
+      "taskName": "CodexFeishuBridgeWatchdog-codex-assistant-9"
+    }
+  ]
+}

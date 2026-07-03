@@ -276,7 +276,11 @@ $env:CODEX_FEISHU_LOG_DIR = $logDir
 
 function Import-UserEnvIfMissing {
   param([string[]]$Names)
-  foreach ($name in $Names) {
+  foreach ($rawName in $Names) {
+    $name = ([string]$rawName).Trim()
+    if (-not $name) {
+      continue
+    }
     $current = [Environment]::GetEnvironmentVariable($name, "Process")
     if (-not [string]::IsNullOrWhiteSpace($current)) {
       continue
@@ -289,9 +293,11 @@ function Import-UserEnvIfMissing {
   }
 }
 
-Import-UserEnvIfMissing @(
+$envKeysToImport = @(
   "SUB2API_API_KEY",
   "LTHOME_API_KEY",
+  "MUYUAN_API_KEY",
+  "ANYROUTER_API_KEY",
   "ICOE_API_KEY",
   "CLIPROXY_API_KEY",
   "MIMO2CODEX_KEY",
@@ -302,6 +308,22 @@ Import-UserEnvIfMissing @(
   "GLM_API_KEY",
   "XAI_API_KEY"
 )
+
+$codexConfigFile = Join-Path $resolvedCodexHome "config.toml"
+if (Test-Path -LiteralPath $codexConfigFile) {
+  try {
+    $configLines = Get-Content -LiteralPath $codexConfigFile -ErrorAction Stop
+    foreach ($line in @($configLines)) {
+      if ($line -match '^\s*env_key\s*=\s*["'']?([^"'']+)["'']?\s*$') {
+        $envKeysToImport += $Matches[1]
+      }
+    }
+  } catch {
+    Write-Warning "Failed to read provider env_key values from Codex config: $($_.Exception.Message)"
+  }
+}
+
+Import-UserEnvIfMissing ($envKeysToImport | Sort-Object -Unique)
 
 $resolvedCodexCli = Resolve-CodexCliBin
 if ($resolvedCodexCli) {

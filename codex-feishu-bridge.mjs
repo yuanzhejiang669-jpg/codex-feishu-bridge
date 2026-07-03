@@ -108,6 +108,8 @@ const REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "
 const FAST_SERVICE_TIER = "fast";
 const STANDARD_SERVICE_TIER = "standard";
 const MIN_SIDEBAR_RECONCILE_INTERVAL_MS = 5_000;
+const PROVIDER_MODEL_LIST_TIMEOUT_MS = 30_000;
+const PROVIDER_MODEL_TEST_TIMEOUT_MS = 60_000;
 const PROVIDER_BUNDLES = [
   {
     id: "m2c-deepseek",
@@ -397,6 +399,24 @@ function providerBundleLabel(bundle) {
   const parts = [`provider ${bundle.provider}`, `model ${bundle.model}`];
   if (bundle.reasoning) parts.push(`reasoning ${bundle.reasoning}`);
   return parts.join("；");
+}
+
+function providerApiUrl(provider, route) {
+  const baseUrl = String(provider?.baseUrl || "").trim();
+  if (!baseUrl) return "";
+  try {
+    return new URL(route, baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`).toString();
+  } catch {
+    return "";
+  }
+}
+
+function providerModelsUrl(provider) {
+  return providerApiUrl(provider, "models");
+}
+
+function providerResponsesUrl(provider) {
+  return providerApiUrl(provider, "responses");
 }
 
 function tomlStringValue(text, key) {
@@ -3841,7 +3861,7 @@ async function withCodexSidebarLock(fn, codexHome = CONFIG.codexHome, lockPath =
       fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, startedAt: Date.now() }), "utf8");
       return await fn();
     } catch (error) {
-      if (error?.code !== "EEXIST") throw error;
+      if (!["EEXIST", "EACCES", "EPERM"].includes(error?.code)) throw error;
       try {
         const stat = fs.statSync(lockPath);
         if (Date.now() - stat.mtimeMs > 30_000) fs.rmSync(lockPath, { force: true });
@@ -5637,6 +5657,153 @@ async function listCodexModels() {
   });
 }
 
+async function listCurrentProviderModels(session) {
+  const settings = effectiveSessionSettings(session);
+  const provider = findCodexProvider(settings.provider);
+  if (!provider) {
+    throw new Error(`当前 provider 未在 config.toml 中找到：${settings.provider || "默认"}`);
+  }
+  const url = providerModelsUrl(provider);
+  if (!url) {
+    if (provider.builtIn || provider.requiresOpenaiAuth) {
+      return {
+        source: "codex",
+        provider,
+        settings,
+        models: await listCodexModels(),
+      };
+    }
+    throw new Error(`provider ${provider.id} 未配置 base_url，无法查询 /models。`);
+  }
+  if (provider.envKey && !process.env[provider.envKey]) {
+    throw new Error(`当前 Bridge 进程看不到环境变量 ${provider.envKey}；设置后需要重启对应 Bridge。`);
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), PROVIDER_MODEL_LIST_TIMEOUT_MS);
+  try {
+    const headers = { Accept: "application/json" };
+    if (provider.envKey) headers.Authorization = `Bearer ${process.env[provider.envKey]}`;
+    const response = await fetch(url, { method: "GET", headers, signal: controller.signal });
+    const bodyText = await response.text();
+    let body = null;
+    if (bodyText.trim()) {
+      try {
+        body = JSON.parse(bodyText);
+      } catch {
+        throw new Error(`provider ${provider.id} /models 返回的不是 JSON：${bodyText.slice(0, 300)}`);
+      }
+    }
+    if (!response.ok) {
+      const message = body?.error?.message || body?.message || bodyText.slice(0, 300) || response.statusText;
+      throw new Error(`provider ${provider.id} /models 失败：HTTP ${response.status} ${message}`);
+    }
+    return {
+      source: "provider",
+      provider,
+      settings,
+      url,
+      models: normalizeProviderModels(body),
+      rawCount: Array.isArray(body?.data) ? body.data.length : 0,
+    };
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error(`provider ${provider.id} /models 查询超时（${Math.round(PROVIDER_MODEL_LIST_TIMEOUT_MS / 1000)} 秒）。`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function normalizeProviderModels(body) {
+  const data = Array.isArray(body?.data) ? body.data : [];
+  const models = [];
+  const seen = new Set();
+  for (const item of data) {
+    const id = String(
+      typeof item === "string"
+        ? item
+        : item?.id || item?.model || item?.name || "",
+    ).trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    models.push({
+      id,
+      displayName: String(item?.displayName || item?.display_name || item?.name || id).trim(),
+      ownedBy: String(item?.owned_by || item?.ownedBy || "").trim(),
+      object: String(item?.object || "").trim(),
+    });
+  }
+  return models.sort((a, b) => a.id.localeCompare(b.id));
+}
+
+async function testCurrentProviderModel(session, modelId) {
+  const model = cleanOverride(modelId);
+  if (!model) throw new Error("缺少模型 ID。用法：/model test <模型ID>");
+  const settings = effectiveSessionSettings(session);
+  const provider = findCodexProvider(settings.provider);
+  if (!provider) {
+    throw new Error(`当前 provider 未在 config.toml 中找到：${settings.provider || "默认"}`);
+  }
+  const url = providerResponsesUrl(provider);
+  if (!url) {
+    throw new Error(`provider ${provider.id} 未配置 base_url，无法测试 /responses。`);
+  }
+  if (provider.envKey && !process.env[provider.envKey]) {
+    throw new Error(`当前 Bridge 进程看不到环境变量 ${provider.envKey}；设置后需要重启对应 Bridge。`);
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), PROVIDER_MODEL_TEST_TIMEOUT_MS);
+  const startedAt = Date.now();
+  try {
+    const headers = {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    };
+    if (provider.envKey) headers.Authorization = `Bearer ${process.env[provider.envKey]}`;
+    const response = await fetch(url, {
+      method: "POST",
+      headers,
+      signal: controller.signal,
+      body: JSON.stringify({
+        model,
+        input: "Reply with OK.",
+        max_output_tokens: 8,
+      }),
+    });
+    const bodyText = await response.text();
+    let body = null;
+    if (bodyText.trim()) {
+      try {
+        body = JSON.parse(bodyText);
+      } catch {
+        body = null;
+      }
+    }
+    if (!response.ok) {
+      const message = body?.error?.message || body?.message || bodyText.slice(0, 500) || response.statusText;
+      throw new Error(`HTTP ${response.status} ${message}`);
+    }
+    return {
+      provider,
+      settings,
+      model,
+      url,
+      elapsedMs: Date.now() - startedAt,
+      responseId: String(body?.id || "").trim(),
+    };
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error(`provider ${provider.id} /responses 测试超时（${Math.round(PROVIDER_MODEL_TEST_TIMEOUT_MS / 1000)} 秒）。`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function startOrResumeAppServerThread(client, session) {
   const params = appServerStartParams(session);
   if (session.codexThreadId) {
@@ -7127,7 +7294,17 @@ async function handleProviderCommand(chatId, rest, messageId) {
   }
 
   if (action === "list") {
-    await sendMarkdown(chatId, providerListMarkdown(session), "provider-list", messageId);
+    const scope = String(args[1] || "").toLowerCase();
+    if (["shortcut", "shortcuts", "bundle", "bundles"].includes(scope)) {
+      await sendMarkdown(chatId, providerShortcutListMarkdown(session), "provider-shortcuts", messageId);
+    } else {
+      await sendMarkdown(chatId, providerListMarkdown(session), "provider-list", messageId);
+    }
+    return;
+  }
+
+  if (["shortcut", "shortcuts", "bundle", "bundles"].includes(action)) {
+    await sendMarkdown(chatId, providerShortcutListMarkdown(session), "provider-shortcuts", messageId);
     return;
   }
 
@@ -7191,7 +7368,7 @@ function providerStatusMarkdown(session, title = "Codex provider") {
     "",
     `当前运行设置：${settingsSummary(session)}`,
     "",
-    "用法：`/provider list`、`/provider <providerId>`、`/provider save <providerId>`、`/provider clear`",
+    "用法：`/provider list`、`/provider shortcuts`、`/provider <providerId>`、`/provider save <providerId>`、`/provider clear`",
   ];
   return lines.join("\n");
 }
@@ -7200,17 +7377,6 @@ function providerListMarkdown(session, title = "Codex provider 列表") {
   const settings = effectiveSessionSettings(session);
   const providers = listCodexProviders();
   const lines = [`**${title}**`, ""];
-  if (PROVIDER_BUNDLES.length) {
-    lines.push("**组合 provider**");
-    for (const bundle of PROVIDER_BUNDLES) {
-      const marker = bundle.id === session.providerBundleOverride ? " ← 当前" : "";
-      const exists = findCodexProvider(bundle.provider);
-      const availability = exists ? "" : "；底层 provider 未配置";
-      lines.push(`- \`${bundle.id}\`${marker}：${bundle.name}；${providerBundleLabel(bundle)}${availability}`);
-    }
-    lines.push("");
-    lines.push("**Codex provider**");
-  }
   for (const provider of providers) {
     const marker = provider.id === settings.provider ? " ← 当前" : "";
     lines.push(`- \`${provider.id}\`${marker}：${provider.name || provider.id}；${providerDetailLine(provider)}`);
@@ -7218,6 +7384,25 @@ function providerListMarkdown(session, title = "Codex provider 列表") {
   lines.push("");
   lines.push("只切当前飞书会话：`/provider <providerId>`");
   lines.push("同时写入用户级 config.toml：`/provider save <providerId>`");
+  lines.push("查看旧组合快捷方式：`/provider shortcuts`");
+  return lines.join("\n");
+}
+
+function providerShortcutListMarkdown(session, title = "Codex provider 快捷组合") {
+  const lines = [`**${title}**`, ""];
+  if (!PROVIDER_BUNDLES.length) {
+    lines.push("当前没有配置快捷组合。");
+    return lines.join("\n");
+  }
+  for (const bundle of PROVIDER_BUNDLES) {
+    const marker = bundle.id === session.providerBundleOverride ? " ← 当前" : "";
+    const exists = findCodexProvider(bundle.provider);
+    const availability = exists ? "" : "；底层 provider 未配置";
+    lines.push(`- \`${bundle.id}\`${marker}：${bundle.name}；${providerBundleLabel(bundle)}${availability}`);
+  }
+  lines.push("");
+  lines.push("快捷组合仍可直接使用，例如：`/provider m2c-kimi`。");
+  lines.push("它会同时设置 provider、model 和 reasoning；默认 `/provider list` 只显示真实 Codex provider。");
   return lines.join("\n");
 }
 
@@ -7246,11 +7431,25 @@ async function handleModelCommand(chatId, rest, messageId) {
     return;
   }
 
-  if (action === "list") {
+  if (action === "list" || action === "refresh") {
     try {
       await sendMarkdown(chatId, await modelListMarkdown(session), "model-list", messageId);
     } catch (error) {
-      await sendMarkdown(chatId, runtimeCommandErrorMarkdown("model/list 查询失败", error), "model-list-error", messageId);
+      await sendMarkdown(chatId, runtimeCommandErrorMarkdown("provider /models 查询失败", error), "model-list-error", messageId);
+    }
+    return;
+  }
+
+  if (action === "test" || action === "check") {
+    const model = cleanOverride(args[1]);
+    if (!model) {
+      await sendText(chatId, "用法：`/model test <模型ID>`，例如 `/model test gpt-5.5`。", "model-test-usage", messageId);
+      return;
+    }
+    try {
+      await sendMarkdown(chatId, modelTestMarkdown(await testCurrentProviderModel(session, model)), "model-test", messageId);
+    } catch (error) {
+      await sendMarkdown(chatId, runtimeCommandErrorMarkdown("provider /responses 测试失败", error), "model-test-error", messageId);
     }
     return;
   }
@@ -7327,28 +7526,73 @@ function modelStatusMarkdown(session, title = "Codex model") {
     `provider：\`${settings.provider || "默认"}\``,
     `速度：\`${displayServiceTier(settings.serviceTier) || "默认"}\``,
     "",
-    "用法：`/model list`、`/model <模型ID> [推理强度]`、`/model effort <强度>`、`/model save <模型ID> [强度]`、`/model clear`",
+    "用法：`/model list`、`/model refresh`、`/model test <模型ID>`、`/model <模型ID> [推理强度]`、`/model effort <强度>`、`/model save <模型ID> [强度]`、`/model clear`",
   ].join("\n");
+}
+
+function modelTestMarkdown(result) {
+  return [
+    "**模型测活成功**",
+    "",
+    `provider：\`${result.settings.provider || "默认"}\``,
+    `model：\`${result.model}\``,
+    `接口：\`${result.url}\``,
+    result.provider?.envKey ? `鉴权：\`${result.provider.envKey}\`` : "",
+    result.responseId ? `response id：\`${result.responseId}\`` : "",
+    `耗时：${result.elapsedMs} ms`,
+    "",
+    "这次测试只确认当前 provider + model 能完成一次轻量 `/responses` 请求，不会切换会话模型，也不会写入 config.toml。",
+  ].filter(Boolean).join("\n");
 }
 
 async function modelListMarkdown(session) {
   const settings = effectiveSessionSettings(session);
-  const models = await listCodexModels();
-  const lines = ["**Codex model 列表**", ""];
+  const result = await listCurrentProviderModels(session);
+  const models = result.models;
+  const lines = [
+    result.source === "provider" ? "**当前 provider 模型列表**" : "**Codex model 列表**",
+    "",
+    `provider：\`${settings.provider || "默认"}\``,
+  ];
+  if (result.source === "provider") {
+    lines.push(`来源：\`${result.url}\``);
+    if (result.provider?.envKey) lines.push(`鉴权：\`${result.provider.envKey}\``);
+  } else {
+    lines.push("来源：Codex app-server `model/list`（当前 provider 无 base_url 或为内置 provider）");
+  }
+  lines.push("");
+  if (!models.length) {
+    lines.push("没有拿到模型 ID。");
+  }
   for (const model of models.slice(0, 30)) {
     const id = model.id || model.model || "";
     if (!id) continue;
     const marker = id === settings.model ? " ← 当前" : model.isDefault ? " ← 默认" : "";
-    const efforts = Array.isArray(model.supportedReasoningEfforts)
-      ? model.supportedReasoningEfforts.map((item) => item.reasoningEffort).filter(Boolean).join("/")
-      : "";
-    const fast = Array.isArray(model.serviceTiers) && model.serviceTiers.length
-      ? `；速度档：${model.serviceTiers.map((tier) => `${tier.name || tier.id}(${tier.id})`).join(", ")}`
-      : "";
-    lines.push(`- \`${id}\`${marker}：${model.displayName || id}${efforts ? `；推理 ${efforts}` : ""}${fast}`);
+    if (result.source === "provider") {
+      const detail = [
+        model.displayName && model.displayName !== id ? model.displayName : "",
+        model.ownedBy ? `owned_by ${model.ownedBy}` : "",
+      ].filter(Boolean).join("；");
+      lines.push(`- \`${id}\`${marker}${detail ? `：${detail}` : ""}`);
+    } else {
+      const efforts = Array.isArray(model.supportedReasoningEfforts)
+        ? model.supportedReasoningEfforts.map((item) => item.reasoningEffort).filter(Boolean).join("/")
+        : "";
+      const fast = Array.isArray(model.serviceTiers) && model.serviceTiers.length
+        ? `；速度档：${model.serviceTiers.map((tier) => `${tier.name || tier.id}(${tier.id})`).join(", ")}`
+        : "";
+      lines.push(`- \`${id}\`${marker}：${model.displayName || id}${efforts ? `；推理 ${efforts}` : ""}${fast}`);
+    }
+  }
+  if (models.length > 30) {
+    lines.push(`- 还有 ${models.length - 30} 个模型未显示。`);
   }
   lines.push("");
+  if (result.source === "provider") {
+    lines.push("`/model list` 和 `/model refresh` 都会实时查询当前 provider 的 `/models`；这个列表只是发现工具，不是白名单。");
+  }
   lines.push("切当前会话：`/model <模型ID> [推理强度]`，例如 `/model gpt-5.5 xhigh`");
+  lines.push("保存为全局默认：`/model save <模型ID> [推理强度]`");
   return lines.join("\n");
 }
 
@@ -7642,8 +7886,8 @@ function helpMarkdown() {
     "`/how` — 同 `/now`",
     "`/context` — 查看当前 Codex 原生 thread、token 和压缩状态",
     "`/goal [目标]` — 查看或启动原生 Codex Goal mode；运行中普通消息会作为当前 goal 的补充指令；支持 `/goal pause`、`/goal resume`、`/goal clear`",
-    "`/provider [id]` — 查看或切换当前会话 provider；`/provider list` 列出可用 provider",
-    "`/model [模型ID] [推理强度]` — 查看或切换当前会话模型；`/model list` 列出模型",
+    "`/provider [id]` — 查看或切换当前会话 provider；`/provider list` 列出真实 provider；`/provider shortcuts` 列出旧快捷组合",
+    "`/model [模型ID] [推理强度]` — 查看或切换当前会话模型；`/model list` 查询当前 provider 的 /models；`/model test <id>` 测活",
     "`/fast on|off|status` — 切换或查看 Codex Fast 速度模式",
     "`/compact` — 触发当前原生 thread 的上下文压缩",
     "`/sessions` — 列出飞书会话和 Codex 侧边栏可见会话",

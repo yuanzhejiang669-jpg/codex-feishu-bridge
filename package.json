@@ -5,8 +5,11 @@
   "type": "module",
   "description": "Windows bridge that connects a Feishu bot to local Codex.",
   "scripts": {
-    "check": "node --check codex-feishu-bridge.mjs && node --check register-codex-feishu-bot.mjs",
-    "register": "node register-codex-feishu-bot.mjs"
+    "check": "node --check codex-feishu-bridge.mjs && node --check register-codex-feishu-bot.mjs && node --check control-panel.mjs && node --check control-panel/app.js",
+    "doctor": "powershell.exe -NoProfile -File doctor-codex-feishu-bridge.ps1",
+    "doctor:json": "powershell.exe -NoProfile -File doctor-codex-feishu-bridge.ps1 -Json",
+    "register": "node register-codex-feishu-bot.mjs",
+    "panel": "node control-panel.mjs"
   },
   "engines": {
     "node": ">=20"

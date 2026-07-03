@@ -99,6 +99,22 @@ function Test-WatchdogCommandMatchesInstance {
   return $CommandLine -match "(?i)\s-Name\s+[`"']?$escaped[`"']?(?:\s|$)"
 }
 
+function ConvertFrom-CimProcessDate {
+  param($Value)
+  if (-not $Value) { return $null }
+  if ($Value -is [datetime]) { return $Value }
+
+  try {
+    return [System.Management.ManagementDateTimeConverter]::ToDateTime([string]$Value)
+  } catch {
+    try {
+      return [datetime]$Value
+    } catch {
+      return $null
+    }
+  }
+}
+
 function Stop-StaleWatchdogProcesses {
   if ($WatchdogTimeoutSeconds -le 0) { return }
   $now = Get-Date
@@ -110,11 +126,7 @@ function Stop-StaleWatchdogProcesses {
     if (-not (Test-WatchdogCommandMatchesInstance ([string]$processInfo.CommandLine))) { continue }
 
     $startedAt = $null
-    try {
-      $startedAt = [System.Management.ManagementDateTimeConverter]::ToDateTime($processInfo.CreationDate)
-    } catch {
-      $startedAt = $null
-    }
+    $startedAt = ConvertFrom-CimProcessDate $processInfo.CreationDate
     if (-not $startedAt) { continue }
 
     $ageSeconds = ($now - $startedAt).TotalSeconds

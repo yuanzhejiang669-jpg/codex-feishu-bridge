@@ -1,0 +1,62 @@
+$ErrorActionPreference = "Stop"
+
+$baseDataRoot = Join-Path $env:LOCALAPPDATA "CodexFeishuBridge"
+$panelRoot = Join-Path $baseDataRoot "control-panel"
+$stateDir = Join-Path $panelRoot "state"
+$logDir = Join-Path $panelRoot "logs"
+$pidFile = Join-Path $stateDir "control-panel.pid"
+$stopLog = Join-Path $logDir "control-panel-stop.log"
+$panelScript = Join-Path $PSScriptRoot "control-panel.mjs"
+
+New-Item -ItemType Directory -Force -Path $stateDir, $logDir | Out-Null
+
+function Write-StopLog {
+  param([string]$Message)
+  Add-Content -LiteralPath $stopLog -Value ("{0} {1}" -f (Get-Date).ToString("o"), $Message) -Encoding UTF8
+}
+
+function Test-IsControlPanelProcess {
+  param([int]$ProcessIdValue)
+  $processInfo = Get-CimInstance Win32_Process -Filter "ProcessId=$ProcessIdValue" -ErrorAction SilentlyContinue
+  if (-not $processInfo) { return $false }
+  return ([string]$processInfo.CommandLine) -like "*$panelScript*"
+}
+
+$targets = @()
+if (Test-Path -LiteralPath $pidFile) {
+  $processIdText = (Get-Content -LiteralPath $pidFile -Raw -ErrorAction SilentlyContinue).Trim()
+  if ($processIdText -match '^\d+$') {
+    $targets += [int]$processIdText
+  }
+}
+
+$processInfos = Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue
+foreach ($processInfo in @($processInfos)) {
+  $processIdValue = [int]$processInfo.ProcessId
+  if (Test-IsControlPanelProcess -ProcessIdValue $processIdValue) {
+    $targets += $processIdValue
+  }
+}
+
+$targets = @($targets | Sort-Object -Unique)
+if (-not $targets.Count) {
+  Write-StopLog "no control panel process found"
+  Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue
+  exit 0
+}
+
+foreach ($processIdValue in $targets) {
+  if (-not (Test-IsControlPanelProcess -ProcessIdValue $processIdValue)) {
+    Write-StopLog "skip pid=$processIdValue because it is not control-panel.mjs"
+    continue
+  }
+
+  try {
+    Stop-Process -Id $processIdValue -Force -ErrorAction Stop
+    Write-StopLog "stopped control panel pid=$processIdValue"
+  } catch {
+    Write-StopLog "failed to stop pid=${processIdValue}: $($_.Exception.Message)"
+  }
+}
+
+Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue

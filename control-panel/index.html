@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Codex 飞书 Bridge 新设备控制面板</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark">桥</div>
+        <div>
+          <h1>Codex 飞书 Bridge 新设备控制面板</h1>
+          <p>只读监控本机 10 个 Bot、watchdog、本地模型代理和 Codex Desktop 侧边栏索引。</p>
+        </div>
+      </div>
+      <div class="top-actions">
+        <button id="refreshButton" type="button">刷新</button>
+        <label class="toggle">
+          <input id="autoRefresh" type="checkbox" checked />
+          <span>自动刷新</span>
+        </label>
+      </div>
+    </header>
+
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="控制面板目录">
+        <div class="sidebar-inner">
+          <div class="sidebar-group">
+            <div class="sidebar-kicker">运行</div>
+            <a class="nav-item is-active" href="#overview" data-panel="overview">
+              <span class="nav-icon">总</span>
+              <span><strong>仪表盘</strong><small>运行总览</small></span>
+            </a>
+            <a class="nav-item" href="#bot-status" data-panel="bot-status">
+              <span class="nav-icon">机</span>
+              <span><strong>Bot 状态</strong><small>10 个 Bridge 实例</small></span>
+            </a>
+          </div>
+
+          <div class="sidebar-group">
+            <div class="sidebar-kicker">模型</div>
+            <a class="nav-item" href="#local-proxies" data-panel="local-proxies">
+              <span class="nav-icon">代</span>
+              <span><strong>本地代理</strong><small>8788 / 8789</small></span>
+            </a>
+            <a class="nav-item" href="#codex-config-section" data-panel="codex-config-section">
+              <span class="nav-icon">设</span>
+              <span><strong>全局设置</strong><small>config.toml 默认值</small></span>
+            </a>
+            <a class="nav-item" href="#provider-config" data-panel="provider-config">
+              <span class="nav-icon">源</span>
+              <span><strong>Provider 配置</strong><small>模型供应商列表</small></span>
+            </a>
+          </div>
+
+          <div class="sidebar-group">
+            <div class="sidebar-kicker">控制</div>
+            <a class="nav-item" href="#management" data-panel="management">
+              <span class="nav-icon">控</span>
+              <span><strong>管理操作</strong><small>添加 Provider / 重启</small></span>
+            </a>
+            <a class="nav-item" href="#doctor" data-panel="doctor">
+              <span class="nav-icon">检</span>
+              <span><strong>系统自检</strong><small>安装 / 迁移 / 健康检查</small></span>
+            </a>
+            <a class="nav-item" href="#recent-problems" data-panel="recent-problems">
+              <span class="nav-icon">警</span>
+              <span><strong>最近问题</strong><small>日志告警</small></span>
+            </a>
+          </div>
+        </div>
+      </aside>
+
+      <main class="content">
+      <div id="overview" class="panel-page is-active" data-panel-page="overview">
+      <section class="hero">
+        <div>
+          <h2>当前总览</h2>
+          <p>绿色表示可正常观察；黄色表示需要关注；红色表示离线或关键数据缺失。</p>
+        </div>
+        <div id="lastUpdated" class="updated">等待刷新</div>
+      </section>
+
+      <section class="summary-grid" aria-label="总览">
+        <article class="metric">
+          <span class="metric-label">Bot 在线</span>
+          <strong id="onlineBots">-</strong>
+          <span id="botTotal" class="metric-note">共 - 个</span>
+        </article>
+        <article class="metric">
+          <span class="metric-label">正在运行任务</span>
+          <strong id="activeRuns">-</strong>
+          <span class="metric-note">来自 active-runs.json</span>
+        </article>
+        <article class="metric">
+          <span class="metric-label">Watchdog 异常</span>
+          <strong id="watchdogIssues">-</strong>
+          <span class="metric-note">按最近 watchdog.log 判断</span>
+        </article>
+        <article class="metric">
+          <span class="metric-label">本地模型代理</span>
+          <strong id="proxyCount">-</strong>
+          <span class="metric-note">8788 / 8789</span>
+        </article>
+      </section>
+
+      <section id="status-guide" class="section">
+        <div class="section-head">
+          <div>
+            <h2>这些状态是什么意思</h2>
+            <p>面板继续保持只读。它只读取本机文件、日志、端口和计划任务，不会重启 Bot，也不会改 provider 或 API key。</p>
+          </div>
+        </div>
+        <div class="explain-grid">
+          <div><strong>在线</strong><span>PID 文件指向的 Bridge 进程还活着。</span></div>
+          <div><strong>任务</strong><span>active-runs.json 里仍有未完成 run。</span></div>
+          <div><strong>最近运行</strong><span>最近一次真正执行 Codex turn 时用的 provider/model。</span></div>
+          <div><strong>侧边栏索引</strong><span>Bridge 是否把 thread 注册并同步到 Codex Desktop 可见索引。</span></div>
+        </div>
+      </section>
+      </div>
+
+      <section id="bot-status" class="section panel-page" data-panel-page="bot-status">
+        <div class="section-head">
+          <div>
+            <h2>Bot 运行状态</h2>
+            <p>点击每个 Bot 的“路径与索引详情”可以看到所有关键绝对路径。</p>
+          </div>
+        </div>
+        <div id="botCards" class="bot-grid"></div>
+      </section>
+
+      <section id="local-proxies" class="section panel-page" data-panel-page="local-proxies">
+          <h2>本地模型代理</h2>
+          <p class="muted">这两个端口由 mimo2codex 代理 watchdog 维护，所有 Bot 共用。</p>
+          <div id="proxyList" class="stack"></div>
+      </section>
+
+      <section id="codex-config-section" class="section panel-page" data-panel-page="codex-config-section">
+          <h2>全局 Codex 设置</h2>
+          <p class="muted">这是用户级 config.toml 的默认配置；单个飞书会话可能有会话覆盖。</p>
+          <dl id="codexConfig" class="kv"></dl>
+      </section>
+
+      <section id="provider-config" class="section panel-page" data-panel-page="provider-config">
+        <h2>Provider 配置</h2>
+        <p class="muted">这里只显示 env key 是否可见，不显示 API key 明文。</p>
+        <div class="table-wrap compact">
+          <table>
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>名称</th>
+                <th>base_url</th>
+                <th>wire_api</th>
+                <th>环境变量</th>
+              </tr>
+            </thead>
+            <tbody id="providerRows"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="management" class="section management-section panel-page" data-panel-page="management">
+        <div class="section-head">
+          <div>
+            <h2>管理操作</h2>
+            <p>这里会写入配置或重启 Bridge 进程，默认都需要确认文本。第一版只支持 GPT / Responses 兼容 provider。</p>
+          </div>
+        </div>
+        <div class="manage-grid">
+          <article class="manage-card">
+            <h3>添加 GPT Provider</h3>
+            <p>填写 provider 后先拉取 `/models`，再用一个模型做 `/responses` 测活，最后才允许写入 `config.toml`。</p>
+            <div class="path-hint">
+              <span>写入位置</span>
+              <code id="providerConfigPath">-</code>
+            </div>
+            <form id="providerForm" class="form-grid">
+              <label>provider id<input name="id" placeholder="exampleapi" autocomplete="off" /></label>
+              <label>名称<input name="name" placeholder="https://example.com" autocomplete="off" /></label>
+              <label>base_url<input name="baseUrl" placeholder="https://example.com/v1" autocomplete="off" /></label>
+              <label>env_key<input name="envKey" placeholder="EXAMPLE_API_KEY" autocomplete="off" /></label>
+              <label>测试模型 ID<input name="model" placeholder="gpt-5.5" autocomplete="off" /></label>
+              <label>确认写入<input name="confirm" placeholder="写入时输入 provider id" autocomplete="off" /></label>
+            </form>
+            <div class="button-row">
+              <button id="previewProviderButton" type="button">拉取模型并预览</button>
+              <button id="testProviderButton" type="button">测活模型</button>
+              <button id="addProviderButton" type="button" class="danger-button">写入 config.toml</button>
+            </div>
+            <div id="providerActionResult" class="action-result"></div>
+          </article>
+
+          <article class="manage-card">
+            <h3>安全重启中心</h3>
+            <p>只重启空闲 Bot。有 active run 的 Bot 会自动跳过。这里重启的是每个 Bot 自己的 Bridge 进程，不是 watchdog。</p>
+            <div class="path-hint">
+              <span>启动脚本</span>
+              <code id="restartStartScript">-</code>
+              <span>停止脚本</span>
+              <code id="restartStopScript">-</code>
+            </div>
+            <div id="restartBotList" class="restart-list"></div>
+            <label class="confirm-label">确认文本<input id="restartConfirm" placeholder="输入：重启空闲Bot" autocomplete="off" /></label>
+            <div class="button-row">
+              <button id="selectAllIdleButton" type="button" class="secondary-button">选择全部空闲 Bot</button>
+              <button id="clearRestartSelectionButton" type="button" class="secondary-button">清空选择</button>
+              <button id="restartIdleButton" type="button" class="danger-button">重启选中的空闲 Bot</button>
+            </div>
+            <div id="restartActionResult" class="action-result"></div>
+          </article>
+        </div>
+      </section>
+
+      <section id="recent-problems" class="section panel-page" data-panel-page="recent-problems">
+        <h2>最近问题</h2>
+        <p class="muted">从各 Bot 最近日志中提取 WARN / ERROR / failed / 502 等关键词。</p>
+        <div id="problemList" class="problem-list"></div>
+      </section>
+
+      <section id="doctor" class="section panel-page" data-panel-page="doctor">
+        <div class="section-head">
+          <div>
+            <h2>系统自检</h2>
+            <p>只读检查当前设备的控制面板、10 个 Bot、watchdog、Provider 环境变量、本地代理和关键文件路径，不会重启或修改配置。</p>
+          </div>
+          <button id="doctorRefreshButton" type="button" class="secondary-button">运行自检</button>
+        </div>
+
+        <div class="doctor-summary-grid">
+          <article class="metric compact-metric">
+            <span class="metric-label">检查项</span>
+            <strong id="doctorTotalChecks">-</strong>
+            <span class="metric-note">doctor 脚本输出</span>
+          </article>
+          <article class="metric compact-metric">
+            <span class="metric-label">OK</span>
+            <strong id="doctorOk">-</strong>
+            <span class="metric-note">可以正常观察</span>
+          </article>
+          <article class="metric compact-metric">
+            <span class="metric-label">WARN</span>
+            <strong id="doctorWarn">-</strong>
+            <span class="metric-note">需要关注</span>
+          </article>
+          <article class="metric compact-metric">
+            <span class="metric-label">BAD</span>
+            <strong id="doctorBad">-</strong>
+            <span class="metric-note">需要处理</span>
+          </article>
+        </div>
+
+        <div class="path-hint full-paths">
+          <span>集中配置</span>
+          <code id="doctorConfigPath">-</code>
+          <span>自检脚本</span>
+          <code id="doctorScriptPath">-</code>
+          <span>源码目录</span>
+          <code id="doctorSourceRoot">-</code>
+          <span>运行目录</span>
+          <code id="doctorRuntimeRoot">-</code>
+        </div>
+
+        <div id="doctorNotice" class="action-result"></div>
+        <div id="doctorGroups" class="doctor-groups"></div>
+      </section>
+      </main>
+    </div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

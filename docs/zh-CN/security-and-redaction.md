@@ -7,6 +7,7 @@
 | 类型 | 示例 |
 |---|---|
 | Bridge 源码 | `codex-feishu-bridge.mjs`、启动脚本、注册脚本、watchdog 脚本 |
+| 控制面板源码 | `control-panel.mjs`、`control-panel\index.html`、`control-panel\app.js`、`control-panel\styles.css`、`doctor-codex-feishu-bridge.ps1`、`bridge.instances.json` |
 | 部署说明 | 如何安装 Node、lark-cli、Codex、watchdog |
 | 架构说明 | Workspace、Codex Home、Desktop Codex Home 的关系 |
 | 脱敏清单 | 实例名、路径模式、工具链版本、MCP 名称 |
@@ -23,6 +24,7 @@
 | Codex 会话状态 | `sessions\`、`session_index.jsonl`、`.codex-global-state.json` |
 | Bridge runtime state | `%LOCALAPPDATA%\CodexFeishuBridge\state`、`instances\*\state` |
 | Bridge 日志 | `%LOCALAPPDATA%\CodexFeishuBridge\logs`、`instances\*\logs` |
+| 控制面板运行状态 | `%LOCALAPPDATA%\CodexFeishuBridge\control-panel\state`、`%LOCALAPPDATA%\CodexFeishuBridge\control-panel\logs` |
 | 附件和输出 | `.codex-feishu-attachments`、`.codex-feishu-runtime` |
 | 私有内容 | 聊天原文、prompt、截图、二维码、附件、客户文件 |
 
@@ -57,6 +59,12 @@ rg -n "app_secret|tenant_access_token|user_access_token|authorization|bearer|\\.
 ```powershell
 Get-ChildItem -Recurse -File | Select-String -Pattern "app_secret|tenant_access_token|user_access_token|authorization|bearer|\\.lark-cli|\\.codex|auth.json|session_index|state_5|logs_2|bridge.stdout|bridge.stderr"
 ```
+
+## 控制面板的特殊边界
+
+控制面板源码可以进入公开仓库，因为它只包含展示逻辑、路径模式、实例名、端口和计划任务名。`bridge.instances.json` 也可以进入仓库，但必须保持非密钥化：只能包含设备标识、路径、Bot 名称、workspace、Codex Home、端口、URL、计划任务名。
+
+控制面板运行时产生的 PID、日志、自检输出、最近错误片段和任何从真实日志中截取的内容，不应提交到 GitHub。控制面板添加 provider 时只能写入 `env_key` 字段名，不能把真实 API key 写入 `config.toml`、文档或截图。
 
 ## inventory 仓库的后续处理
 

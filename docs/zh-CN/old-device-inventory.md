@@ -18,6 +18,8 @@
 | Bridge runtime 根目录 | `C:\Users\12644\AppData\Local\CodexFeishuBridge` |
 | 命名实例根目录 | `C:\Users\12644\AppData\Local\CodexFeishuBridge\instances` |
 | 社区辅助脚本 | `D:\Codex-Community-Tools` |
+| 控制面板地址 | `http://127.0.0.1:8320/` |
+| 控制面板 D 盘脚本建议目录 | `D:\常用\自启动脚本\Codex飞书Bridge旧设备控制面板` |
 
 ## 旧设备的执行形态
 
@@ -82,6 +84,8 @@ codex-assistant-old-baike-1 ... codex-assistant-old-baike-5
 ```text
 1 mobile + 10 普通/全局 + 6 百科 = 17
 ```
+
+控制面板默认管理目标是 16 个 Bot：`codex-assistant-old`、`codex-assistant-old1` 到 `codex-assistant-old9`、`codex-assistant-old-baike`、`codex-assistant-old-baike-1` 到 `codex-assistant-old-baike-5`。`codex-assistant-mobile` 只读展示，不纳入默认批量重启或批量修改。
 
 2026-06-24 旧设备恢复时补齐了 6 个百科 watchdog。它们必须传入各自 workspace、匹配的 `LarkProfile`，并共同指向百科共享 Codex Home：
 
@@ -229,3 +233,69 @@ C:\Users\12644\.ssh\config.bak-20260623214916
 ```
 
 这项变更只影响旧设备本机的 GitHub SSH 推送能力，不会改变新设备已有的 GitHub key 或读取能力。私钥不得提交到任何仓库。
+
+## 2026-07-03 控制面板、doctor 和 provider 一致性
+
+旧设备已经按新设备模式补齐本机控制面板体系。控制面板应运行在旧设备本机：
+
+```text
+http://127.0.0.1:8320/
+```
+
+关键文件：
+
+| 用途 | 路径 |
+|---|---|
+| 集中实例配置 | `C:\Users\12644\Documents\Codex\tools\codex-feishu-bridge\bridge.instances.json` |
+| 控制面板服务 | `C:\Users\12644\Documents\Codex\tools\codex-feishu-bridge\control-panel.mjs` |
+| 控制面板页面 | `C:\Users\12644\Documents\Codex\tools\codex-feishu-bridge\control-panel\index.html` |
+| 控制面板前端逻辑 | `C:\Users\12644\Documents\Codex\tools\codex-feishu-bridge\control-panel\app.js` |
+| 控制面板样式 | `C:\Users\12644\Documents\Codex\tools\codex-feishu-bridge\control-panel\styles.css` |
+| 系统自检脚本 | `C:\Users\12644\Documents\Codex\tools\codex-feishu-bridge\doctor-codex-feishu-bridge.ps1` |
+| 控制面板启动脚本 | `C:\Users\12644\Documents\Codex\tools\codex-feishu-bridge\start-control-panel.ps1` |
+| 控制面板停止脚本 | `C:\Users\12644\Documents\Codex\tools\codex-feishu-bridge\stop-control-panel.ps1` |
+| 控制面板运行状态 | `C:\Users\12644\AppData\Local\CodexFeishuBridge\control-panel\state` |
+| 控制面板日志 | `C:\Users\12644\AppData\Local\CodexFeishuBridge\control-panel\logs` |
+
+旧设备控制面板页面应尽量保持和新设备同款风格：左侧固定导航、顶部标题栏、右侧单栏目内容区、浅灰背景、白色 8px 卡片、路径灰底等宽展示、绿黄红状态标签。
+
+旧设备控制面板需要额外展示普通 Codex Home 和百科 Codex Home 的关系：
+
+```text
+普通 Codex Home：C:\Users\12644\.codex
+百科 Codex Home：C:\Users\12644\Documents\Codex\codex-homes\codex-assistant-old-baike
+百科 Bot 桌面镜像目标：C:\Users\12644\.codex
+```
+
+普通空间和百科空间 provider 应保持一致。2026-07-03 已补齐百科空间缺失的 provider block，使两边都包含：
+
+```text
+sub2api
+cliproxy
+local17
+lthome
+mimo2codex
+mimo2codex-apideepseek
+muyuan
+anyrouter
+icoe
+```
+
+修复原则是合并缺失 provider block，不覆盖整份 `config.toml`，不输出或写入 API key 明文，不强行改变普通空间和百科空间的默认 `model_provider` 差异。
+
+旧设备 D 盘常用脚本建议目录：
+
+```text
+D:\常用\自启动脚本\Codex飞书Bridge旧设备控制面板
+```
+
+建议包含：
+
+```text
+01-启动旧设备控制面板服务.vbs
+02-打开旧设备控制面板页面.vbs
+03-关闭旧设备控制面板服务.vbs
+说明.txt
+```
+
+关闭脚本必须只关闭 `control-panel.mjs` 对应的 Node 进程，不得误杀 Bridge、watchdog 或 8788/8789 代理。

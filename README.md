@@ -10,9 +10,10 @@ Codex Feishu Bridge 用来把飞书机器人连接到本机 Codex。它接收飞
 
 1. [中文文档地图](docs/zh-CN/README.md)
 2. [架构说明](docs/zh-CN/architecture.md)
-3. [旧设备部署清单](docs/zh-CN/old-device-inventory.md)
-4. [新设备部署清单](docs/zh-CN/new-device-inventory.md)
-5. [安全与脱敏边界](docs/zh-CN/security-and-redaction.md)
+3. [控制面板与系统自检](docs/zh-CN/control-panel.md)
+4. [旧设备部署清单](docs/zh-CN/old-device-inventory.md)
+5. [新设备部署清单](docs/zh-CN/new-device-inventory.md)
+6. [安全与脱敏边界](docs/zh-CN/security-and-redaction.md)
 
 ## 项目定位
 
@@ -149,6 +150,98 @@ Set-Location "$env:USERPROFILE\Documents\Codex\tools\codex-feishu-bridge"
 
 `/provider <id>` 只影响当前 Bridge session；`/provider save <id>` 同时写入用户级 `%USERPROFILE%\.codex\config.toml`。API key 只放在 Windows 用户环境变量里，不写入仓库。
 
+## 本地控制面板
+
+本仓库已经纳入本地中文 Web 控制面板源码，用来观察和小心管理当前设备上的 Codex Feishu Bridge 实例：
+
+```text
+http://127.0.0.1:8320
+```
+
+新设备当前通过 `bridge.instances.json` 管理 10 个实例：
+
+```text
+default
+codex-assistant-1
+codex-assistant-2
+codex-assistant-3
+codex-assistant-4
+codex-assistant-5
+codex-assistant-6
+codex-assistant-7
+codex-assistant-8
+codex-assistant-9
+```
+
+旧设备不通过新设备面板远程管理；旧设备应在 `oldpc / 12644` 本机使用同一套源码和旧设备专用 `bridge.instances.json` 单独部署，目标是 16 个默认管理 Bot + `codex-assistant-mobile` 只读展示。
+
+控制面板的普通监控页是只读的；管理页有两类写操作，必须由用户显式点击并输入确认文本：
+
+| 能力 | 实际行为 | 安全边界 |
+|---|---|---|
+| 状态监控 | 读取 PID、active-runs、watchdog 日志、Codex Home 索引文件、provider 配置、8788/8789 端口和最近错误。 | 不显示 API key 明文，不读取会话正文，不修改 Bot。 |
+| 添加 GPT Provider | 先 `GET /models`，再用指定模型 `POST /responses` 轻量测活，确认后只向用户级 `config.toml` 追加 `[model_providers.<id>]`。 | 第一版只支持 `wire_api = "responses"`；只写 env_key 名称，不写密钥值。 |
+| 安全重启 Bot | 只重启用户选中的空闲 Bridge 实例；有 active run 的实例自动跳过。 | 重启 Bridge 进程，不重启 watchdog，不重启 8788/8789 mimo2codex 代理。 |
+| 系统自检 | 调用 `doctor-codex-feishu-bridge.ps1 -Json`，输出 OK/WARN/BAD、影响、建议和绝对路径。 | 自检脚本只读。 |
+
+相关文件：
+
+| 路径 | 用途 |
+|---|---|
+| `control-panel.mjs` | 本地 HTTP/API 服务，读取 PID、active-runs、watchdog 日志、provider 配置和 8788/8789 端口状态。 |
+| `control-panel/index.html` | 中文控制面板页面。 |
+| `control-panel/styles.css` | 页面样式。 |
+| `control-panel/app.js` | 页面刷新和渲染逻辑。 |
+| `doctor-codex-feishu-bridge.ps1` | 只读系统自检脚本。 |
+| `bridge.instances.json` | 当前设备的集中实例配置。 |
+| `start-control-panel.ps1` | 启动控制面板。默认端口 `8320`。 |
+| `stop-control-panel.ps1` | 只停止 `control-panel.mjs` 对应的 Node 进程。 |
+| `start-control-panel-hidden.vbs` | 隐藏窗口启动包装。 |
+| `install-control-panel-watchdog.ps1` | 安装或卸载控制面板计划任务。 |
+
+计划任务名：
+
+```text
+CodexFeishuBridgeControlPanel
+```
+
+运行状态文件和日志位于：
+
+```text
+%LOCALAPPDATA%\CodexFeishuBridge\control-panel\state
+%LOCALAPPDATA%\CodexFeishuBridge\control-panel\logs
+```
+
+安装或修复开机自启：
+
+```powershell
+Set-Location "$env:USERPROFILE\Documents\Codex\tools\codex-feishu-bridge"
+.\install-control-panel-watchdog.ps1
+```
+
+手动启动：
+
+```powershell
+Set-Location "$env:USERPROFILE\Documents\Codex\tools\codex-feishu-bridge"
+.\start-control-panel.ps1
+```
+
+手动停止：
+
+```powershell
+Set-Location "$env:USERPROFILE\Documents\Codex\tools\codex-feishu-bridge"
+.\stop-control-panel.ps1
+```
+
+运行自检：
+
+```powershell
+npm run doctor
+npm run doctor:json
+```
+
+详细设计见 [控制面板与系统自检](docs/zh-CN/control-panel.md)。
+
 ## 常用飞书命令
 
 | 命令 | 说明 |
@@ -176,7 +269,7 @@ Set-Location "$env:USERPROFILE\Documents\Codex\tools\codex-feishu-bridge"
 - 飞书附件、截图、二维码、运行时 prompt/output
 - SSH 私钥
 - `%LOCALAPPDATA%\CodexFeishuBridge\state` 或 `instances/*/state`
-- `MIMO2CODEX_KEY`、`APIDEEPSEEK_API_KEY`、`KIMI_API_KEY`、`GLM_API_KEY` 等 provider key
+- `MIMO2CODEX_KEY`、`MUYUAN_API_KEY`、`ANYROUTER_API_KEY`、`APIDEEPSEEK_API_KEY`、`KIMI_API_KEY`、`GLM_API_KEY` 等 provider key
 
 完整规则见 [安全与脱敏边界](docs/zh-CN/security-and-redaction.md)。
 

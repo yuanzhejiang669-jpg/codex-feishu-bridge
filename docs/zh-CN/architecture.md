@@ -13,6 +13,7 @@ Codex Feishu Bridge 只有一套 Bridge 代码。通用 Bot、旧设备 Bot、�
 | Bridge runtime state | 每个 Bot 实例自己的 Bridge 状态、日志、PID、队列和 session 映射。 |
 | Codex Home | Codex 进程读取的配置、AGENTS、skills、MCP、sessions 和 SQLite 状态。 |
 | Desktop Codex Home | 可选镜像目标，用于让专用 Codex Home 创建的线程出现在默认 Codex Desktop 侧边栏。 |
+| Control Panel | 本机 127.0.0.1 Web 运维层，读取集中实例配置和运行状态，并提供受保护的 provider 添加与空闲 Bridge 重启。 |
 
 ## 主链路
 
@@ -39,7 +40,7 @@ Codex Feishu Bridge 只有一套 Bridge 代码。通用 Bot、旧设备 Bot、�
 | `CODEX_FEISHU_LARK_PROFILE` | 当前实例使用的 `lark-cli` profile。 |
 | `CODEX_FEISHU_RUN_MODE` | `app-server` 或 `exec`。 |
 | `MIMO2CODEX_KEY` | Codex 访问本机 mimo2codex Responses 兼容代理时使用的本地代理 key。 |
-| `APIDEEPSEEK_API_KEY`、`KIMI_API_KEY`、`GLM_API_KEY` | mimo2codex 上游 provider 使用的真实第三方 API key，只放在 Windows 用户环境变量里。 |
+| `MUYUAN_API_KEY`、`ANYROUTER_API_KEY`、`APIDEEPSEEK_API_KEY`、`KIMI_API_KEY`、`GLM_API_KEY` | Codex provider 或 mimo2codex 上游 provider 使用的真实第三方 API key，只放在 Windows 用户环境变量里。 |
 
 ## 第三方模型路由层
 
@@ -82,6 +83,38 @@ Bridge watchdog 和 mimo2codex watchdog 是两层不同守护：
 |---|---|---|
 | `CodexFeishuBridgeWatchdog*` | 每个 Bridge 实例和飞书事件 consumer | 某个 Bot 是否能接收飞书消息并调用 Codex。 |
 | `Mimo2CodexProxyWatchdog` | 本机 `mimo2codex` 8788/8789 代理 | 所有 Bot 切到 `m2c-*` provider 后能否访问非 GPT 上游模型。 |
+
+## 控制面板和自检层
+
+控制面板是独立的本机运维入口，不在飞书消息主链路中。它不替代 Bridge，也不替代 watchdog。它的职责是把多 Bot、多 watchdog、provider、代理端口、Codex Home 和侧边栏索引状态集中展示出来。
+
+核心文件：
+
+| 文件 | 作用 |
+|---|---|
+| `bridge.instances.json` | 当前设备的集中实例清单。新设备是 10 个 Bot；旧设备应使用 oldpc 本机专用清单，默认管理 16 个 Bot，mobile 只读展示。 |
+| `control-panel.mjs` | 本机 HTTP/API 服务，默认监听 `127.0.0.1:8320`。 |
+| `control-panel/index.html`、`control-panel/app.js`、`control-panel/styles.css` | 中文 UI，左侧导航，右侧单栏目内容区。 |
+| `doctor-codex-feishu-bridge.ps1` | 只读自检脚本，输出 OK/WARN/BAD、影响、建议和绝对路径。 |
+| `start-control-panel.ps1`、`stop-control-panel.ps1`、`install-control-panel-watchdog.ps1` | 控制面板启动、停止和开机自启动。 |
+
+关系图：
+
+```text
+control-panel.mjs
+  -> bridge.instances.json
+  -> 每个 Bot 的 runtimeRoot/state/logs
+  -> 每个 Bot 的 Codex Home / Desktop Codex Home
+  -> Windows 计划任务和端口
+  -> doctor-codex-feishu-bridge.ps1
+```
+
+普通监控页只读。管理页存在两类显式写操作：
+
+1. 添加 GPT / Responses provider：先查 `/models`，再测 `/responses`，确认后追加 provider block 到用户级 `config.toml`，只写 `env_key` 名称，不写密钥值。
+2. 安全重启：只重启被选中的空闲 Bridge 实例。active run 大于 0 的 Bot 自动跳过；不重启 watchdog，不重启 8788/8789 代理。
+
+详细说明见 [控制面板与系统自检](control-panel.md)。
 
 Bridge 侧组合 provider 会同时设置底层 provider、模型和推理强度：
 

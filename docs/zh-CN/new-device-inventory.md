@@ -184,11 +184,61 @@ pdf
 |---:|---|
 | `8317` | 本地 CLIProxy 兼容 API endpoint |
 | `8318` | 本地图像或 API endpoint |
+| `8320` | Codex Feishu Bridge 新设备控制面板 |
 | `8788` | mimo2codex 默认本地 Responses 兼容 endpoint |
 | `8789` | API DeepSeek 专用 mimo2codex endpoint |
 | `18795` | Codex browser-control extension bridge |
 
 当时未观察到 `9222` 监听。
+
+## 2026-07-03 控制面板、doctor 和集中配置
+
+新设备已经增加本机中文控制面板和自检层：
+
+```text
+http://127.0.0.1:8320/
+```
+
+关键文件：
+
+| 用途 | 路径 |
+|---|---|
+| 集中实例配置 | `C:\Users\yzjiang\Documents\Codex\tools\codex-feishu-bridge\bridge.instances.json` |
+| 控制面板服务 | `C:\Users\yzjiang\Documents\Codex\tools\codex-feishu-bridge\control-panel.mjs` |
+| 控制面板页面 | `C:\Users\yzjiang\Documents\Codex\tools\codex-feishu-bridge\control-panel\index.html` |
+| 控制面板前端逻辑 | `C:\Users\yzjiang\Documents\Codex\tools\codex-feishu-bridge\control-panel\app.js` |
+| 控制面板样式 | `C:\Users\yzjiang\Documents\Codex\tools\codex-feishu-bridge\control-panel\styles.css` |
+| 系统自检脚本 | `C:\Users\yzjiang\Documents\Codex\tools\codex-feishu-bridge\doctor-codex-feishu-bridge.ps1` |
+| 控制面板启动脚本 | `C:\Users\yzjiang\Documents\Codex\tools\codex-feishu-bridge\start-control-panel.ps1` |
+| 控制面板停止脚本 | `C:\Users\yzjiang\Documents\Codex\tools\codex-feishu-bridge\stop-control-panel.ps1` |
+| 控制面板计划任务安装脚本 | `C:\Users\yzjiang\Documents\Codex\tools\codex-feishu-bridge\install-control-panel-watchdog.ps1` |
+| 控制面板运行状态 | `C:\Users\yzjiang\AppData\Local\CodexFeishuBridge\control-panel\state` |
+| 控制面板日志 | `C:\Users\yzjiang\AppData\Local\CodexFeishuBridge\control-panel\logs` |
+| D 盘常用脚本 | `D:\常用\自启动脚本汇总\Codex飞书Bridge新设备控制面板` |
+
+`bridge.instances.json` 当前描述 10 个 Bot：
+
+```text
+default
+codex-assistant-1
+codex-assistant-2
+codex-assistant-3
+codex-assistant-4
+codex-assistant-5
+codex-assistant-6
+codex-assistant-7
+codex-assistant-8
+codex-assistant-9
+```
+
+控制面板页面采用左侧导航和右侧单栏目内容区。主要栏目包括：仪表盘、Bot 状态、本地代理、全局设置、Provider 配置、管理操作、系统自检、最近问题。
+
+普通监控页面只读；管理操作有两类写入能力：
+
+- 添加 GPT / Responses provider：先拉取 `/models`，再做轻量 `/responses` 测活，确认后追加 provider block 到 `C:\Users\yzjiang\.codex\config.toml`，只写 `env_key` 名称，不写密钥。
+- 安全重启空闲 Bot：读取 `active-runs.json`，有 active run 的实例自动跳过；只重启 Bridge 进程，不重启 watchdog，不重启 8788/8789 代理。
+
+doctor 自检覆盖：集中配置、Node.js、关键源码文件、用户级 `config.toml`、provider env_key 可见性、控制面板进程/端口/计划任务、每个 Bot 的 PID/active run/watchdog/侧边栏索引、本地代理端口和 `Mimo2CodexProxyWatchdog`。
 
 ## 和旧设备对比时的重点
 
