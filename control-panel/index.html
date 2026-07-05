@@ -12,7 +12,7 @@
         <div class="brand-mark">桥</div>
         <div>
           <h1>Codex 飞书 Bridge 新设备控制面板</h1>
-          <p>只读监控本机 10 个 Bot、watchdog、本地模型代理和 Codex Desktop 侧边栏索引。</p>
+          <p>只读监控本机 <span data-bot-count>加载中</span> 个 Bot、watchdog、本地模型代理和 Codex Desktop 侧边栏索引。</p>
         </div>
       </div>
       <div class="top-actions">
@@ -26,6 +26,7 @@
 
     <div class="app-shell">
       <aside class="sidebar" aria-label="控制面板目录">
+        <button id="sidebarToggle" class="sidebar-toggle" type="button" title="收起/展开侧边栏" aria-label="收起或展开侧边栏">‹</button>
         <div class="sidebar-inner">
           <div class="sidebar-group">
             <div class="sidebar-kicker">运行</div>
@@ -35,7 +36,7 @@
             </a>
             <a class="nav-item" href="#bot-status" data-panel="bot-status">
               <span class="nav-icon">机</span>
-              <span><strong>Bot 状态</strong><small>10 个 Bridge 实例</small></span>
+              <span><strong>Bot 状态</strong><small><span data-bot-count>加载中</span> 个 Bridge 实例</small></span>
             </a>
           </div>
 
@@ -60,6 +61,14 @@
             <a class="nav-item" href="#management" data-panel="management">
               <span class="nav-icon">控</span>
               <span><strong>管理操作</strong><small>添加 Provider / 重启</small></span>
+            </a>
+            <a class="nav-item" href="#workspace-factory" data-panel="workspace-factory">
+              <span class="nav-icon">厂</span>
+              <span><strong>工作空间工厂</strong><small>垂类 Bot 预览</small></span>
+            </a>
+            <a class="nav-item" href="#bot-cleanup" data-panel="bot-cleanup">
+              <span class="nav-icon">清</span>
+              <span><strong>Bot 清理</strong><small>残留 / 卸载</small></span>
             </a>
             <a class="nav-item" href="#doctor" data-panel="doctor">
               <span class="nav-icon">检</span>
@@ -147,8 +156,8 @@
       <section id="provider-config" class="section panel-page" data-panel-page="provider-config">
         <h2>Provider 配置</h2>
         <p class="muted">这里只显示 env key 是否可见，不显示 API key 明文。</p>
-        <div class="table-wrap compact">
-          <table>
+        <div class="table-wrap compact provider-table-wrap">
+          <table class="provider-table">
             <thead>
               <tr>
                 <th>ID</th>
@@ -183,6 +192,7 @@
               <label>名称<input name="name" placeholder="https://example.com" autocomplete="off" /></label>
               <label>base_url<input name="baseUrl" placeholder="https://example.com/v1" autocomplete="off" /></label>
               <label>env_key<input name="envKey" placeholder="EXAMPLE_API_KEY" autocomplete="off" /></label>
+              <label class="form-wide">API Key<input name="apiKey" type="password" placeholder="可选：填写后自动写入用户环境变量" autocomplete="off" /></label>
               <label>测试模型 ID<input name="model" placeholder="gpt-5.5" autocomplete="off" /></label>
               <label>确认写入<input name="confirm" placeholder="写入时输入 provider id" autocomplete="off" /></label>
             </form>
@@ -192,6 +202,23 @@
               <button id="addProviderButton" type="button" class="danger-button">写入 config.toml</button>
             </div>
             <div id="providerActionResult" class="action-result"></div>
+          </article>
+
+          <article class="manage-card">
+            <h3>同步全局 Provider 到空间</h3>
+            <p>把全局 <code>%USERPROFILE%\.codex\config.toml</code> 里的 <code>[model_providers.*]</code> 同步到所有独立 Codex Home。不会同步 API key 明文，不改默认模型，不动 MCP、skills、会话、日志或 watchdog。</p>
+            <div class="path-hint">
+              <span>同步源</span>
+              <code id="providerSyncSourcePath">-</code>
+              <span>发现空间</span>
+              <code id="providerSyncTargetCount">-</code>
+            </div>
+            <label class="confirm-label">确认文本<input id="providerSyncConfirm" placeholder="输入：同步Provider到空间" autocomplete="off" /></label>
+            <div class="button-row">
+              <button id="previewProviderSyncButton" type="button" class="secondary-button">预览同步</button>
+              <button id="syncProvidersButton" type="button" class="danger-button">执行同步</button>
+            </div>
+            <div id="providerSyncResult" class="action-result"></div>
           </article>
 
           <article class="manage-card">
@@ -215,9 +242,165 @@
         </div>
       </section>
 
+      <section id="workspace-factory" class="section management-section panel-page" data-panel-page="workspace-factory">
+        <div class="section-head">
+          <div>
+            <h2>垂类 Bot / 工作空间工厂</h2>
+            <p>当前阶段只生成预览，不创建飞书 APP、不扫码授权、不写入实例配置、不启动或重启 Bot。</p>
+          </div>
+        </div>
+
+        <div class="manage-grid factory-grid">
+          <article class="manage-card">
+            <h3>创建方案输入</h3>
+            <p>用于规划一组独立 Codex Home 的垂类 Bot，例如写作空间 1 到 6。</p>
+            <form id="factoryForm" class="form-grid">
+              <label>空间名称<input name="spaceName" value="写作" autocomplete="off" /></label>
+              <label>空间 slug<input name="slug" value="writing" autocomplete="off" /></label>
+              <label>Bot 数量<input name="count" type="number" min="1" max="16" value="6" /></label>
+              <label>起始序号<input name="baseIndex" type="number" min="1" max="99" value="1" /></label>
+              <label>飞书显示名模板<input name="displayNamePattern" value="Codex助手{index}-写作" autocomplete="off" /></label>
+              <label>实例名模板<input name="instanceNamePattern" value="codex-assistant-{index}-writing" autocomplete="off" /></label>
+              <label>权限基准 profile<input name="baselineProfile" value="codex-assistant-1" autocomplete="off" /></label>
+              <label>brand<input name="brand" value="feishu" autocomplete="off" /></label>
+              <label>workspace 根目录<input name="workspaceRoot" value="%USERPROFILE%\Documents\Codex\workspaces" autocomplete="off" /></label>
+              <label>Codex Home 根目录<input name="codexHomeRoot" value="%USERPROFILE%\Documents\Codex\codex-homes" autocomplete="off" /></label>
+              <label>Codex Home 目录名<input name="codexHomeName" value="codex-assistant-writing" autocomplete="off" /></label>
+              <label>描述<input name="description" value="Codex 飞书 Bridge 写作垂类空间" autocomplete="off" /></label>
+              <label class="form-wide">头像 URL，可多行或逗号分隔<textarea name="avatarUrls" rows="3" placeholder="https://..."></textarea></label>
+            </form>
+            <div class="button-row">
+              <button id="previewFactoryButton" type="button">生成创建预览</button>
+              <button id="readScopesButton" type="button" class="secondary-button">读取权限基准</button>
+            </div>
+            <div id="factoryActionResult" class="action-result"></div>
+          </article>
+
+          <article class="manage-card">
+            <h3>权限基准</h3>
+            <p>从已授权 profile 动态读取 scopes，作为后续新 Bot 授权完整性的基准，不硬编码数量。</p>
+            <div id="factoryScopesResult" class="action-result info">尚未读取权限基准。</div>
+          </article>
+
+          <article class="manage-card">
+            <h3>本地空间初始化</h3>
+            <p>创建独立 Codex Home 和各 Bot workspace，复制安全版 config、AGENTS.md 和勾选的 skills/MCP 配置。不会创建飞书 APP 或启动 Bot。</p>
+            <div class="factory-source-grid">
+              <div>
+                <strong>可复制 Skills</strong>
+                <div id="factorySkillList" class="check-list"></div>
+              </div>
+              <div>
+                <strong>可复制 MCP 配置</strong>
+                <div id="factoryMcpList" class="check-list"></div>
+              </div>
+            </div>
+            <label class="confirm-label">确认文本<input id="factoryPrepareConfirm" placeholder="输入：初始化本地空间" autocomplete="off" /></label>
+            <div class="button-row">
+              <button id="loadFactorySourcesButton" type="button" class="secondary-button">刷新可迁移项</button>
+              <button id="prepareFactoryLocalButton" type="button" class="danger-button">初始化本地空间</button>
+            </div>
+            <div id="factoryPrepareResult" class="action-result"></div>
+          </article>
+
+          <article class="manage-card">
+            <h3>真实创建队列</h3>
+            <p>把本地初始化后的实例转成串行创建队列。队列只记录状态，不保存 appSecret、token 或 API key。</p>
+            <div class="factory-next-panel">
+              <div>
+                <strong>下一步操作区</strong>
+                <p>先点击下面某个 Bot 卡片，面板只会对当前选中的 Bot 执行下一步；不想继续创建的未创建项可以移除。</p>
+              </div>
+              <div id="factoryCurrentTarget" class="factory-current-target"></div>
+              <div id="factoryJobsProgress" class="factory-progress"></div>
+              <button id="factoryNextStepButton" type="button" class="danger-button factory-next-button">请选择 Bot 后执行下一步</button>
+              <details class="factory-advanced-steps">
+                <summary>高级操作：手动执行指定步骤</summary>
+                <div class="factory-step-grid">
+                  <label class="confirm-label">1. 权限复查确认<input id="factoryCheckScopesConfirm" placeholder="输入：复查权限" autocomplete="off" /></label>
+                  <button id="checkFactoryScopesButton" type="button" class="secondary-button">1. 复查权限</button>
+                  <label class="confirm-label">2. 补授权确认<input id="factoryStartAuthConfirm" placeholder="输入：发起补授权" autocomplete="off" /></label>
+                  <button id="startFactoryAuthButton" type="button" class="danger-button">2. 发起补授权</button>
+                  <label class="confirm-label">3. 完成确认<input id="factoryCompleteAuthConfirm" placeholder="输入：完成补授权" autocomplete="off" /></label>
+                  <button id="completeFactoryAuthButton" type="button" class="secondary-button">3. 完成补授权</button>
+                  <label class="confirm-label">4. 写入确认<input id="factoryAppendInstancesConfirm" placeholder="输入：写入实例配置" autocomplete="off" /></label>
+                  <button id="appendFactoryInstancesButton" type="button" class="danger-button">4. 写入实例配置</button>
+                  <label class="confirm-label">5. Watchdog 确认<input id="factoryInstallWatchdogsConfirm" placeholder="输入：安装新watchdog" autocomplete="off" /></label>
+                  <button id="installFactoryWatchdogsButton" type="button" class="danger-button">5. 安装新 watchdog</button>
+                  <label class="confirm-label">6. 启动确认<input id="factoryStartBotsConfirm" placeholder="输入：启动新Bot" autocomplete="off" /></label>
+                  <button id="startFactoryBotsButton" type="button" class="danger-button">6. 启动新 Bot</button>
+                </div>
+              </details>
+            </div>
+            <label class="confirm-label">确认文本<input id="factoryJobsConfirm" placeholder="输入：生成真实创建队列" autocomplete="off" /></label>
+            <div class="button-row">
+              <button id="refreshFactoryJobsButton" type="button" class="secondary-button">刷新队列</button>
+              <button id="createFactoryJobsButton" type="button" class="danger-button">生成真实创建队列</button>
+            </div>
+            <label class="confirm-label">重置确认<input id="factoryResetViewConfirm" placeholder="输入：重置创建队列显示" autocomplete="off" /></label>
+            <div class="button-row">
+              <button id="resetFactoryJobsViewButton" type="button" class="secondary-button">重置创建队列显示</button>
+            </div>
+            <label class="confirm-label">创建确认<input id="factoryRegisterConfirm" placeholder="输入：创建下一个飞书APP" autocomplete="off" /></label>
+            <div class="button-row">
+              <button id="registerNextFactoryJobButton" type="button" class="danger-button">创建当前选中 Bot / profile</button>
+            </div>
+            <div id="factoryJobsResult" class="action-result"></div>
+            <div id="factoryJobsList" class="factory-jobs"></div>
+          </article>
+        </div>
+
+        <div id="factoryPreviewResult" class="factory-preview"></div>
+      </section>
+
+      <section id="bot-cleanup" class="section panel-page" data-panel-page="bot-cleanup">
+        <div class="section-head">
+          <div>
+            <h2>Bot 清理 / 卸载</h2>
+            <p>先预检，再清理。默认保护 default 和普通 codex-assistant-1..9；单个 Bot 卸载不会删除共享 Codex Home，也不会删除飞书开发后台 APP。</p>
+          </div>
+          <button id="cleanupRefreshButton" type="button" class="secondary-button">刷新清理计划</button>
+        </div>
+
+        <div class="grid two">
+          <article class="manage-card">
+            <h3>未创建残留清理</h3>
+            <p>清理没有进入 bridge.instances.json 的半成品 workspace、registration 缓存或 runtime 目录。</p>
+            <label class="confirm-label">确认文本<input id="cleanupResidualConfirm" placeholder="输入要清理的 Bot 名" autocomplete="off" /></label>
+            <div id="cleanupResidualList" class="cleanup-list"></div>
+          </article>
+
+          <article class="manage-card">
+            <h3>正式 Bot 卸载</h3>
+            <p>只开放垂类 Bot。流程会检查 active run，停止 Bridge，删除 watchdog，移出集中实例配置，并按选项清理本机目录。</p>
+            <div class="check-list compact-checks">
+              <label><input id="cleanupRemoveRuntime" type="checkbox" checked /> 删除 runtime 目录</label>
+              <label><input id="cleanupRemoveRegistration" type="checkbox" checked /> 删除 registration 缓存</label>
+              <label><input id="cleanupRemoveWorkspace" type="checkbox" /> 删除 workspace 目录</label>
+            </div>
+            <label class="confirm-label">确认文本<input id="cleanupFormalConfirm" placeholder="输入要卸载的 Bot 名" autocomplete="off" /></label>
+            <div id="cleanupFormalList" class="cleanup-list"></div>
+          </article>
+
+          <article class="manage-card">
+            <h3>空间卸载</h3>
+            <p>卸载某个垂类空间下的全部正式 Bot，并可同时清理半成品残留和该空间 Codex Home。飞书开发后台 APP 仍需最后手动删除。</p>
+            <div class="check-list compact-checks">
+              <label><input id="cleanupSpaceRemoveWorkspaces" type="checkbox" checked /> 删除该空间所有 workspace</label>
+              <label><input id="cleanupSpaceRemoveResidual" type="checkbox" checked /> 删除该空间未创建残留</label>
+              <label><input id="cleanupSpaceRemoveCodexHome" type="checkbox" checked /> 删除该空间 Codex Home</label>
+            </div>
+            <label class="confirm-label">确认文本<input id="cleanupSpaceConfirm" placeholder="输入空间 slug，例如 writing" autocomplete="off" /></label>
+            <div id="cleanupSpaceList" class="cleanup-list"></div>
+          </article>
+        </div>
+
+        <div id="cleanupResult" class="action-result"></div>
+      </section>
+
       <section id="recent-problems" class="section panel-page" data-panel-page="recent-problems">
         <h2>最近问题</h2>
-        <p class="muted">从各 Bot 最近日志中提取 WARN / ERROR / failed / 502 等关键词。</p>
+        <p class="muted">从各 Bot 最近日志中提取真正异常，已过滤 lark-cli 正常启动、连接和监听提示。</p>
         <div id="problemList" class="problem-list"></div>
       </section>
 
@@ -225,7 +408,7 @@
         <div class="section-head">
           <div>
             <h2>系统自检</h2>
-            <p>只读检查当前设备的控制面板、10 个 Bot、watchdog、Provider 环境变量、本地代理和关键文件路径，不会重启或修改配置。</p>
+            <p>只读检查当前设备的控制面板、<span data-bot-count>加载中</span> 个 Bot、watchdog、Provider 环境变量、本地代理和关键文件路径，不会重启或修改配置。</p>
           </div>
           <button id="doctorRefreshButton" type="button" class="secondary-button">运行自检</button>
         </div>

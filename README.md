@@ -1,287 +1,161 @@
-# Codex Feishu Bridge
+# Codex 飞书 Bridge
 
-语言: [中文](README.md) | [English](README.en.md)
+把飞书 Bot 接到本机 Codex 的 Windows Bridge。它负责接收飞书消息、下载附件、调用本机 `codex app-server`、把进度和结果回写到飞书，并提供一个本地控制面板管理 Bot、Provider、工作空间和运行状态。
 
-Codex Feishu Bridge 用来把飞书机器人连接到本机 Codex。它接收飞书消息，下载图片和文件附件，在本机启动或继续 Codex 任务，并把运行进度和最终回复发回飞书。
+> 当前项目面向个人本机部署和多 Bot 工作流，不是云端托管服务。仓库只保存代码、脚本、示例配置和公开文档；真实密钥、飞书 profile、运行日志、二维码、会话状态和本机实例配置不会提交。
 
-这个仓库现在作为 **唯一的中文事实源** 来维护 Bridge 本体、架构说明、新旧设备部署清单和安全边界。飞书文档只建议保留短入口，旧的 `new-device-...inventory` 和 `old-device-...inventory` 仓库只作为历史快照，不再作为主要阅读入口。
+## 核心能力
 
-## 阅读顺序
+- 飞书消息到本机 Codex：支持普通对话、继续当前线程、附件输入、图片/文件下载。
+- 多 Bot 实例：每个 Bot 独立飞书 profile、运行目录、日志、workspace、watchdog。
+- 会话命令：`/help`、`/list`、`/switch`、`/new`、`/delete`、`/confirm delete`、`/rename` 等。
+- 安全删除：先按 `/list` 序号生成 threadId 快照，二次确认后清理 Codex DB、rollout、索引、侧边栏状态和 Bridge 绑定。
+- 垂类空间：支持写作、百科、画图等空间 Bot，共用或独立 Codex Home，并可配置桌面侧边栏镜像。
+- 控制面板：查看进程、日志、Provider、MCP、工作空间工厂、Bot 卸载和空间卸载。
+- 自动注册辅助：生成飞书 Bot、写入 lark-cli profile、校验 scopes、安装 watchdog、启动实例。
+- Provider 同步：从全局 Codex 配置同步可枚举 provider 到空间 Codex Home，密钥走环境变量。
+- Windows watchdog：通过计划任务维持 Bridge、控制面板和可选本地代理进程。
 
-1. [中文文档地图](docs/zh-CN/README.md)
-2. [架构说明](docs/zh-CN/architecture.md)
-3. [控制面板与系统自检](docs/zh-CN/control-panel.md)
-4. [旧设备部署清单](docs/zh-CN/old-device-inventory.md)
-5. [新设备部署清单](docs/zh-CN/new-device-inventory.md)
-6. [安全与脱敏边界](docs/zh-CN/security-and-redaction.md)
+## 工作方式
 
-## 项目定位
+```text
+飞书用户
+  -> 飞书 Bot / lark-cli 事件
+  -> codex-feishu-bridge.mjs
+  -> codex app-server --listen stdio://
+  -> 本机 Codex Home / workspace / sessions
+  -> Bridge 回写飞书卡片和文本
+```
 
-本仓库承担四类内容：
+每个 Bot 都是独立进程，但共用本仓库里的同一套 Bridge 代码。改 Bridge 源码后，已运行的 Bot 需要重启对应进程才会加载新代码。
 
-| 内容 | 放在这里的形式 | 说明 |
-|---|---|---|
-| Bridge 源码 | 根目录脚本和 `codex-feishu-bridge.mjs` | 长期维护的工程主体。 |
-| 架构说明 | `docs/zh-CN/architecture.md` | 解释 Bridge、Workspace、Codex Home、桌面侧边栏镜像之间的关系。 |
-| 新设备状态 | `docs/zh-CN/new-device-inventory.md` | 记录新设备的实例、路径、工具链和排查结论。 |
-| 旧设备状态 | `docs/zh-CN/old-device-inventory.md` | 记录旧设备、百科 Bot、专用 Codex Home 和桌面镜像行为。 |
+## 环境要求
 
-不要再把同一套事实分别维护在飞书文档、主项目 README、两个 inventory 仓库里。以后先更新本仓库，再让飞书入口链接到本仓库。
-
-## 检查后的更新规则
-
-每次完成本机检查、Bridge 修复、部署调整、设备迁移或 GitHub 权限修复后，都必须同步检查是否要更新文档。按下面的清单处理：
-
-| 检查或变更内容 | 必须同步更新 |
-|---|---|
-| Bridge 代码、启动参数、watchdog、侧边栏镜像逻辑变化 | `README.md`、`docs/zh-CN/architecture.md` |
-| 第三方模型路由、provider 组合、mimo2codex 拓扑变化 | `README.md`、`docs/zh-CN/architecture.md`、`docs/zh-CN/new-device-inventory.md` |
-| 旧设备实例、百科 Bot、旧设备路径、旧设备故障结论变化 | `docs/zh-CN/old-device-inventory.md` |
-| 新设备实例、新设备路径、新设备工具链或新设备对比结论变化 | `docs/zh-CN/new-device-inventory.md` |
-| 凭据、SSH key、GitHub 权限、脱敏范围、禁止提交范围变化 | `docs/zh-CN/security-and-redaction.md` |
-| 文档入口、阅读顺序、飞书入口说明变化 | `README.md`、`docs/zh-CN/README.md` |
-
-如果一次检查没有改变事实，也要在最终说明里明确“无需更新文档”。如果改变了事实但暂时不更新文档，必须说明原因。
-
-## 核心架构
-
-Bridge 面向本机可信环境：
-
-1. `lark-cli` 消费飞书机器人事件。
-2. `codex-feishu-bridge.mjs` 接收事件并解析消息、附件和本地 session。
-3. Bridge 把任务发送给 Codex，默认使用 `codex app-server --listen stdio://`。
-4. Codex 在本机 Codex Home 中创建或继续线程。
-5. Bridge 更新飞书交互卡片，并发送最终回复。
-6. Windows watchdog 定期检查 Bridge 进程和飞书事件 consumer，必要时重启。
-
-每个 Bot 实例建议有独立的飞书 app/profile、workspace、状态目录、日志目录和 watchdog。多个相关 Bot 可以共用一个专用 Codex Home，从而共享同一套 `AGENTS.md`、`config.toml`、skills、MCP 和 Codex thread 状态。
-
-## 目录结构
-
-| 路径 | 用途 |
-|---|---|
-| `codex-feishu-bridge.mjs` | Bridge 主进程。处理飞书事件、附件、Codex 执行、卡片、session、队列和命令。 |
-| `register-codex-feishu-bot.mjs` | 基于二维码的飞书 Bot 注册和 `lark-cli` profile 写入逻辑。 |
-| `register-codex-feishu-bot.ps1` | 注册器的 PowerShell 包装脚本。 |
-| `start-codex-feishu-bridge.ps1` | 启动一个 Bridge 实例，并设置 workspace、profile、Codex Home、运行模式等。 |
-| `stop-codex-feishu-bridge.ps1` | 停止一个 Bridge 实例。 |
-| `watch-codex-feishu-bridge.ps1` | Watchdog 健康检查和修复脚本。 |
-| `install-codex-feishu-watchdog.ps1` | 安装或卸载 Windows 计划任务 watchdog。 |
-| `start-mimo2codex-proxies.ps1` | 启动并健康检查本机 `mimo2codex` 代理端点。 |
-| `start-mimo2codex-proxies-hidden.vbs` | 隐藏窗口运行 `mimo2codex` 代理健康检查。 |
-| `install-mimo2codex-proxy-watchdog.ps1` | 安装或卸载本机 `mimo2codex` 代理的 Windows 计划任务 watchdog。 |
-| `docs/zh-CN/` | 统一中文文档中心。 |
-| `workspace/` | 示例 workspace 占位目录。真实运行文件不应提交。 |
-
-## 快速启动
+- Windows 10/11
+- Node.js 20+
+- 已安装并可运行的 Codex CLI / Codex Desktop 对应 `codex.exe`
+- 已安装并登录的 `lark-cli`
+- 一个可用的飞书开放平台应用，或使用本项目的注册脚本辅助创建
+- PowerShell 5.1 或 PowerShell 7
 
 安装依赖：
 
 ```powershell
-Set-Location "$env:USERPROFILE\Documents\Codex\tools\codex-feishu-bridge"
 npm install
+```
+
+语法检查：
+
+```powershell
 npm run check
 ```
 
-注册并启动一个 Bot：
+## 配置
+
+公开仓库里的 `bridge.instances.json` 是示例配置。真实设备请复制为本地配置：
 
 ```powershell
-.\register-codex-feishu-bot.ps1 `
+Copy-Item .\bridge.instances.json .\bridge.instances.local.json
+```
+
+然后修改 `bridge.instances.local.json` 里的本机路径、Bot 名、飞书 profile、workspace、Codex Home 和计划任务名。这个文件已被 `.gitignore` 忽略，不会提交。
+
+控制面板加载顺序：
+
+1. 环境变量 `CODEX_FEISHU_INSTANCES_CONFIG` 指向的文件
+2. 仓库根目录 `bridge.instances.local.json`
+3. 仓库根目录 `bridge.instances.json`
+4. 内置 fallback 配置
+
+## 启动一个 Bot
+
+示例：
+
+```powershell
+powershell.exe -NoProfile -File .\start-codex-feishu-bridge.ps1 `
   -Name codex-assistant-1 `
-  -DisplayName "Codex Assistant 1" `
+  -LarkProfile codex-assistant-1 `
   -Workspace "$env:USERPROFILE\Documents\Codex\workspaces\feishu-bridge-codex-assistant-1" `
-  -RunMode app-server `
-  -Reasoning xhigh `
-  -CodexTimeoutSeconds 0 `
-  -CodexIdleTimeoutSeconds 3600 `
-  -InstallStartup
+  -CodexHome "$env:USERPROFILE\.codex"
 ```
 
-如果这个 Bot 需要使用专用规则、skills 或 MCP，额外传入：
+停止：
 
 ```powershell
--CodexHome "$env:USERPROFILE\Documents\Codex\codex-homes\<name>"
+powershell.exe -NoProfile -File .\stop-codex-feishu-bridge.ps1 -Name codex-assistant-1
 ```
 
-如果还需要把专用 Codex Home 里的线程同步到默认 Codex Desktop 侧边栏，使用启动脚本支持的 `-DesktopCodexHome` 参数，并指向默认用户 Codex Home。
-
-## 第三方模型路由
-
-Bridge 支持通过 `/provider` 在普通 Codex provider 和组合 provider 之间切换。组合 provider 是 Bridge 侧维护的一组映射：一次性设置底层 `model_provider`、模型 ID 和推理强度，避免在飞书里分别切 `/provider`、`/model`、`/model effort`。
-
-当前非 GPT 模型接入参考项目是 [7as0nch/mimo2codex](https://github.com/7as0nch/mimo2codex)。它应作为单独本地代理运行，不把源码合并进本仓库；Bridge 只需要在 Codex `config.toml` 里配置指向本地代理的 provider block。
-
-当前组合 provider：
-
-| 组合 ID | 底层 Codex provider | 模型 | 推理强度 |
-|---|---|---|---|
-| `m2c-deepseek` | `mimo2codex` | `deepseek-v4-pro` | `xhigh` |
-| `m2c-deepseek-flash` | `mimo2codex` | `deepseek-v4-flash` | `xhigh` |
-| `m2c-apideepseek` | `mimo2codex-apideepseek` | `deepseek-v4-pro` | `xhigh` |
-| `m2c-apideepseek-flash` | `mimo2codex-apideepseek` | `deepseek-v4-flash` | `xhigh` |
-| `m2c-kimi` | `mimo2codex` | `kimi-k2.6` | `xhigh` |
-| `m2c-glm` | `mimo2codex` | `glm-5.2` | `xhigh` |
-
-典型本地代理拓扑：
-
-```text
-http://127.0.0.1:8788/v1 -> %USERPROFILE%\.mimo2codex
-http://127.0.0.1:8789/v1 -> %USERPROFILE%\.mimo2codex-apideepseek
-```
-
-本地代理必须有独立进程持续运行。安装代理 watchdog：
+安装 watchdog：
 
 ```powershell
-Set-Location "$env:USERPROFILE\Documents\Codex\tools\codex-feishu-bridge"
-.\install-mimo2codex-proxy-watchdog.ps1
+powershell.exe -NoProfile -File .\install-codex-feishu-watchdog.ps1 `
+  -Name codex-assistant-1 `
+  -LarkProfile codex-assistant-1 `
+  -Workspace "$env:USERPROFILE\Documents\Codex\workspaces\feishu-bridge-codex-assistant-1" `
+  -CodexHome "$env:USERPROFILE\.codex"
 ```
 
-计划任务名是 `Mimo2CodexProxyWatchdog`，会在登录、解锁和每 5 分钟健康检查时通过 `start-mimo2codex-proxies-hidden.vbs` 隐藏运行 `start-mimo2codex-proxies.ps1`。它只负责本机 8788/8789 代理，不替代每个 Bot 自己的 Bridge watchdog。
+## 控制面板
 
-飞书里使用：
+启动：
+
+```powershell
+npm run panel
+```
+
+默认地址：
 
 ```text
+http://127.0.0.1:8320/
+```
+
+控制面板可以做这些事：
+
+- 查看每个 Bot 的 PID、watchdog、日志、active run、最近错误。
+- 新建垂类工作空间和 Bot 注册队列。
+- 展示注册二维码、补授权二维码和每个 job 的当前状态。
+- 写入实例配置、安装 watchdog、启动 Bot。
+- 添加 Provider、写入用户环境变量、同步 Provider 到空间。
+- 卸载垂类 Bot、清理未完成注册残留、卸载整个空间。
+
+## 飞书侧命令
+
+常用命令：
+
+```text
+/help
+/list
+/switch 3
+/new
+/rename 新标题
+/delete 2
+/delete 2 4-6
+/confirm delete 1
 /provider list
-/provider m2c-deepseek
-/provider save m2c-glm
-/provider clear
-/model
 ```
 
-`/provider <id>` 只影响当前 Bridge session；`/provider save <id>` 同时写入用户级 `%USERPROFILE%\.codex\config.toml`。API key 只放在 Windows 用户环境变量里，不写入仓库。
+`/list` 会合并当前 Bot 绑定、Codex DB、rollout 文件、`session_index.jsonl`、`.codex-global-state.json` 和必要的桌面镜像，并标注来源。`/delete` 只生成待删除快照，`/confirm delete` 才真正按 threadId 清理，避免列表顺序变化造成误删。
 
-## 本地控制面板
+## 文档
 
-本仓库已经纳入本地中文 Web 控制面板源码，用来观察和小心管理当前设备上的 Codex Feishu Bridge 实例：
+- [架构说明](docs/architecture.md)
+- [控制面板](docs/control-panel.md)
+- [工作空间工厂](docs/workspace-factory.md)
+- [配置与安全边界](docs/configuration-and-security.md)
+- [故障排查](docs/troubleshooting.md)
 
-```text
-http://127.0.0.1:8320
-```
+## 社区
 
-新设备当前通过 `bridge.instances.json` 管理 10 个实例：
+本项目整理和发布时参考了 [LINUX DO](https://linux.do/) 社区的开源推广规范与开源项目分享风格。
 
-```text
-default
-codex-assistant-1
-codex-assistant-2
-codex-assistant-3
-codex-assistant-4
-codex-assistant-5
-codex-assistant-6
-codex-assistant-7
-codex-assistant-8
-codex-assistant-9
-```
+## 不会提交的内容
 
-旧设备不通过新设备面板远程管理；旧设备应在 `oldpc / 12644` 本机使用同一套源码和旧设备专用 `bridge.instances.json` 单独部署，目标是 16 个默认管理 Bot + `codex-assistant-mobile` 只读展示。
+- `.env`、密钥、token、飞书 app secret、API key
+- `.lark-cli/`、`.codex/`、真实 `config.toml`
+- `bridge.instances.local.json`
+- runtime state、日志、PID、二维码、授权页面
+- Codex 会话数据库、rollout、附件和 workspace 真实内容
 
-控制面板的普通监控页是只读的；管理页有两类写操作，必须由用户显式点击并输入确认文本：
+## 许可证
 
-| 能力 | 实际行为 | 安全边界 |
-|---|---|---|
-| 状态监控 | 读取 PID、active-runs、watchdog 日志、Codex Home 索引文件、provider 配置、8788/8789 端口和最近错误。 | 不显示 API key 明文，不读取会话正文，不修改 Bot。 |
-| 添加 GPT Provider | 先 `GET /models`，再用指定模型 `POST /responses` 轻量测活，确认后只向用户级 `config.toml` 追加 `[model_providers.<id>]`。 | 第一版只支持 `wire_api = "responses"`；只写 env_key 名称，不写密钥值。 |
-| 安全重启 Bot | 只重启用户选中的空闲 Bridge 实例；有 active run 的实例自动跳过。 | 重启 Bridge 进程，不重启 watchdog，不重启 8788/8789 mimo2codex 代理。 |
-| 系统自检 | 调用 `doctor-codex-feishu-bridge.ps1 -Json`，输出 OK/WARN/BAD、影响、建议和绝对路径。 | 自检脚本只读。 |
-
-相关文件：
-
-| 路径 | 用途 |
-|---|---|
-| `control-panel.mjs` | 本地 HTTP/API 服务，读取 PID、active-runs、watchdog 日志、provider 配置和 8788/8789 端口状态。 |
-| `control-panel/index.html` | 中文控制面板页面。 |
-| `control-panel/styles.css` | 页面样式。 |
-| `control-panel/app.js` | 页面刷新和渲染逻辑。 |
-| `doctor-codex-feishu-bridge.ps1` | 只读系统自检脚本。 |
-| `bridge.instances.json` | 当前设备的集中实例配置。 |
-| `start-control-panel.ps1` | 启动控制面板。默认端口 `8320`。 |
-| `stop-control-panel.ps1` | 只停止 `control-panel.mjs` 对应的 Node 进程。 |
-| `start-control-panel-hidden.vbs` | 隐藏窗口启动包装。 |
-| `install-control-panel-watchdog.ps1` | 安装或卸载控制面板计划任务。 |
-
-计划任务名：
-
-```text
-CodexFeishuBridgeControlPanel
-```
-
-运行状态文件和日志位于：
-
-```text
-%LOCALAPPDATA%\CodexFeishuBridge\control-panel\state
-%LOCALAPPDATA%\CodexFeishuBridge\control-panel\logs
-```
-
-安装或修复开机自启：
-
-```powershell
-Set-Location "$env:USERPROFILE\Documents\Codex\tools\codex-feishu-bridge"
-.\install-control-panel-watchdog.ps1
-```
-
-手动启动：
-
-```powershell
-Set-Location "$env:USERPROFILE\Documents\Codex\tools\codex-feishu-bridge"
-.\start-control-panel.ps1
-```
-
-手动停止：
-
-```powershell
-Set-Location "$env:USERPROFILE\Documents\Codex\tools\codex-feishu-bridge"
-.\stop-control-panel.ps1
-```
-
-运行自检：
-
-```powershell
-npm run doctor
-npm run doctor:json
-```
-
-详细设计见 [控制面板与系统自检](docs/zh-CN/control-panel.md)。
-
-## 常用飞书命令
-
-| 命令 | 说明 |
-|---|---|
-| `/help` | 查看可用命令。 |
-| `/status` | 查看 Bridge、飞书、Codex、workspace、session、goal、队列和最近失败状态。 |
-| `/list` 或 `/sessions` | 列出本地 Bridge session 和可见 Codex threads。 |
-| `/switch <序号或 id>` | 切换当前飞书聊天绑定的 session。 |
-| `/context` | 查看当前 Codex thread、context 和 token 状态。 |
-| `/provider [id]` | 查看或切换当前 session 的 Codex provider；支持 `list`、组合 provider、`save` 和 `clear`。 |
-| `/model [模型ID] [推理强度]` | 查看或切换当前 session 的模型和推理强度；支持 `list`、`effort`、`save` 和 `clear`。 |
-| `/stop` | 停止当前正在运行的 Codex 任务。 |
-| `/queue` | 查看尚未执行的队列消息。 |
-| `/clearqueue` | 清空当前聊天的队列消息。 |
-| `/stop all` | 停止当前任务并清空本实例全部队列。 |
-
-以 `/` 开头的消息会被当成 Bridge 命令。普通 Codex 任务不要以 `/` 开头。
-
-## 安全边界
-
-不要提交：
-
-- 飞书 app secret、access token、`lark-cli` 配置
-- Codex auth、SQLite 状态库、session index、rollout、日志
-- 飞书附件、截图、二维码、运行时 prompt/output
-- SSH 私钥
-- `%LOCALAPPDATA%\CodexFeishuBridge\state` 或 `instances/*/state`
-- `MIMO2CODEX_KEY`、`MUYUAN_API_KEY`、`ANYROUTER_API_KEY`、`APIDEEPSEEK_API_KEY`、`KIMI_API_KEY`、`GLM_API_KEY` 等 provider key
-
-完整规则见 [安全与脱敏边界](docs/zh-CN/security-and-redaction.md)。
-
-## 发布前检查
-
-```powershell
-git status --short
-npm run check
-```
-
-再搜索常见敏感词：
-
-```powershell
-rg -n "app_secret|tenant_access_token|user_access_token|authorization|bearer|\\.lark-cli|\\.codex|AppData" .
-```
+MIT License。详见 [LICENSE](LICENSE)。

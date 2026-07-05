@@ -6,6 +6,7 @@ node_modules/
 # Local Feishu/Codex secrets and state
 .lark-cli/
 .codex/
+bridge.instances.local.json
 auth.json
 config.toml
 *.sqlite

@@ -17,8 +17,11 @@ Options:
   --profile <name>              lark-cli profile name. Defaults to --name.
   --display-name <name>         Feishu app/bot display name shown during QR registration.
   --description <text>          Feishu app description shown during QR registration.
+  --avatar-url <url>            Feishu app avatar URL. Can be repeated, max 6.
+  --avatar-urls <urls>          Comma-separated Feishu app avatar URLs, max 6.
   --workspace <path>            Bridge workspace. Defaults to Documents\\Codex\\workspaces\\feishu-bridge-<name>.
   --codex-home <path>           Codex home used by this bot. Defaults to the normal user Codex home.
+  --desktop-codex-home <path>   Desktop Codex home used for sidebar mirror.
   --source <source>             Lark registerApp source. Defaults to codex.
   --brand <feishu|lark>         lark-cli profile brand. Defaults to feishu.
   --timeout-seconds <seconds>   Registration timeout. Defaults to 600.
@@ -57,6 +60,8 @@ async function main() {
   const workspace = path.resolve(options.workspace || defaultWorkspace(name));
   const codexHomeRaw = String(options.codexHome || "").trim();
   const codexHome = codexHomeRaw ? path.resolve(codexHomeRaw) : "";
+  const desktopCodexHomeRaw = String(options.desktopCodexHome || "").trim();
+  const desktopCodexHome = desktopCodexHomeRaw ? path.resolve(desktopCodexHomeRaw) : "";
   const brand = String(options.brand || "feishu").trim().toLowerCase();
   if (!["feishu", "lark"].includes(brand)) throw new Error("--brand must be feishu or lark");
 
@@ -68,11 +73,13 @@ async function main() {
 
   fs.mkdirSync(workspace, { recursive: true });
   if (codexHome) fs.mkdirSync(codexHome, { recursive: true });
+  if (desktopCodexHome) fs.mkdirSync(desktopCodexHome, { recursive: true });
 
   console.log(`Instance: ${name}`);
   console.log(`Lark profile: ${profile}`);
   console.log(`Workspace: ${workspace}`);
   console.log(`Codex home: ${codexHome || "default"}`);
+  console.log(`Desktop Codex home: ${desktopCodexHome || "none"}`);
   console.log(`Register source: ${source}`);
   console.log("");
 
@@ -81,6 +88,7 @@ async function main() {
     source,
     displayName: options.displayName,
     description: options.description,
+    avatarUrls: normalizeAvatarUrls(options.avatarUrl, options.avatarUrls),
     timeoutSeconds: options.timeoutSeconds,
     openQr: !options.noOpenQr,
   });
@@ -93,11 +101,11 @@ async function main() {
   console.log(`Created lark-cli profile: ${profile}`);
 
   if (!options.noStart) {
-    await startBridge({ name, profile, workspace, codexHome, options });
+    await startBridge({ name, profile, workspace, codexHome, desktopCodexHome, options });
   }
 
   if (options.installStartup) {
-    await installStartup({ name, profile, workspace, codexHome, options });
+    await installStartup({ name, profile, workspace, codexHome, desktopCodexHome, options });
   }
 
   console.log("");
@@ -128,9 +136,32 @@ function parseArgs(argv) {
     }
     const value = argv[++i];
     if (value == null || value.startsWith("--")) throw new Error(`missing value for ${token}`);
-    options[key] = value;
+    if (key === "avatarUrl") {
+      options.avatarUrl = [...toArray(options.avatarUrl), value];
+    } else {
+      options[key] = value;
+    }
   }
   return options;
+}
+
+function toArray(value) {
+  if (value == null) return [];
+  return Array.isArray(value) ? value : [value];
+}
+
+function normalizeAvatarUrls(repeatedValues, csvValues) {
+  const values = [
+    ...toArray(repeatedValues),
+    ...String(csvValues || "").split(","),
+  ].map((value) => String(value || "").trim()).filter(Boolean);
+  const unique = [];
+  for (const value of values) {
+    if (!/^https?:\/\//i.test(value)) throw new Error(`--avatar-url must be http(s): ${value}`);
+    if (!unique.includes(value)) unique.push(value);
+  }
+  if (unique.length > 6) throw new Error("--avatar-url supports at most 6 URLs");
+  return unique;
 }
 
 function safeName(raw) {
@@ -152,7 +183,7 @@ function dataRootForRegistration(name) {
   return path.join(base, "registrations", name);
 }
 
-async function registerFeishuApp({ name, source, displayName, description, timeoutSeconds, openQr }) {
+async function registerFeishuApp({ name, source, displayName, description, avatarUrls, timeoutSeconds, openQr }) {
   const lark = await import("@larksuiteoapi/node-sdk");
   const registerApp = lark.registerApp || lark.default?.registerApp;
   if (typeof registerApp !== "function") {
@@ -171,6 +202,7 @@ async function registerFeishuApp({ name, source, displayName, description, timeo
     const appPreset = {};
     if (String(displayName || "").trim()) appPreset.name = String(displayName).trim();
     if (String(description || "").trim()) appPreset.desc = String(description).trim();
+    if (avatarUrls?.length) appPreset.avatar = avatarUrls.length === 1 ? avatarUrls[0] : avatarUrls;
 
     const result = await registerApp({
       source,
@@ -307,7 +339,7 @@ async function addLarkProfile(larkCli, { profile, appId, appSecret, brand }) {
   });
 }
 
-async function startBridge({ name, profile, workspace, codexHome, options }) {
+async function startBridge({ name, profile, workspace, codexHome, desktopCodexHome, options }) {
   const script = path.join(ROOT, "start-codex-feishu-bridge.ps1");
   const args = [
     "-NoProfile",
@@ -323,6 +355,7 @@ async function startBridge({ name, profile, workspace, codexHome, options }) {
     workspace,
   ];
   addOptionalPowerShellArg(args, "-CodexHome", codexHome);
+  addOptionalPowerShellArg(args, "-DesktopCodexHome", desktopCodexHome);
   addOptionalPowerShellArg(args, "-Sandbox", options.sandbox);
   addOptionalPowerShellArg(args, "-RunMode", options.runMode);
   addOptionalPowerShellArg(args, "-Reasoning", options.reasoning);
@@ -342,7 +375,7 @@ async function startBridge({ name, profile, workspace, codexHome, options }) {
   console.log(`Bridge started: ${name}`);
 }
 
-async function installStartup({ name, profile, workspace, codexHome, options }) {
+async function installStartup({ name, profile, workspace, codexHome, desktopCodexHome, options }) {
   const script = path.join(ROOT, "install-codex-feishu-watchdog.ps1");
   const args = [
     "-NoProfile",
@@ -358,6 +391,7 @@ async function installStartup({ name, profile, workspace, codexHome, options }) 
     workspace,
   ];
   addOptionalPowerShellArg(args, "-CodexHome", codexHome);
+  addOptionalPowerShellArg(args, "-DesktopCodexHome", desktopCodexHome);
   addOptionalPowerShellArg(args, "-CodexTimeoutSeconds", options.codexTimeoutSeconds);
   addOptionalPowerShellArg(args, "-CodexIdleTimeoutSeconds", options.codexIdleTimeoutSeconds);
   addOptionalPowerShellArg(args, "-EventKeys", options.eventKeys);

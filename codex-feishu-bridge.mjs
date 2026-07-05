@@ -110,6 +110,7 @@ const STANDARD_SERVICE_TIER = "standard";
 const MIN_SIDEBAR_RECONCILE_INTERVAL_MS = 5_000;
 const PROVIDER_MODEL_LIST_TIMEOUT_MS = 30_000;
 const PROVIDER_MODEL_TEST_TIMEOUT_MS = 60_000;
+const CODEX_THREAD_ID_PATTERN = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
 const PROVIDER_BUNDLES = [
   {
     id: "m2c-deepseek",
@@ -429,6 +430,40 @@ function tomlBooleanValue(text, key) {
   return match ? match[1].toLowerCase() === "true" : false;
 }
 
+function tomlStringLiteral(value) {
+  return `"${String(value || "").replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+
+function writeTopLevelCodexConfigValue(keyPath, value) {
+  const key = String(keyPath || "").trim();
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+    throw new Error(`只支持写入顶层 config.toml 字符串键：${keyPath}`);
+  }
+  const configPath = codexUserConfigPath();
+  fs.mkdirSync(path.dirname(configPath), { recursive: true });
+  const original = fs.existsSync(configPath) ? fs.readFileSync(configPath, "utf8") : "";
+  const lines = original.replace(/\r\n/g, "\n").split("\n");
+  const replacement = `${key} = ${tomlStringLiteral(value)}`;
+  let replaced = false;
+  let inTopLevel = true;
+  const nextLines = lines.map((line) => {
+    if (/^\s*\[/.test(line)) inTopLevel = false;
+    if (inTopLevel && new RegExp(`^\\s*${escapeRegExp(key)}\\s*=`).test(line)) {
+      replaced = true;
+      return replacement;
+    }
+    return line;
+  });
+  if (!replaced) {
+    let insertAt = nextLines.findIndex((line) => /^\s*\[/.test(line));
+    if (insertAt < 0) insertAt = nextLines.length;
+    while (insertAt > 0 && nextLines[insertAt - 1] === "") insertAt -= 1;
+    nextLines.splice(insertAt, 0, replacement);
+  }
+  fs.writeFileSync(configPath, `${nextLines.join("\n").replace(/\n+$/g, "")}\n`, "utf8");
+  return { path: configPath, keyPath: key, value };
+}
+
 function cleanOverride(value) {
   const text = String(value || "").trim();
   return text || "";
@@ -560,6 +595,32 @@ function classifyCodexFailure(value, fallback = "Codex 运行失败") {
     at: Date.now(),
   };
 
+  if (
+    lower.includes("cloud config bundle")
+    || lower.includes("failed to load configuration")
+    || lower.includes("timed out waiting for cloud config")
+  ) {
+    return {
+      ...base,
+      kind: "cloud_config",
+      label: "Codex cloud config timeout",
+      recoverable: false,
+      message: "Codex cloud config 加载超时，当前无法开始这一轮。",
+      suggestion: "这通常是临时服务或网络问题；Bridge 会保留原 thread 绑定，请稍后重试同一个会话。",
+    };
+  }
+
+  if (lower.includes("no rollout found for thread id")) {
+    return {
+      ...base,
+      kind: "missing_rollout",
+      label: "Codex 会话文件缺失",
+      recoverable: false,
+      message: "当前会话绑定的 Codex 原生 thread 已经找不到 rollout 文件，无法继续续接。",
+      suggestion: "发送 /list 查看该会话状态；如果它显示异常，请用 /delete <序号> 清理坏绑定后重新发送普通消息创建新会话。",
+    };
+  }
+
   if (lower.includes("stopped by user") || lower.includes("已停止") || lower.includes("interrupted")) {
     return { ...base, kind: "user_stop", label: "用户停止", message: "任务已被用户停止。", suggestion: "" };
   }
@@ -687,6 +748,14 @@ function failureDetailText(failure) {
 
 function failureShortText(failure) {
   const item = normalizeFailure(failure) || classifyCodexFailure(failure);
+  if (item.kind === "missing_rollout") {
+    return [
+      `${item.label}：${item.message}`,
+      "",
+      "这通常表示 /list 里的当前会话已经变成异常绑定：Bridge 还记着 threadId，但 Codex 原生 DB 或 rollout 文件已经不完整。",
+      "处理方式：先发 /list 找到标记为异常的当前会话，再用 /delete <序号> 预览并 /confirm delete <序号> 清理；清理后重新发普通消息会创建新会话。",
+    ].join("\n");
+  }
   return item.suggestion ? `${item.label}：${item.message} ${item.suggestion}` : `${item.label}：${item.message}`;
 }
 
@@ -1047,6 +1116,10 @@ function normalizeSessionData(session) {
   };
 }
 
+function normalizeRenameTitle(value) {
+  return shorten(String(value || "").replace(/\r\n/g, "\n").replace(/\n+/g, " "), 120);
+}
+
 function normalizeGoal(value) {
   if (!value || typeof value !== "object") return null;
   const objective = String(value.objective || "").trim();
@@ -1295,15 +1368,12 @@ async function syncChatSessionsWithCodex(chatId, options = {}) {
   const chatState = sessions.chats[chatId];
   if (!chatState || !Array.isArray(chatState.sessions)) return [];
 
-  const visibleThreadIds = await loadVisibleCodexThreadIds();
-  if (!visibleThreadIds) return chatState.sessions;
-
   const before = chatState.sessions.length;
   const beforeCurrent = chatState.currentSessionId || "";
   const normalized = dedupeSessions(chatState.sessions.map(normalizeSessionData)).slice(0, sessionListLimit());
   chatState.sessions = normalized.filter((session) => {
     const threadId = String(session.codexThreadId || "").trim();
-    if (threadId) return visibleThreadIds.has(threadId);
+    if (threadId) return true;
     return keepEmptyCurrent && shouldKeepEmptyCurrentSession(session, chatState);
   });
 
@@ -1332,13 +1402,26 @@ function titleFromCodexThread(row) {
     || "未命名会话";
 }
 
-function sessionEntryFromCodexThread(row) {
+function uniqueThreadDisplayId(threadId, allThreadIds = []) {
+  const id = String(threadId || "").trim();
+  if (!id) return "";
+  const peers = Array.isArray(allThreadIds)
+    ? allThreadIds.map((value) => String(value || "").trim()).filter((value) => value && value !== id)
+    : [];
+  for (let length = 8; length <= id.length; length += 1) {
+    const prefix = id.slice(0, length);
+    if (!peers.some((peer) => peer.startsWith(prefix))) return prefix;
+  }
+  return id;
+}
+
+function sessionEntryFromCodexThread(row, allThreadIds = []) {
   const threadId = String(row?.id || "").trim();
   const createdAt = codexThreadTime(row, "created") || Date.now();
   const updatedAt = codexThreadTime(row, "updated") || createdAt;
   return {
     ...normalizeSessionData({
-      id: threadId.slice(0, 8),
+      id: uniqueThreadDisplayId(threadId, allThreadIds),
       title: titleFromCodexThread(row),
       createdAt,
       updatedAt,
@@ -1350,6 +1433,383 @@ function sessionEntryFromCodexThread(row) {
     _rank: 3,
     _isCurrent: false,
   };
+}
+
+function normalizeThreadSource(value) {
+  return String(value || "").trim();
+}
+
+function threadSourcesText(entry) {
+  const flags = threadSourceFlags(entry);
+  if (flags.hasPrimaryDb && flags.hasPrimaryRollout) {
+    const parts = [shouldMirrorDesktopCodexHome ? "源空间完整" : "全局 Codex Home 完整"];
+    if (flags.hasBridge) parts.push("Bridge绑定");
+    if (shouldMirrorDesktopCodexHome) {
+      if (flags.hasDesktopDb && flags.hasDesktopRollout) parts.push("桌面镜像完整");
+      else if (flags.hasDesktopAny) parts.push("桌面镜像不完整");
+      else parts.push("桌面镜像缺失");
+    }
+    return parts.join(" + ");
+  }
+  if (flags.hasBridge && !flags.hasPrimaryDb && !flags.hasPrimaryRollout) return "Bridge 悬空绑定";
+  if (flags.hasBridge && flags.hasPrimaryDb && !flags.hasPrimaryRollout) return "Bridge绑定 + Codex DB + 缺 rollout";
+  if (flags.hasBridge && !flags.hasPrimaryDb && flags.hasPrimaryRollout) return "Bridge绑定 + rollout + 缺 Codex DB";
+  if (flags.hasPrimaryDb && !flags.hasPrimaryRollout) return "Codex DB + 缺 rollout";
+  if (!flags.hasPrimaryDb && flags.hasPrimaryRollout) return "rollout 残留";
+  if (flags.hasSourceSidebar && !flags.hasDesktopAny) return "侧边栏残留";
+  if (flags.hasDesktopAny && !flags.hasAnyPrimary) {
+    if (flags.hasDesktopDb && flags.hasDesktopRollout) return "桌面镜像完整（源空间缺失）";
+    return "桌面镜像残留";
+  }
+  const sources = [...threadSourceSet(entry)].filter(Boolean);
+  return sources.length ? sources.join("+") : "Bridge";
+}
+
+function threadSourceSet(entry) {
+  const sources = [
+    ...(Array.isArray(entry?._sources) ? entry._sources : []),
+    ...(Array.isArray(entry?.sources) ? entry.sources : []),
+  ];
+  return new Set(sources.map((value) => String(value || "").trim()).filter(Boolean));
+}
+
+function threadHasSource(entry, pattern) {
+  const regex = pattern instanceof RegExp ? pattern : new RegExp(String(pattern), "i");
+  for (const source of threadSourceSet(entry)) {
+    if (regex.test(source)) return true;
+  }
+  return false;
+}
+
+function rolloutPathExists(entry) {
+  const rolloutPath = stripWindowsLongPathPrefix(entry?._rolloutPath || entry?.rolloutPath || "");
+  return Boolean(rolloutPath && fs.existsSync(rolloutPath));
+}
+
+function threadSourceFlags(entry) {
+  const sources = [...threadSourceSet(entry)];
+  const hasBridge = sources.some((source) => /Bridge|绑定/i.test(source));
+  const hasPrimaryDb = sources.some((source) => /^Codex DB$/i.test(source));
+  const hasPrimaryRolloutListing = sources.some((source) => /^rollout-only$/i.test(source));
+  const hasPrimaryRollout = hasPrimaryRolloutListing || (hasPrimaryDb && rolloutPathExists(entry));
+  const hasSourceIndex = sources.some((source) => /^session_index$/i.test(source));
+  const hasSourceGlobalState = sources.some((source) => /^global-state$/i.test(source));
+  const hasSourceSidebar = hasSourceIndex || hasSourceGlobalState;
+  const hasDesktopDb = sources.some((source) => /^desktop DB mirror$/i.test(source));
+  const hasDesktopRollout = sources.some((source) => /^desktop rollout mirror$/i.test(source));
+  const hasDesktopIndex = sources.some((source) => /^desktop session_index mirror$/i.test(source));
+  const hasDesktopGlobalState = sources.some((source) => /^desktop global-state mirror$/i.test(source));
+  const hasDesktopAny = hasDesktopDb || hasDesktopRollout || hasDesktopIndex || hasDesktopGlobalState;
+  const hasAnyPrimary = hasPrimaryDb || hasPrimaryRollout || hasSourceSidebar;
+  return {
+    hasBridge,
+    hasPrimaryDb,
+    hasPrimaryRollout,
+    hasSourceIndex,
+    hasSourceGlobalState,
+    hasSourceSidebar,
+    hasDesktopDb,
+    hasDesktopRollout,
+    hasDesktopIndex,
+    hasDesktopGlobalState,
+    hasDesktopAny,
+    hasAnyPrimary,
+  };
+}
+
+function threadListGroup(entry) {
+  if (entry?._isCurrent) return "current";
+
+  const flags = threadSourceFlags(entry);
+
+  if (flags.hasBridge && (!flags.hasPrimaryDb || !flags.hasPrimaryRollout)) return "broken";
+  if (flags.hasPrimaryDb && !flags.hasPrimaryRollout) return "broken";
+  if (flags.hasPrimaryDb && flags.hasPrimaryRollout) return "normal";
+  if (flags.hasPrimaryRollout || flags.hasSourceSidebar || flags.hasDesktopAny || flags.hasPrimaryDb) return "residue";
+  return "residue";
+}
+
+function threadListGroupRank(entry) {
+  switch (threadListGroup(entry)) {
+    case "current": return 0;
+    case "normal": return 1;
+    case "broken": return 2;
+    case "residue": return 3;
+    default: return 9;
+  }
+}
+
+function threadListGroupTitle(group) {
+  switch (group) {
+    case "current": return "当前会话";
+    case "normal": return "正常会话";
+    case "broken": return "异常会话";
+    case "residue": return "残留记录";
+    default: return "其他记录";
+  }
+}
+
+function threadListStatusText(entry) {
+  const group = threadListGroup(entry);
+  const flags = threadSourceFlags(entry);
+
+  if (group === "current") {
+    if (flags.hasBridge && (!flags.hasPrimaryDb || !flags.hasPrimaryRollout)) return "当前异常：Codex 原生记录或 rollout 缺失";
+    if (shouldMirrorDesktopCodexHome && flags.hasPrimaryDb && flags.hasPrimaryRollout && !(flags.hasDesktopDb && flags.hasDesktopRollout)) return "当前：桌面镜像告警";
+    return "当前";
+  }
+  if (group === "normal") {
+    if (shouldMirrorDesktopCodexHome && !(flags.hasDesktopDb && flags.hasDesktopRollout)) return "正常：桌面镜像告警";
+    return "正常";
+  }
+  if (group === "broken") {
+    if (flags.hasBridge && !flags.hasPrimaryDb && !flags.hasPrimaryRollout) return "异常：Bridge 悬空绑定";
+    if (!flags.hasPrimaryRollout) return "异常：缺 rollout，不能续接";
+    if (!flags.hasPrimaryDb) return "异常：缺 Codex DB 记录";
+    return "异常";
+  }
+  if (flags.hasPrimaryRollout && !flags.hasPrimaryDb) return "残留：rollout 文件";
+  if (flags.hasSourceIndex) return "残留：侧边栏索引";
+  if (flags.hasSourceGlobalState) return "残留：侧边栏状态";
+  if (flags.hasDesktopAny) return "残留：桌面端镜像";
+  if (flags.hasPrimaryDb && !flags.hasBridge) return "残留：Codex DB only";
+  return "残留";
+}
+
+function threadLocationText(entry) {
+  return entry?._location ? `；位置：${entry._location}` : "";
+}
+
+function threadDeleteStateText(entry) {
+  if (!entry?.codexThreadId) return "不可删除：无 threadId";
+  return entry?._deletable === false ? `不可删除：${entry._deleteBlockReason || "来源信息不足"}` : "可删除";
+}
+
+function addThreadSource(entry, source) {
+  const value = normalizeThreadSource(source);
+  if (!value) return;
+  if (!Array.isArray(entry._sources)) entry._sources = [];
+  if (!entry._sources.includes(value)) entry._sources.push(value);
+}
+
+function threadEntryUpdatedAt(entry) {
+  return Number(entry?.updatedAt || entry?._updatedAt || entry?.createdAt || 0);
+}
+
+function normalizeThreadTime(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : 0;
+}
+
+function latestSessionMessageTime(messages) {
+  if (!Array.isArray(messages)) return 0;
+  let latest = 0;
+  for (const message of messages) {
+    latest = Math.max(latest, normalizeThreadTime(message?.at));
+  }
+  return latest;
+}
+
+function threadEntryConversationUpdatedAt(entry) {
+  const explicit = normalizeThreadTime(entry?._conversationUpdatedAt);
+  if (explicit) return explicit;
+  const messageTime = latestSessionMessageTime(entry?.messages);
+  if (messageTime) return messageTime;
+  const sources = threadSourceSet(entry);
+  if (sources.has("Codex DB") || sources.has("rollout-only")) {
+    return normalizeThreadTime(entry?.updatedAt) || normalizeThreadTime(entry?.createdAt);
+  }
+  return 0;
+}
+
+function threadEntryLastSeenAt(entry) {
+  return normalizeThreadTime(entry?._lastSeenAt)
+    || threadEntryConversationUpdatedAt(entry)
+    || normalizeThreadTime(entry?.updatedAt)
+    || normalizeThreadTime(entry?.createdAt);
+}
+
+function threadListSortTime(entry) {
+  return threadEntryConversationUpdatedAt(entry) || threadEntryLastSeenAt(entry);
+}
+
+function sortThreadListEntries(entries) {
+  return [...entries].sort((a, b) => {
+    const groupDelta = threadListGroupRank(a) - threadListGroupRank(b);
+    if (groupDelta) return groupDelta;
+    const timeDelta = threadListSortTime(b) - threadListSortTime(a);
+    if (timeDelta) return timeDelta;
+    return String(a.title || a.id || a.codexThreadId || "").localeCompare(String(b.title || b.id || b.codexThreadId || ""));
+  });
+}
+
+function threadListTimeLabel(entry) {
+  const value = threadListSortTime(entry);
+  return value > 0 ? formatTime(value) : "未知";
+}
+
+function threadListTimeLabelName(entry) {
+  return threadEntryConversationUpdatedAt(entry) ? "最近对话" : "最近记录";
+}
+
+function mergeThreadInventoryEntry(map, entry) {
+  const threadId = String(entry?.codexThreadId || "").trim();
+  const sessionKey = entry?._sourceChatId && entry?.id ? `${entry._sourceChatId}:${entry.id}` : "";
+  const key = threadId ? `thread:${threadId}` : `session:${sessionKey || entry?.id || crypto.randomBytes(4).toString("hex")}`;
+  const current = map.get(key);
+  if (!current) {
+    const conversationUpdatedAt = threadEntryConversationUpdatedAt(entry);
+    const lastSeenAt = threadEntryLastSeenAt(entry);
+    const next = {
+      ...entry,
+      _sources: Array.isArray(entry?._sources) ? [...entry._sources] : [],
+      _conversationUpdatedAt: conversationUpdatedAt,
+      _lastSeenAt: Math.max(conversationUpdatedAt, lastSeenAt),
+      _deletable: entry?._deletable !== false,
+      _deleteBlockReason: entry?._deleteBlockReason || "",
+      _rank: Number(entry?._rank ?? 9),
+    };
+    map.set(key, next);
+    return next;
+  }
+
+  for (const source of entry._sources || []) addThreadSource(current, source);
+  if (!current.title || current.title === "未命名会话" || current.title === "Untitled") current.title = entry.title || current.title;
+  if (!current.id && entry.id) current.id = entry.id;
+  if (!current.codexThreadId && entry.codexThreadId) current.codexThreadId = entry.codexThreadId;
+  if (!current._sourceChatId && entry._sourceChatId) current._sourceChatId = entry._sourceChatId;
+  if (entry._isCurrent) current._isCurrent = true;
+  if (entry._codexOnly === false) current._codexOnly = false;
+  if (entry._rolloutPath && !current._rolloutPath) current._rolloutPath = entry._rolloutPath;
+  if (entry._dbRecord && !current._dbRecord) current._dbRecord = entry._dbRecord;
+  if (entry._location && !current._location) current._location = entry._location;
+  if (Number(entry._rank ?? 9) < Number(current._rank ?? 9)) current._rank = entry._rank;
+  const conversationUpdatedAt = threadEntryConversationUpdatedAt(entry);
+  if (conversationUpdatedAt > normalizeThreadTime(current._conversationUpdatedAt)) current._conversationUpdatedAt = conversationUpdatedAt;
+  const lastSeenAt = threadEntryLastSeenAt(entry);
+  if (lastSeenAt > normalizeThreadTime(current._lastSeenAt)) current._lastSeenAt = lastSeenAt;
+  if (threadEntryUpdatedAt(entry) > threadEntryUpdatedAt(current)) current.updatedAt = entry.updatedAt || current.updatedAt;
+  if (entry._deletable === false) {
+    current._deletable = false;
+    current._deleteBlockReason = entry._deleteBlockReason || current._deleteBlockReason;
+  }
+  return current;
+}
+
+function threadIdFromPath(filePath) {
+  const match = String(filePath || "").match(CODEX_THREAD_ID_PATTERN);
+  return match ? match[0] : "";
+}
+
+function readRolloutSummary(rolloutPath) {
+  const result = {
+    threadId: threadIdFromPath(rolloutPath),
+    title: "",
+    createdAt: 0,
+    updatedAt: 0,
+  };
+  if (!rolloutPath || !fs.existsSync(rolloutPath)) return result;
+  try {
+    const stat = fs.statSync(rolloutPath);
+    result.updatedAt = stat.mtimeMs || 0;
+    result.createdAt = stat.birthtimeMs || result.updatedAt;
+  } catch {}
+  try {
+    const fd = fs.openSync(rolloutPath, "r");
+    const buffer = Buffer.alloc(128 * 1024);
+    const bytes = fs.readSync(fd, buffer, 0, buffer.length, 0);
+    fs.closeSync(fd);
+    const lines = buffer.toString("utf8", 0, bytes).split(/\r?\n/).filter(Boolean).slice(0, 60);
+    for (const line of lines) {
+      try {
+        const parsed = JSON.parse(line);
+        const payload = parsed?.payload || parsed;
+        const threadId = payload?.id || payload?.thread_id || payload?.threadId || parsed?.thread_id || parsed?.threadId;
+        if (!result.threadId && typeof threadId === "string" && CODEX_THREAD_ID_PATTERN.test(threadId)) result.threadId = threadId;
+        const title = payload?.title || payload?.cwd || payload?.working_dir || parsed?.title || "";
+        if (!result.title && title) result.title = cleanCodexThreadTitle(title);
+      } catch {}
+      if (result.threadId && result.title) break;
+    }
+  } catch {}
+  return result;
+}
+
+function listRolloutFiles(codexHome = CONFIG.codexHome) {
+  const root = path.join(codexHome, "sessions");
+  const files = [];
+  if (!fs.existsSync(root)) return files;
+  const stack = [root];
+  while (stack.length) {
+    const dir = stack.pop();
+    let entries = [];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const item of entries) {
+      const fullPath = path.join(dir, item.name);
+      if (item.isDirectory()) {
+        stack.push(fullPath);
+      } else if (item.isFile() && item.name.endsWith(".jsonl") && item.name.includes("rollout")) {
+        files.push(fullPath);
+      }
+    }
+  }
+  return files;
+}
+
+function loadSessionIndexEntries(sessionIndexPath = codexSessionIndexPath) {
+  if (!fs.existsSync(sessionIndexPath)) return [];
+  const entries = [];
+  const lines = fs.readFileSync(sessionIndexPath, "utf8").replace(/\r\n/g, "\n").split("\n");
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    try {
+      const parsed = JSON.parse(line);
+      const id = String(parsed?.id || "").trim();
+      if (!id) continue;
+      entries.push({
+        id,
+        title: cleanCodexThreadTitle(parsed.thread_name || parsed.title || ""),
+        updatedAt: Date.parse(parsed.updated_at || parsed.updatedAt || "") || 0,
+      });
+    } catch {}
+  }
+  return entries;
+}
+
+function loadGlobalStateThreadEntries(globalStatePath = codexGlobalStatePath) {
+  if (!fs.existsSync(globalStatePath)) return [];
+  try {
+    const raw = fs.readFileSync(globalStatePath, "utf8").trim();
+    if (!raw) return [];
+    const state = JSON.parse(raw);
+    const ids = new Set();
+    for (const key of ["projectless-thread-ids", "pinned-thread-ids"]) {
+      if (Array.isArray(state[key])) {
+        for (const id of state[key]) {
+          const value = String(id || "").trim();
+          if (value) ids.add(value);
+        }
+      }
+    }
+    for (const key of ["thread-workspace-root-hints", "thread-projectless-output-directories"]) {
+      if (state[key] && typeof state[key] === "object" && !Array.isArray(state[key])) {
+        for (const id of Object.keys(state[key])) {
+          if (id) ids.add(id);
+        }
+      }
+    }
+    return [...ids].map((id) => ({
+      id,
+      title: "",
+      updatedAt: 0,
+    }));
+  } catch {
+    return [];
+  }
 }
 
 function bridgeSessionEntries(chatId, visibleThreadIds = null) {
@@ -1390,28 +1850,177 @@ function bridgeSessionEntries(chatId, visibleThreadIds = null) {
 
 async function mergedSessionEntries(chatId) {
   const codexThreads = await loadVisibleCodexThreads();
-  const visibleThreadIds = codexThreads
-    ? new Set(codexThreads.map((row) => String(row.id || "").trim()).filter(Boolean))
-    : null;
-  const entries = bridgeSessionEntries(chatId, visibleThreadIds);
-  const seenThreads = new Set(entries.map((session) => String(session.codexThreadId || "").trim()).filter(Boolean));
-  const seenSessionKeys = new Set(entries.map((session) => `${session._sourceChatId}:${session.id}`));
+  const entryMap = new Map();
+
+  for (const entry of bridgeSessionEntries(chatId)) {
+    mergeThreadInventoryEntry(entryMap, {
+      ...entry,
+      _sources: ["Bridge绑定"],
+      _location: "当前 Bot 运行目录 state/sessions.json",
+    });
+  }
 
   if (Array.isArray(codexThreads)) {
+    const allThreadIds = codexThreads.map((row) => String(row?.id || "").trim()).filter(Boolean);
     for (const row of codexThreads) {
       const threadId = String(row?.id || "").trim();
-      if (!threadId || seenThreads.has(threadId)) continue;
-      const entry = sessionEntryFromCodexThread(row);
-      const key = `${entry._sourceChatId}:${entry.id}`;
-      if (seenSessionKeys.has(key)) continue;
-      seenThreads.add(threadId);
-      seenSessionKeys.add(key);
-      entries.push(entry);
+      if (!threadId) continue;
+      mergeThreadInventoryEntry(entryMap, {
+        ...sessionEntryFromCodexThread(row, allThreadIds),
+        _sources: ["Codex DB"],
+        _dbRecord: row,
+        _rolloutPath: row.rollout_path || "",
+        _location: "当前 Codex Home",
+      });
     }
   }
 
-  return entries
-    .sort((a, b) => (a._rank - b._rank) || Number(b.updatedAt || 0) - Number(a.updatedAt || 0))
+  for (const rolloutPath of listRolloutFiles(CONFIG.codexHome)) {
+    const summary = readRolloutSummary(rolloutPath);
+    if (!summary.threadId) continue;
+    mergeThreadInventoryEntry(entryMap, {
+      id: uniqueThreadDisplayId(summary.threadId, []),
+      title: summary.title || "rollout-only 会话",
+      createdAt: summary.createdAt || summary.updatedAt || Date.now(),
+      updatedAt: summary.updatedAt || summary.createdAt || Date.now(),
+      messages: [],
+      codexThreadId: summary.threadId,
+      _codexOnly: true,
+      _sourceChatId: "",
+      _rank: 4,
+      _isCurrent: false,
+      _sources: ["rollout-only"],
+      _rolloutPath: rolloutPath,
+      _location: "当前 Codex Home sessions",
+    });
+  }
+
+  for (const item of loadSessionIndexEntries(codexSessionIndexPath)) {
+    mergeThreadInventoryEntry(entryMap, {
+      id: uniqueThreadDisplayId(item.id, []),
+      title: item.title || "session_index 残留",
+      createdAt: item.updatedAt || Date.now(),
+      updatedAt: item.updatedAt || Date.now(),
+      messages: [],
+      codexThreadId: item.id,
+      _codexOnly: true,
+      _sourceChatId: "",
+      _rank: 5,
+      _isCurrent: false,
+      _sources: ["session_index"],
+      _location: "当前 Codex Home session_index.jsonl",
+    });
+  }
+
+  for (const item of loadGlobalStateThreadEntries(codexGlobalStatePath)) {
+    mergeThreadInventoryEntry(entryMap, {
+      id: uniqueThreadDisplayId(item.id, []),
+      title: "侧边栏状态残留",
+      createdAt: item.updatedAt || Date.now(),
+      updatedAt: item.updatedAt || Date.now(),
+      messages: [],
+      codexThreadId: item.id,
+      _codexOnly: true,
+      _sourceChatId: "",
+      _rank: 6,
+      _isCurrent: false,
+      _sources: ["global-state"],
+      _location: "当前 Codex Home .codex-global-state.json",
+    });
+  }
+
+  if (shouldMirrorDesktopCodexHome) {
+    const desktopThreads = fs.existsSync(desktopCodexStateDbPath)
+      ? await sqliteJson(
+          desktopCodexStateDbPath,
+          [
+            "select id, substr(title, 1, 240) as title,",
+            "substr(first_user_message, 1, 240) as first_user_message,",
+            "substr(preview, 1, 240) as preview,",
+            "created_at, updated_at, created_at_ms, updated_at_ms, cwd,",
+            "rollout_path",
+            "from threads",
+            "where coalesce(archived, 0) = 0",
+            "order by coalesce(updated_at_ms, updated_at * 1000, created_at_ms, created_at * 1000, 0) desc",
+            `limit ${boundedListLimit()};`,
+          ].join(" "),
+        )
+      : [];
+    const workspace = path.resolve(stripWindowsLongPathPrefix(CONFIG.workspace || "")).toLowerCase();
+    const allThreadIds = desktopThreads.map((row) => String(row?.id || "").trim()).filter(Boolean);
+    for (const row of desktopThreads) {
+      const threadId = String(row?.id || "").trim();
+      if (!threadId) continue;
+      const cwd = path.resolve(stripWindowsLongPathPrefix(row.cwd || "") || CONFIG.workspace).toLowerCase();
+      if (cwd !== workspace && !entryMap.has(`thread:${threadId}`)) continue;
+      mergeThreadInventoryEntry(entryMap, {
+        ...sessionEntryFromCodexThread(row, allThreadIds),
+        _sources: ["desktop DB mirror"],
+        _dbRecord: row,
+        _rolloutPath: row.rollout_path || "",
+        _location: "desktopCodexHome 镜像",
+      });
+    }
+
+    for (const rolloutPath of listRolloutFiles(CONFIG.desktopCodexHome)) {
+      const summary = readRolloutSummary(rolloutPath);
+      if (!summary.threadId) continue;
+      if (!entryMap.has(`thread:${summary.threadId}`)) continue;
+      mergeThreadInventoryEntry(entryMap, {
+        id: uniqueThreadDisplayId(summary.threadId, []),
+        title: summary.title || "desktop rollout 镜像",
+        createdAt: summary.createdAt || summary.updatedAt || Date.now(),
+        updatedAt: summary.updatedAt || summary.createdAt || Date.now(),
+        messages: [],
+        codexThreadId: summary.threadId,
+        _codexOnly: true,
+        _sourceChatId: "",
+        _rank: 7,
+        _isCurrent: false,
+        _sources: ["desktop rollout mirror"],
+        _rolloutPath: rolloutPath,
+        _location: "desktopCodexHome sessions 镜像",
+      });
+    }
+
+    for (const item of loadSessionIndexEntries(desktopCodexSessionIndexPath)) {
+      if (!entryMap.has(`thread:${item.id}`)) continue;
+      mergeThreadInventoryEntry(entryMap, {
+        id: uniqueThreadDisplayId(item.id, []),
+        title: item.title || "desktop session_index 镜像",
+        createdAt: item.updatedAt || Date.now(),
+        updatedAt: item.updatedAt || Date.now(),
+        messages: [],
+        codexThreadId: item.id,
+        _codexOnly: true,
+        _sourceChatId: "",
+        _rank: 8,
+        _isCurrent: false,
+        _sources: ["desktop session_index mirror"],
+        _location: "desktopCodexHome session_index.jsonl",
+      });
+    }
+
+    for (const item of loadGlobalStateThreadEntries(desktopCodexGlobalStatePath)) {
+      if (!entryMap.has(`thread:${item.id}`)) continue;
+      mergeThreadInventoryEntry(entryMap, {
+        id: uniqueThreadDisplayId(item.id, []),
+        title: "desktop 侧边栏状态镜像",
+        createdAt: item.updatedAt || Date.now(),
+        updatedAt: item.updatedAt || Date.now(),
+        messages: [],
+        codexThreadId: item.id,
+        _codexOnly: true,
+        _sourceChatId: "",
+        _rank: 8,
+        _isCurrent: false,
+        _sources: ["desktop global-state mirror"],
+        _location: "desktopCodexHome .codex-global-state.json",
+      });
+    }
+  }
+
+  return sortThreadListEntries([...entryMap.values()])
     .slice(0, boundedListLimit());
 }
 
@@ -1485,6 +2094,95 @@ function materializeSessionForChat(chatId, entry) {
   chatState.sessions = dedupeSessions(chatState.sessions).slice(0, sessionListLimit());
   saveSessions();
   return match;
+}
+
+function renameBridgeSessionsForThread(chatId, entry, title) {
+  const nextTitle = normalizeRenameTitle(title);
+  const threadId = String(entry?.codexThreadId || "").trim();
+  let changed = false;
+  let renamed = 0;
+
+  for (const [sourceChatId, chatState] of Object.entries(sessions.chats || {})) {
+    if (!chatState || !Array.isArray(chatState.sessions)) continue;
+    for (const session of chatState.sessions) {
+      const sameEntry = sourceChatId === chatId && entry?.id && session.id === entry.id;
+      const sameThread = threadId && String(session.codexThreadId || "").trim() === threadId;
+      if (!sameEntry && !sameThread) continue;
+      if (session.title !== nextTitle) {
+        session.title = nextTitle;
+        changed = true;
+      }
+      renamed += 1;
+    }
+  }
+
+  if (changed) saveSessions();
+  return { changed, renamed };
+}
+
+async function renameCodexThreadInHome(threadId, title, paths) {
+  const id = String(threadId || "").trim();
+  const nextTitle = normalizeRenameTitle(title);
+  const result = {
+    dbChanged: false,
+    sessionIndexChanged: false,
+    dbRecordFound: false,
+    sessionIndexFound: false,
+  };
+  if (!id || !nextTitle) return result;
+
+  const dbPath = paths?.dbPath || "";
+  const sessionIndexPath = paths?.sessionIndexPath || "";
+  const codexHome = paths?.codexHome || "";
+  const lockPath = paths?.lockPath || "";
+
+  const apply = async () => {
+    let record = null;
+    if (dbPath && fs.existsSync(dbPath)) {
+      record = await loadCodexThreadRecordFromDb(id, dbPath);
+      result.dbRecordFound = Boolean(record);
+      if (record) {
+        result.dbChanged = await updateCodexThreadTitleInDb(id, nextTitle, dbPath);
+        record = { ...record, title: nextTitle };
+      }
+    }
+
+    if (sessionIndexPath && fs.existsSync(sessionIndexPath)) {
+      result.sessionIndexFound = hasCodexSessionIndexEntry(id, sessionIndexPath);
+      if (result.sessionIndexFound || record) {
+        const indexEntry = record
+          ? null
+          : loadSessionIndexEntries(sessionIndexPath).find((item) => item.id === id);
+        result.sessionIndexChanged = syncCodexSessionIndex(
+          record || { id, title: nextTitle, updated_at_ms: indexEntry?.updatedAt || Date.now() },
+          sessionIndexPath,
+          { threadName: nextTitle },
+        );
+      }
+    }
+  };
+
+  if (codexHome && lockPath) await withCodexSidebarLock(apply, codexHome, lockPath);
+  else await apply();
+  return result;
+}
+
+async function renameCodexThreadEverywhere(threadId, title) {
+  const source = await renameCodexThreadInHome(threadId, title, {
+    codexHome: CONFIG.codexHome,
+    dbPath: codexStateDbPath,
+    sessionIndexPath: codexSessionIndexPath,
+    lockPath: codexSidebarLockPath,
+  });
+  const desktop = shouldMirrorDesktopCodexHome
+    ? await renameCodexThreadInHome(threadId, title, {
+        codexHome: CONFIG.desktopCodexHome,
+        dbPath: desktopCodexStateDbPath,
+        sessionIndexPath: desktopCodexSessionIndexPath,
+        lockPath: desktopCodexSidebarLockPath,
+      })
+    : null;
+  return { source, desktop };
 }
 
 async function switchSession(chatId, target) {
@@ -3003,6 +3701,7 @@ function renderFooterText(footer, elapsed) {
   if (footer === "compacting") return `正在压缩上下文 · ${elapsed}`;
   if (footer === "recovering") return `正在从断流处继续 · ${elapsed}`;
   if (footer === "reconnecting") return `Codex 连接中断，正在重连 · ${elapsed}`;
+  if (footer === "waiting") return `Codex 仍在处理，暂无新输出 · ${elapsed}`;
   if (footer === "tool_running") return `正在调用工具 · ${elapsed}`;
   if (footer === "streaming") return `正在输出 · ${elapsed}`;
   return `正在思考 · ${elapsed}`;
@@ -3813,6 +4512,21 @@ async function loadCodexThreadRecordFromDb(threadId, dbPath = codexStateDbPath) 
   return rows[0] || null;
 }
 
+async function updateCodexThreadTitleInDb(threadId, title, dbPath = codexStateDbPath) {
+  const id = String(threadId || "").trim();
+  const nextTitle = normalizeRenameTitle(title);
+  if (!id || !nextTitle || !fs.existsSync(dbPath)) return false;
+  const record = await loadCodexThreadRecordFromDb(id, dbPath);
+  if (!record) return false;
+  const columns = await sqliteTableColumns("threads", dbPath);
+  if (!columns.has("title")) return false;
+  await sqliteExecChecked(
+    dbPath,
+    `UPDATE threads SET title = ${shellQuote(nextTitle)} WHERE id = ${shellQuote(id)};`,
+  );
+  return true;
+}
+
 function codexThreadBelongsToThisBridge(record) {
   if (!record) return false;
   const cwd = stripWindowsLongPathPrefix(record.cwd || "");
@@ -3944,6 +4658,51 @@ function syncCodexSessionIndex(record, sessionIndexPath = codexSessionIndexPath,
   return true;
 }
 
+function hasCodexSessionIndexEntry(threadId, sessionIndexPath = codexSessionIndexPath) {
+  const id = String(threadId || "").trim();
+  if (!id || !fs.existsSync(sessionIndexPath)) return false;
+  const lines = fs.readFileSync(sessionIndexPath, "utf8").replace(/\r\n/g, "\n").split("\n");
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    try {
+      if (JSON.parse(line)?.id === id) return true;
+    } catch {}
+  }
+  return false;
+}
+
+function removeCodexSessionIndexEntry(threadId, sessionIndexPath = codexSessionIndexPath) {
+  const id = String(threadId || "").trim();
+  if (!id || !fs.existsSync(sessionIndexPath)) return false;
+
+  const previous = fs.readFileSync(sessionIndexPath, "utf8");
+  const lines = previous.replace(/\r\n/g, "\n").split("\n");
+  const hadTrailingNewline = lines.at(-1) === "";
+  if (hadTrailingNewline) lines.pop();
+
+  let changed = false;
+  const nextLines = [];
+  for (const line of lines) {
+    if (!line.trim()) {
+      nextLines.push(line);
+      continue;
+    }
+    try {
+      const parsed = JSON.parse(line);
+      if (parsed?.id === id) {
+        changed = true;
+        continue;
+      }
+    } catch {}
+    nextLines.push(line);
+  }
+
+  if (!changed) return false;
+  const next = `${nextLines.join("\n")}${hadTrailingNewline || nextLines.length ? "\n" : ""}`;
+  fs.writeFileSync(sessionIndexPath, next, "utf8");
+  return true;
+}
+
 function syncCodexGlobalState(record, globalStatePath = codexGlobalStatePath) {
   const id = String(record?.id || "").trim();
   if (!id) return false;
@@ -3987,6 +4746,47 @@ function syncCodexGlobalState(record, globalStatePath = codexGlobalStatePath) {
   if (!changed) return false;
   fs.writeFileSync(globalStatePath, JSON.stringify(state), "utf8");
   return true;
+}
+
+function removeCodexGlobalStateThread(threadId, globalStatePath = codexGlobalStatePath) {
+  const id = String(threadId || "").trim();
+  if (!id || !fs.existsSync(globalStatePath)) return false;
+
+  const raw = fs.readFileSync(globalStatePath, "utf8").trim();
+  if (!raw) return false;
+  const state = JSON.parse(raw);
+  let changed = false;
+
+  for (const key of ["projectless-thread-ids", "pinned-thread-ids"]) {
+    if (!Array.isArray(state[key])) continue;
+    const next = state[key].filter((value) => value !== id);
+    if (next.length !== state[key].length) {
+      state[key] = next;
+      changed = true;
+    }
+  }
+
+  for (const key of ["thread-workspace-root-hints", "thread-projectless-output-directories"]) {
+    if (!state[key] || typeof state[key] !== "object" || Array.isArray(state[key])) continue;
+    if (Object.prototype.hasOwnProperty.call(state[key], id)) {
+      delete state[key][id];
+      changed = true;
+    }
+  }
+
+  if (!changed) return false;
+  fs.writeFileSync(globalStatePath, JSON.stringify(state), "utf8");
+  return true;
+}
+
+async function removeCodexSidebarIndexesForThread(threadId) {
+  const id = String(threadId || "").trim();
+  if (!id) return { sessionIndexChanged: false, globalStateChanged: false };
+
+  return await withCodexSidebarLock(async () => ({
+    sessionIndexChanged: removeCodexSessionIndexEntry(id),
+    globalStateChanged: removeCodexGlobalStateThread(id),
+  }));
 }
 
 async function mirrorCodexThreadRecordToDesktopHome(record) {
@@ -4287,9 +5087,9 @@ async function reconcileCodexDesktopSidebarIndexes(reason = "startup") {
   }
 }
 
-async function codexTableSet() {
+async function codexTableSet(dbPath = codexStateDbPath) {
   const rows = await sqliteJson(
-    codexStateDbPath,
+    dbPath,
     "select name from sqlite_master where type = 'table';",
   );
   return new Set(rows.map((row) => String(row.name || "")).filter(Boolean));
@@ -4301,9 +5101,9 @@ async function sqliteTableColumns(tableName, dbPath = codexStateDbPath) {
   return new Set(rows.map((row) => String(row.name || "")).filter(Boolean));
 }
 
-async function deleteByThreadIdIfPossible(statements, tables, tableName) {
+async function deleteByThreadIdIfPossible(statements, tables, tableName, dbPath = codexStateDbPath) {
   if (!tables.has(tableName)) return;
-  const columns = await sqliteTableColumns(tableName);
+  const columns = await sqliteTableColumns(tableName, dbPath);
   if (columns.has("thread_id")) {
     statements.push(`DELETE FROM ${tableName} WHERE thread_id = ?1;`);
   } else if (columns.has("id")) {
@@ -4320,11 +5120,11 @@ function stripWindowsLongPathPrefix(value) {
   return text;
 }
 
-function resolveSafeCodexRolloutPath(rolloutPath, threadId) {
+function resolveSafeCodexRolloutPath(rolloutPath, threadId, codexHome = CONFIG.codexHome) {
   const raw = stripWindowsLongPathPrefix(rolloutPath);
   if (!raw || !path.isAbsolute(raw)) throw new Error(`invalid rollout_path: ${rolloutPath || ""}`);
 
-  const sessionsRoot = fs.realpathSync.native(path.join(CONFIG.codexHome, "sessions"));
+  const sessionsRoot = fs.realpathSync.native(path.join(codexHome, "sessions"));
   const resolved = fs.existsSync(raw) ? fs.realpathSync.native(raw) : path.resolve(raw);
   const relative = path.relative(sessionsRoot, resolved);
   if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
@@ -4336,15 +5136,18 @@ function resolveSafeCodexRolloutPath(rolloutPath, threadId) {
   return resolved;
 }
 
-async function deleteCodexLocalThread(threadId) {
+function findRolloutFilesForThread(threadId, codexHome = CONFIG.codexHome) {
+  const id = String(threadId || "").trim();
+  if (!id) return [];
+  return listRolloutFiles(codexHome).filter((filePath) => path.basename(filePath).includes(id));
+}
+
+async function deleteCodexThreadRowsFromDb(threadId, dbPath = codexStateDbPath) {
   const id = String(threadId || "").trim();
   if (!id) throw new Error("thread id is required");
-  if (!fs.existsSync(codexStateDbPath)) throw new Error(`Codex state database not found: ${codexStateDbPath}`);
+  if (!fs.existsSync(dbPath)) throw new Error(`Codex state database not found: ${dbPath}`);
 
-  const record = await loadCodexThreadRecord(id);
-  if (!record) throw new Error(`Thread not found in local storage: ${id}`);
-
-  const tables = await codexTableSet();
+  const tables = await codexTableSet(dbPath);
   if (!tables.has("threads")) throw new Error("Unsupported local storage schema: missing threads table");
   const statements = [
     "PRAGMA busy_timeout = 5000;",
@@ -4354,12 +5157,12 @@ async function deleteCodexLocalThread(threadId) {
   if (tables.has("thread_dynamic_tools")) {
     statements.push("DELETE FROM thread_dynamic_tools WHERE thread_id = ?1;");
   }
-  await deleteByThreadIdIfPossible(statements, tables, "thread_goals");
-  await deleteByThreadIdIfPossible(statements, tables, "thread_goal");
+  await deleteByThreadIdIfPossible(statements, tables, "thread_goals", dbPath);
+  await deleteByThreadIdIfPossible(statements, tables, "thread_goal", dbPath);
   if (tables.has("thread_spawn_edges")) {
     statements.push("DELETE FROM thread_spawn_edges WHERE parent_thread_id = ?1 OR child_thread_id = ?1;");
   }
-  await deleteByThreadIdIfPossible(statements, tables, "stage1_outputs");
+  await deleteByThreadIdIfPossible(statements, tables, "stage1_outputs", dbPath);
   if (tables.has("agent_job_items")) {
     statements.push("UPDATE agent_job_items SET assigned_thread_id = NULL WHERE assigned_thread_id = ?1;");
   }
@@ -4369,44 +5172,160 @@ async function deleteCodexLocalThread(threadId) {
   if (tables.has("sessions")) {
     statements.push("DELETE FROM sessions WHERE id = ?1;");
   }
-  if (tables.has("threads")) {
-    statements.push("DELETE FROM threads WHERE id = ?1;");
-  }
+  statements.push("DELETE FROM threads WHERE id = ?1;");
   statements.push("COMMIT;");
 
   await sqliteExecChecked(
-    codexStateDbPath,
+    dbPath,
     statements.join("\n").replace(/\?1/g, shellQuote(id)),
   );
-  const afterDelete = await loadCodexThreadRecord(id);
-  if (afterDelete) throw new Error(`Thread delete did not remove local row: ${id}`);
+}
+
+function resolveMirroredRolloutPath(record, sourceRolloutPath, targetCodexHome) {
+  const sourcePath = replaceWindowsLongPathPrefix(sourceRolloutPath || record?.rollout_path || "");
+  if (!sourcePath || !path.isAbsolute(sourcePath)) return "";
+
+  const sourceSessionsRoot = path.join(CONFIG.codexHome, "sessions");
+  const sourceRootResolved = fs.existsSync(sourceSessionsRoot)
+    ? fs.realpathSync.native(sourceSessionsRoot)
+    : path.resolve(sourceSessionsRoot);
+  const sourceResolved = fs.existsSync(sourcePath) ? fs.realpathSync.native(sourcePath) : path.resolve(sourcePath);
+  const relative = path.relative(sourceRootResolved, sourceResolved);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) return "";
+  return path.join(targetCodexHome, "sessions", relative);
+}
+
+async function removeDesktopMirrorForThread(threadId, sourceRecord, sourceRolloutPath = "") {
+  const id = String(threadId || "").trim();
+  const result = {
+    enabled: shouldMirrorDesktopCodexHome,
+    dbChanged: false,
+    rolloutDeleted: false,
+    rolloutMissing: false,
+    rolloutPath: "",
+    sessionIndexChanged: false,
+    globalStateChanged: false,
+    error: "",
+  };
+  if (!id || !shouldMirrorDesktopCodexHome) return result;
+
+  try {
+    await withCodexSidebarLock(async () => {
+      if (fs.existsSync(desktopCodexStateDbPath)) {
+        const before = await loadCodexThreadRecordFromDb(id, desktopCodexStateDbPath);
+        if (before) {
+          await deleteCodexThreadRowsFromDb(id, desktopCodexStateDbPath);
+          const after = await loadCodexThreadRecordFromDb(id, desktopCodexStateDbPath);
+          if (after) throw new Error(`Desktop mirror thread delete did not remove row: ${id}`);
+          result.dbChanged = true;
+        }
+      }
+
+      result.sessionIndexChanged = removeCodexSessionIndexEntry(id, desktopCodexSessionIndexPath);
+      result.globalStateChanged = removeCodexGlobalStateThread(id, desktopCodexGlobalStatePath);
+    }, CONFIG.desktopCodexHome, desktopCodexSidebarLockPath);
+
+    const mirrorCandidates = Array.from(new Set([
+      resolveMirroredRolloutPath(sourceRecord, sourceRolloutPath, CONFIG.desktopCodexHome),
+      ...findRolloutFilesForThread(id, CONFIG.desktopCodexHome),
+    ].filter(Boolean)));
+    if (mirrorCandidates.length) {
+      let missingCount = 0;
+      for (const mirrorPath of mirrorCandidates) {
+        result.rolloutPath = result.rolloutPath || mirrorPath;
+        const safePath = resolveSafeCodexRolloutPath(mirrorPath, id, CONFIG.desktopCodexHome);
+        if (fs.existsSync(safePath)) {
+          fs.rmSync(safePath, { force: true });
+          result.rolloutDeleted = true;
+        } else {
+          missingCount += 1;
+        }
+      }
+      result.rolloutMissing = !result.rolloutDeleted && missingCount > 0;
+    }
+  } catch (error) {
+    result.error = String(error.message || error);
+    log("ERROR", "desktop Codex mirror cleanup failed after db delete", {
+      threadId: id,
+      desktopCodexHome: CONFIG.desktopCodexHome,
+      error: result.error,
+    });
+  }
+
+  return result;
+}
+
+async function deleteCodexLocalThread(threadId) {
+  const id = String(threadId || "").trim();
+  if (!id) throw new Error("thread id is required");
+  let record = fs.existsSync(codexStateDbPath) ? await loadCodexThreadRecord(id) : null;
+  const dbChanged = Boolean(record);
+  if (record) {
+    await deleteCodexThreadRowsFromDb(id, codexStateDbPath);
+    const afterDelete = await loadCodexThreadRecord(id);
+    if (afterDelete) throw new Error(`Thread delete did not remove local row: ${id}`);
+  } else {
+    const rolloutPath = findRolloutFilesForThread(id, CONFIG.codexHome)[0] || "";
+    record = {
+      id,
+      title: readCodexSessionIndexTitle(id) || "",
+      rollout_path: rolloutPath,
+    };
+  }
 
   let rolloutDeleted = false;
   let rolloutMissing = false;
   let rolloutError = "";
   let rolloutPath = "";
-  if (record.rollout_path) {
+  let sidebarIndexChanged = false;
+  let globalStateChanged = false;
+  let sidebarIndexError = "";
+  let desktopMirror = { enabled: false };
+  const rolloutCandidates = Array.from(new Set([
+    record.rollout_path || "",
+    ...findRolloutFilesForThread(id, CONFIG.codexHome),
+  ].filter(Boolean)));
+  if (rolloutCandidates.length) {
+    let missingCount = 0;
     try {
-      rolloutPath = resolveSafeCodexRolloutPath(record.rollout_path, id);
-      if (fs.existsSync(rolloutPath)) {
-        fs.rmSync(rolloutPath, { force: true });
-        rolloutDeleted = true;
-      } else {
-        rolloutMissing = true;
+      for (const candidate of rolloutCandidates) {
+        const safePath = resolveSafeCodexRolloutPath(candidate, id);
+        rolloutPath = rolloutPath || safePath;
+        if (fs.existsSync(safePath)) {
+          fs.rmSync(safePath, { force: true });
+          rolloutDeleted = true;
+        } else {
+          missingCount += 1;
+        }
       }
+      rolloutMissing = !rolloutDeleted && missingCount > 0;
     } catch (error) {
       rolloutError = String(error.message || error);
-      log("ERROR", "codex rollout delete failed after db delete", { threadId: id, rolloutPath: record.rollout_path, error: rolloutError });
+      log("ERROR", "codex rollout delete failed during thread cleanup", { threadId: id, rolloutPath: record.rollout_path, error: rolloutError });
     }
   }
+  try {
+    const sidebarResult = await removeCodexSidebarIndexesForThread(id);
+    sidebarIndexChanged = Boolean(sidebarResult.sessionIndexChanged);
+    globalStateChanged = Boolean(sidebarResult.globalStateChanged);
+  } catch (error) {
+    sidebarIndexError = String(error.message || error);
+    log("ERROR", "codex sidebar index cleanup failed after db delete", { threadId: id, error: sidebarIndexError });
+  }
+  desktopMirror = await removeDesktopMirrorForThread(id, record, rolloutPath || record.rollout_path || "");
 
   return {
     threadId: id,
     title: record.title || "",
+    dbChanged,
     rolloutPath: rolloutPath || record.rollout_path || "",
     rolloutDeleted,
     rolloutMissing,
     rolloutError,
+    sidebarIndexChanged,
+    globalStateChanged,
+    sidebarIndexError,
+    desktopMirror,
   };
 }
 
@@ -5643,11 +6562,7 @@ async function withConfigClient(fn) {
 }
 
 async function writeCodexConfigValue(keyPath, value) {
-  return await withConfigClient(async (client) => client.request(
-    "config/value/write",
-    { keyPath, value, mergeStrategy: "upsert" },
-    60_000,
-  ));
+  return writeTopLevelCodexConfigValue(keyPath, value);
 }
 
 async function listCodexModels() {
@@ -5807,19 +6722,29 @@ async function testCurrentProviderModel(session, modelId) {
 async function startOrResumeAppServerThread(client, session) {
   const params = appServerStartParams(session);
   if (session.codexThreadId) {
+    const previousThreadId = session.codexThreadId;
     try {
       const resumed = await client.request("thread/resume", appServerResumeParams(session), 60_000);
       await verifyAppServerThreadRegistration(resumed.thread.id);
       await ensureAppServerThreadVisible(resumed.thread.id, "thread/resume");
       return resumed.thread.id;
     } catch (error) {
-      log("WARN", "app-server thread resume failed; starting new thread", {
+      const failure = classifyCodexFailure(error);
+      if (failure.kind === "cloud_config") {
+        log("WARN", "app-server thread resume failed; keeping existing thread binding", {
+          sessionId: session.id,
+          threadId: previousThreadId,
+          kind: failure.kind,
+          error: String(error.message || error).slice(0, 1000),
+        });
+        throw errorFromFailure(failure);
+      }
+      log("WARN", "app-server thread resume failed; trying new thread without clearing old binding", {
         sessionId: session.id,
-        threadId: session.codexThreadId,
+        threadId: previousThreadId,
+        kind: failure.kind,
         error: String(error.message || error).slice(0, 1000),
       });
-      session.codexThreadId = "";
-      saveSessions();
     }
   }
 
@@ -5895,10 +6820,21 @@ async function runCodexAppServer(event, session, state = null, onState = null, o
     activeJob.turnId = turnId;
 
     let completed = false;
+    let lastWaitingUpdateAt = 0;
     while (!completed && !watchdog.timedOut) {
       const message = await client.nextNotification(1000);
       if (!message) {
         if (client.closed) break;
+        if (
+          state
+          && Date.now() - startedAt > 120_000
+          && Date.now() - lastWaitingUpdateAt > 60_000
+        ) {
+          liveState.footer = "waiting";
+          liveState.meta.durationMs = Date.now() - startedAt;
+          lastWaitingUpdateAt = Date.now();
+          await flushState();
+        }
         continue;
       }
       watchdog.touch();
@@ -6365,6 +7301,19 @@ function enqueue(event) {
       .catch((error) => log("ERROR", "out-of-band command handling failed", { error: String(error.stack || error) }));
     return;
   }
+  const chatId = chatIdOf(event);
+  if (activeJobs >= CONFIG.maxConcurrent || pendingEvents.length) {
+    void sendText(
+      chatId,
+      `已加入等待队列：前面还有 ${pendingEvents.length + activeJobs} 个任务。斜杠命令仍可立即执行；如需停止当前任务，请发送 /stop。`,
+      "queued",
+      messageId,
+    ).catch((error) => log("WARN", "queue ack failed", {
+      messageId,
+      chatId,
+      error: String(error.message || error).slice(0, 1000),
+    }));
+  }
   pendingEvents.push({ ...event, queuedAt: Date.now() });
   drainQueue();
 }
@@ -6719,6 +7668,9 @@ async function handleCommand(event, command) {
     case "/switch":
       await handleSwitchCommand(chatId, command.rest, messageId);
       return;
+    case "/rename":
+      await handleRenameCommand(chatId, command.rest, messageId);
+      return;
     case "/reset": {
       const session = await resetCurrentSession(chatId);
       await sendText(
@@ -6746,6 +7698,95 @@ async function handleSwitchCommand(chatId, target, messageId) {
     return;
   }
   await sendText(chatId, `已切换到：${session.title || "未命名会话"} (${session.id})`, "switch", messageId);
+}
+
+function parseRenameCommand(rest) {
+  const text = String(rest || "").trim();
+  if (!text) return { title: "", target: "" };
+  if (/^\d+$/.test(text)) return { title: "", target: text };
+  const match = text.match(/^(\d+)\s+(.+)$/s);
+  if (match) {
+    return {
+      target: match[1],
+      title: normalizeRenameTitle(match[2]),
+    };
+  }
+  return {
+    target: "",
+    title: normalizeRenameTitle(text),
+  };
+}
+
+async function handleRenameCommand(chatId, rest, messageId) {
+  const parsed = parseRenameCommand(rest);
+  if (!parsed.title) {
+    await sendText(chatId, "用法：/rename 新标题；或 /rename <list序号> 新标题。", "rename-usage", messageId);
+    return;
+  }
+
+  await syncChatSessionsWithCodex(chatId);
+  let entry = null;
+  let index = 0;
+  if (parsed.target) {
+    const match = await findSessionEntry(chatId, parsed.target);
+    if (!match) {
+      await sendText(chatId, "没有找到这个会话。先发送 /list 查看可改名的会话序号。", "rename-miss", messageId);
+      return;
+    }
+    entry = match.entry;
+    index = match.index;
+  } else {
+    const current = getSession(chatId);
+    entry = {
+      ...current,
+      _sourceChatId: chatId,
+      _isCurrent: true,
+    };
+  }
+
+  const oldTitle = entry.title || "";
+  const threadId = String(entry.codexThreadId || "").trim();
+  const bridgeResult = renameBridgeSessionsForThread(chatId, entry, parsed.title);
+  const codexResult = threadId
+    ? await renameCodexThreadEverywhere(threadId, parsed.title)
+    : { source: null, desktop: null };
+
+  log("INFO", "session renamed", {
+    chatId,
+    messageId,
+    target: parsed.target || "current",
+    index,
+    sessionId: entry.id || "",
+    threadId,
+    oldTitle,
+    newTitle: parsed.title,
+    bridge: bridgeResult,
+    codex: codexResult,
+  });
+
+  const changedParts = [];
+  if (bridgeResult.changed) changedParts.push(`Bridge绑定 ${bridgeResult.renamed} 条`);
+  if (codexResult.source?.dbChanged) changedParts.push("当前 Codex Home DB");
+  if (codexResult.source?.sessionIndexChanged) changedParts.push("当前 Codex Home session_index");
+  if (codexResult.desktop?.dbChanged) changedParts.push("桌面镜像 DB");
+  if (codexResult.desktop?.sessionIndexChanged) changedParts.push("桌面镜像 session_index");
+
+  await sendMarkdown(
+    chatId,
+    [
+      "**会话已改名**",
+      "",
+      `原标题：${oldTitle || "未命名会话"}`,
+      `新标题：${parsed.title}`,
+      parsed.target ? `序号：${index}` : "目标：当前会话",
+      `Bridge会话：${entry.id || "未知"}`,
+      `Codex thread：${threadId ? `\`${threadId}\`` : "尚未创建"}`,
+      "",
+      `已更新：${changedParts.length ? changedParts.join("、") : "仅确认标题，无可写入位置变化"}`,
+    ].join("\n"),
+    "rename",
+    messageId,
+  );
 }
 
 function cleanupPendingDeleteConfirmations() {
@@ -6798,6 +7839,8 @@ function removeThreadFromBridgeSessions(threadId) {
 
 function deletePreviewMarkdown({ entry, record, index, expiresAt }) {
   const threadId = String(entry.codexThreadId || record.id || "").trim();
+  const status = threadListStatusText(entry);
+  const currentNote = entry._isCurrent ? "是。删除后会清理当前 Bridge 绑定，下一条普通消息会创建新会话。" : "否";
   return [
     "**Codex 会话删除确认**",
     "",
@@ -6807,6 +7850,9 @@ function deletePreviewMarkdown({ entry, record, index, expiresAt }) {
     `标题：${entry.title || record.title || "未命名会话"}`,
     `Thread：${codexThreadLink(threadId)}`,
     `本地会话：${entry.id || ""}`,
+    `状态：${status}`,
+    `是否当前会话：${currentNote}`,
+    `来源：${threadSourcesText(entry)}`,
     `Rollout：\`${record.rollout_path || "未记录"}\``,
     `确认有效期：${formatTime(expiresAt)}`,
     "",
@@ -6905,23 +7951,27 @@ async function resolveDeleteItemsByIndexes(chatId, indexes) {
       errors.push(`序号 ${index} 还没有 Codex 原生 thread。`);
       continue;
     }
+    if (entry._deletable === false) {
+      errors.push(`序号 ${index} 不可删除：${entry._deleteBlockReason || "来源信息不足"}`);
+      continue;
+    }
     if (activeJobUsesThread(threadId)) {
       errors.push(`序号 ${index} 正在运行中。`);
       continue;
     }
 
     const record = await loadCodexThreadRecord(threadId);
-    if (!record) {
-      errors.push(`序号 ${index} 的 Codex 本地 thread 已不存在，请重新 /list。`);
-      continue;
-    }
 
     items.push({
       index,
       threadId,
       sessionId: entry.id || "",
-      title: entry.title || record.title || "",
-      rolloutPath: record.rollout_path || "",
+      title: entry.title || record?.title || "",
+      rolloutPath: record?.rollout_path || entry._rolloutPath || "",
+      sources: Array.isArray(entry._sources) ? [...entry._sources] : [],
+      status: threadListStatusText(entry),
+      group: threadListGroup(entry),
+      isCurrent: Boolean(entry._isCurrent),
     });
   }
 
@@ -6929,18 +7979,31 @@ async function resolveDeleteItemsByIndexes(chatId, indexes) {
 }
 
 function deleteBatchPreviewMarkdown({ items, expiresAt, confirmText }) {
+  const groupCounts = new Map();
+  for (const item of items) {
+    groupCounts.set(item.group || "unknown", (groupCounts.get(item.group || "unknown") || 0) + 1);
+  }
+  const summary = ["current", "normal", "broken", "residue"]
+    .map((group) => {
+      const count = groupCounts.get(group) || 0;
+      return count ? `${threadListGroupTitle(group)} ${count}` : "";
+    })
+    .filter(Boolean)
+    .join("；");
   const lines = [
     "**Codex 会话批量删除确认**",
     "",
     "这会执行 Codex++ 等价的本地删除：删除 Codex 本地索引记录、清理关联表、删除 rollout 会话文件，并移除飞书绑定。",
     "",
     `待删除：${items.length} 条`,
+    summary ? `分类：${summary}` : "",
+    items.some((item) => item.isCurrent) ? "包含当前会话：是。确认后会清理当前 Bridge 绑定，下一条普通消息会创建新会话。" : "",
     `确认有效期：${formatTime(expiresAt)}`,
     "",
-    ...items.map((item) => `${item.index}. ${item.title || "未命名会话"} · ${codexThreadLink(item.threadId)}`),
+    ...items.map((item) => `${item.index}. ${item.title || "未命名会话"} · ${codexThreadLink(item.threadId)} · ${item.status || ""} · 来源：${threadSourcesText(item)}`),
     "",
     `确认删除请输入：\`/confirm delete ${confirmText}\``,
-  ];
+  ].filter((line) => line !== "");
   return lines.join("\n");
 }
 
@@ -6953,6 +8016,10 @@ function pendingDeleteItems(pending) {
       sessionId: pending.sessionId || "",
       title: pending.title || "",
       rolloutPath: pending.rolloutPath || "",
+      sources: Array.isArray(pending.sources) ? [...pending.sources] : [],
+      status: pending.status || "",
+      group: pending.group || "",
+      isCurrent: Boolean(pending.isCurrent),
     }];
   }
   return [];
@@ -7029,17 +8096,20 @@ async function handleDeleteCommand(chatId, target, messageId) {
     await sendText(chatId, "这个条目还没有 Codex 原生 thread，不能执行 Codex++ 等价删除。", "delete-no-thread", messageId);
     return;
   }
+  if (entry._deletable === false) {
+    await sendText(chatId, `这个条目不可删除：${entry._deleteBlockReason || "来源信息不足"}`, "delete-blocked", messageId);
+    return;
+  }
   if (activeJobUsesThread(threadId)) {
     await sendText(chatId, "这个会话正在运行中，先 /stop 或等待任务结束后再删除。", "delete-busy", messageId);
     return;
   }
 
-  const record = await loadCodexThreadRecord(threadId);
-  if (!record) {
-    removeThreadFromBridgeSessions(threadId);
-    await sendText(chatId, "Codex 本地库里已经找不到这个 thread，已清理飞书侧绑定。", "delete-missing-thread", messageId);
-    return;
-  }
+  const record = await loadCodexThreadRecord(threadId) || {
+    id: threadId,
+    title: entry.title || readCodexSessionIndexTitle(threadId) || "",
+    rollout_path: entry._rolloutPath || "",
+  };
 
   cleanupPendingDeleteConfirmations();
   const expiresAt = Date.now() + CONFIG.deleteConfirmTtlMs;
@@ -7049,7 +8119,11 @@ async function handleDeleteCommand(chatId, target, messageId) {
     sessionId: entry.id || "",
     index: match.index,
     title: entry.title || record.title || "",
-    rolloutPath: record.rollout_path || "",
+    rolloutPath: record.rollout_path || entry._rolloutPath || "",
+    sources: Array.isArray(entry._sources) ? [...entry._sources] : [],
+    status: threadListStatusText(entry),
+    group: threadListGroup(entry),
+    isCurrent: Boolean(entry._isCurrent),
     createdAt: Date.now(),
     expiresAt,
   });
@@ -7088,20 +8162,9 @@ async function handleConfirmCommand(chatId, rest, messageId) {
     return;
   }
 
-  const changed = [];
   const busy = [];
   for (const item of items) {
-    const currentMatch = await findSessionEntry(chatId, String(item.index));
-    if (!currentMatch || String(currentMatch.entry.codexThreadId || "").trim() !== item.threadId) {
-      changed.push(item.index);
-      continue;
-    }
     if (activeJobUsesThread(item.threadId)) busy.push(item.index);
-  }
-  if (changed.length) {
-    pendingDeleteConfirmations.delete(key);
-    await sendText(chatId, `会话列表顺序已经变化，为避免删错，请重新发送 /list 和 /delete。变化序号：${changed.join("、")}`, "confirm-list-changed", messageId);
-    return;
   }
   if (busy.length) {
     await sendText(chatId, `这些会话正在运行中，先 /stop 或等待任务结束后再删除：${busy.join("、")}`, "confirm-busy", messageId);
@@ -7149,6 +8212,8 @@ async function handleConfirmCommand(chatId, rest, messageId) {
   const single = successes.length === 1 && failures.length === 0;
   const status = single && successes[0].result.rolloutError
     ? "Codex 会话已从本地库删除，但 rollout 文件删除失败"
+    : single && successes[0].result.sidebarIndexError
+      ? "Codex 会话已从本地库删除，但侧边栏辅助索引清理失败"
     : single
       ? "Codex 会话已删除"
       : failures.length
@@ -7162,10 +8227,17 @@ async function handleConfirmCommand(chatId, rest, messageId) {
           "",
           `标题：${successes[0].item.title || successes[0].result.title || "未命名会话"}`,
           `Thread：${codexThreadLink(successes[0].item.threadId)}`,
+          successes[0].item.status ? `删除前状态：${successes[0].item.status}` : "",
           `飞书绑定清理：${successes[0].bridgeRemoved} 条`,
+          successes[0].item.isCurrent ? "当前会话绑定：已清理；下一条普通消息会创建新会话。" : "",
           `Rollout：${successes[0].result.rolloutDeleted ? "已删除" : successes[0].result.rolloutMissing ? "原本不存在" : successes[0].result.rolloutError ? "删除失败" : "未记录"}`,
+          `侧边栏索引：session_index ${successes[0].result.sidebarIndexChanged ? "已清理" : "无对应项"}；global-state ${successes[0].result.globalStateChanged ? "已清理" : "无对应项"}`,
+          successes[0].result.desktopMirror?.enabled ? `桌面端镜像：DB ${successes[0].result.desktopMirror.dbChanged ? "已清理" : "无对应项"}；session_index ${successes[0].result.desktopMirror.sessionIndexChanged ? "已清理" : "无对应项"}；global-state ${successes[0].result.desktopMirror.globalStateChanged ? "已清理" : "无对应项"}；rollout ${successes[0].result.desktopMirror.rolloutDeleted ? "已删除" : successes[0].result.desktopMirror.rolloutMissing ? "原本不存在" : "未记录"}` : "",
           successes[0].result.rolloutPath ? `路径：\`${successes[0].result.rolloutPath}\`` : "",
+          successes[0].result.desktopMirror?.rolloutPath ? `桌面端镜像 Rollout：\`${successes[0].result.desktopMirror.rolloutPath}\`` : "",
           successes[0].result.rolloutError ? ["", "```", successes[0].result.rolloutError.slice(0, 1200), "```"].join("\n") : "",
+          successes[0].result.sidebarIndexError ? ["", "```", successes[0].result.sidebarIndexError.slice(0, 1200), "```"].join("\n") : "",
+          successes[0].result.desktopMirror?.error ? ["", "```", successes[0].result.desktopMirror.error.slice(0, 1200), "```"].join("\n") : "",
         ].filter(Boolean).join("\n")
       : [
           `**${status}**`,
@@ -7173,6 +8245,9 @@ async function handleConfirmCommand(chatId, rest, messageId) {
           `成功：${successes.length} 条`,
           `失败：${failures.length} 条`,
           `飞书绑定清理：${bridgeRemovedTotal} 条`,
+          successes.some(({ item }) => item.isCurrent) ? "当前会话绑定：已清理；下一条普通消息会创建新会话。" : "",
+          `侧边栏索引清理：session_index ${successes.filter(({ result }) => result.sidebarIndexChanged).length} 条；global-state ${successes.filter(({ result }) => result.globalStateChanged).length} 条`,
+          `桌面端镜像清理：DB ${successes.filter(({ result }) => result.desktopMirror?.dbChanged).length} 条；session_index ${successes.filter(({ result }) => result.desktopMirror?.sessionIndexChanged).length} 条；global-state ${successes.filter(({ result }) => result.desktopMirror?.globalStateChanged).length} 条；rollout ${successes.filter(({ result }) => result.desktopMirror?.rolloutDeleted).length} 条`,
           "",
           ...successes.map(({ item }) => `- 已删除 ${item.index}. ${item.title || "未命名会话"} · ${compactThreadId(item.threadId)}`),
           failures.length ? "" : "",
@@ -7892,6 +8967,7 @@ function helpMarkdown() {
     "`/compact` — 触发当前原生 thread 的上下文压缩",
     "`/sessions` — 列出飞书会话和 Codex 侧边栏可见会话",
     "`/switch <序号或ID>` — 切换到已有 Codex 会话",
+    "`/rename 新标题` / `/rename <序号> 新标题` — 修改当前会话或 /list 指定会话标题",
     "`/delete <序号或ID>` — 删除 Codex 本地会话；支持 `1 2 3`、`1-18`、`3-7 8-12`，需 `/confirm delete <序号或区间>` 确认",
     "`/reset` — 清空当前会话上下文",
     "`/stop` — 停止当前 Codex 任务",
@@ -8146,15 +9222,22 @@ async function sessionsMarkdown(chatId) {
     return "还没有记录过 Codex 会话。直接发送普通消息会自动创建。";
   }
   const lines = [`**Codex 会话列表（共 ${list.length} 个）**`, ""];
+  let previousGroup = "";
   list.forEach((session, index) => {
     const marker = session._isCurrent || session.id === currentId ? " ← 当前" : "";
     const thread = codexThreadLink(session.codexThreadId);
+    const group = threadListGroup(session);
+    if (group !== previousGroup) {
+      if (previousGroup) lines.push("");
+      lines.push(`**${threadListGroupTitle(group)}**`);
+      previousGroup = group;
+    }
     lines.push(
-      `${index + 1}. ${session.title || "未命名会话"} (${session.id}) · ${thread} · ${sessionContextSummary(session)} · ${formatTime(session.updatedAt)} · ${session.messages.length} 条${marker}`,
+      `${index + 1}. ${session.title || "未命名会话"} (${session.id}) · ${thread} · ${threadListStatusText(session)} · 来源：${threadSourcesText(session)} · ${threadDeleteStateText(session)}${threadLocationText(session)} · ${threadListTimeLabelName(session)}：${threadListTimeLabel(session)} · ${session.messages.length} 条${marker}`,
     );
   });
   lines.push("");
-  lines.push("使用 `/switch <序号或ID>` 切换会话；使用 `/delete <序号或ID>`、`/delete 1 2 3`、`/delete 1-18`、`/delete 3-7 8-12` 删除会话；删除需按预览里的 `/confirm delete <序号或区间>` 确认；使用 `/new [标题]` 创建新会话。");
+  lines.push("使用 `/switch <序号或ID>` 切换会话；使用 `/rename 新标题` 或 `/rename <序号> 新标题` 改名；使用 `/delete <序号或ID>`、`/delete 1 2 3`、`/delete 1-18`、`/delete 3-7 8-12` 删除会话；删除需按预览里的 `/confirm delete <序号或区间>` 确认；使用 `/new [标题]` 创建新会话。");
   return lines.join("\n");
 }
 

@@ -1,9 +1,13 @@
 {
   "name": "codex-feishu-bridge",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
   "description": "Windows bridge that connects a Feishu bot to local Codex.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/yuanzhejiang669-jpg/codex-feishu-bridge.git"
+  },
   "scripts": {
     "check": "node --check codex-feishu-bridge.mjs && node --check register-codex-feishu-bot.mjs && node --check control-panel.mjs && node --check control-panel/app.js",
     "doctor": "powershell.exe -NoProfile -File doctor-codex-feishu-bridge.ps1",

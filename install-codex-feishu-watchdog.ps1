@@ -3,6 +3,7 @@ param(
   [string]$LarkProfile = "",
   [string]$Workspace = "",
   [string]$CodexHome = "",
+  [string]$DesktopCodexHome = "",
   [string]$TaskName = "",
   [string]$EventKeys = "im.message.receive_v1",
   [int]$CodexTimeoutSeconds = 0,
@@ -70,7 +71,8 @@ $argumentParts = @(
   $CodexIdleTimeoutSeconds,
   $WatchdogTimeoutSeconds,
   "`"$EventKeys`"",
-  "`"$CodexHome`""
+  "`"$CodexHome`"",
+  "`"$DesktopCodexHome`""
 )
 $arguments = $argumentParts -join " "
 
