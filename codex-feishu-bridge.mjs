@@ -347,6 +347,7 @@ function compactProviderInfo(info) {
     baseUrl: String(info.baseUrl || "").trim(),
     envKey,
     requiresOpenaiAuth: Boolean(info.requiresOpenaiAuth),
+    serviceTierPassthrough: Boolean(info.serviceTierPassthrough),
     envVisible: envKey ? Object.prototype.hasOwnProperty.call(process.env, envKey) : null,
     builtIn: Boolean(info.builtIn),
   };
@@ -364,7 +365,7 @@ function listCodexProviders() {
   add({ id: "amazon-bedrock", name: "Amazon Bedrock", builtIn: true });
 
   const text = readCodexConfigText();
-  const tableRe = /^\s*\[model_providers\.([A-Za-z0-9_-]+)\]\s*$/gm;
+  const tableRe = /^\s*\[model_providers\.([A-Za-z0-9_.-]+)\]\s*$/gm;
   const matches = [...text.matchAll(tableRe)];
   for (let i = 0; i < matches.length; i += 1) {
     const id = matches[i][1];
@@ -377,6 +378,9 @@ function listCodexProviders() {
       baseUrl: tomlStringValue(body, "base_url"),
       envKey: tomlStringValue(body, "env_key"),
       requiresOpenaiAuth: tomlBooleanValue(body, "requires_openai_auth"),
+      serviceTierPassthrough:
+        tomlBooleanValue(body, "service_tier_passthrough")
+        || tomlBooleanValue(body, "supports_service_tier"),
       builtIn: false,
     });
   }
@@ -495,18 +499,132 @@ function displayServiceTier(value) {
   return tier;
 }
 
-function applySessionThreadOverrides(params, session) {
+function serviceTierPlanForSettings(settings, options = {}) {
+  const serviceTier = cleanOverride(settings?.serviceTier);
+  const provider = findCodexProvider(settings?.provider || "");
+  const requestedServiceTier = serviceTier;
+  const requiresOpenaiAuth = Boolean(provider?.requiresOpenaiAuth);
+  const directPassthrough = Boolean(provider?.serviceTierPassthrough);
+  const phase = String(options.phase || "turn");
+  if (!serviceTier || options.disableServiceTier) {
+    return {
+      requestedServiceTier,
+      serviceTier: "",
+      phase,
+      policy: options.disableServiceTier ? "disabled" : "none",
+      autoFallback: false,
+      requiresOpenaiAuth,
+      directPassthrough,
+    };
+  }
+
+  if (requiresOpenaiAuth || directPassthrough) {
+    return {
+      requestedServiceTier,
+      serviceTier,
+      phase,
+      policy: requiresOpenaiAuth ? "openai-auth" : "direct-passthrough",
+      autoFallback: !requiresOpenaiAuth,
+      requiresOpenaiAuth,
+      directPassthrough,
+    };
+  }
+
+  if (phase === "thread") {
+    return {
+      requestedServiceTier,
+      serviceTier: "",
+      phase,
+      policy: "auto-third-party-thread-deferred",
+      autoFallback: false,
+      requiresOpenaiAuth,
+      directPassthrough,
+    };
+  }
+
+  return {
+    requestedServiceTier,
+    serviceTier,
+    phase,
+    policy: "auto-third-party",
+    autoFallback: true,
+    requiresOpenaiAuth,
+    directPassthrough,
+  };
+}
+
+function serviceTierForSettings(settings, options = {}) {
+  return serviceTierPlanForSettings(settings, options).serviceTier;
+}
+
+function shouldRetryWithoutServiceTier(failure, tierPlan, options = {}) {
+  if (options.disableServiceTier || options.serviceTierFallbackAttempt) return false;
+  if (!tierPlan?.serviceTier || !tierPlan.autoFallback) return false;
+  const item = normalizeFailure(failure) || classifyCodexFailure(failure);
+  if (["user_stop", "feishu_card", "missing_rollout", "empty_completion", "stream_disconnect"].includes(item.kind)) {
+    return false;
+  }
+  const lower = errorText(item.detail || item.message || failure, "").toLowerCase();
+  return item.kind !== "timeout"
+    || lower.includes("service_tier")
+    || lower.includes("service tier")
+    || lower.includes("service-tier")
+    || lower.includes("fast")
+    || lower.includes("priority");
+}
+
+function serviceTierFallbackFailure(failure, tierPlan) {
+  const item = normalizeFailure(failure) || classifyCodexFailure(failure);
+  return {
+    ...item,
+    kind: "service_tier_fallback",
+    label: "service_tier 自动降级",
+    recoverable: true,
+    message: `Provider 未确认支持 ${displayServiceTier(tierPlan?.serviceTier) || tierPlan?.serviceTier || "service_tier"}，Bridge 正在不带 service_tier 自动重试。`,
+    suggestion: "如果重试成功，本轮会直接返回结果；如果仍失败，会显示真实错误。",
+  };
+}
+
+function serviceTierForProviderDetail(provider) {
+  if (provider?.requiresOpenaiAuth) return "service_tier 官方鉴权";
+  if (provider?.serviceTierPassthrough) return "service_tier 直接透传";
+  return "service_tier 自动尝试";
+}
+
+function serviceTierForThreadSettings(settings, options = {}) {
+  return serviceTierForSettings(settings, { ...options, phase: "thread" });
+}
+
+function serviceTierForTurnSettings(settings, options = {}) {
+  return serviceTierForSettings(settings, { ...options, phase: "turn" });
+}
+
+function serviceTierForExecSettings(settings, options = {}) {
+  return serviceTierForSettings(settings, { ...options, phase: "exec" });
+}
+
+function serviceTierPlanForTurnSettings(settings, options = {}) {
+  return serviceTierPlanForSettings(settings, { ...options, phase: "turn" });
+}
+
+function serviceTierPlanForExecSettings(settings, options = {}) {
+  return serviceTierPlanForSettings(settings, { ...options, phase: "exec" });
+}
+
+function applySessionThreadOverrides(params, session, options = {}) {
   const settings = effectiveSessionSettings(session);
+  const serviceTier = serviceTierForThreadSettings(settings, options);
   if (settings.model) params.model = settings.model;
   if (settings.provider) params.modelProvider = settings.provider;
-  if (settings.serviceTier) params.serviceTier = settings.serviceTier;
+  if (serviceTier) params.serviceTier = serviceTier;
   return params;
 }
 
-function applySessionTurnOverrides(params, session) {
+function applySessionTurnOverrides(params, session, options = {}) {
   const settings = effectiveSessionSettings(session);
+  const serviceTier = serviceTierForTurnSettings(settings, options);
   if (settings.model) params.model = settings.model;
-  if (settings.serviceTier) params.serviceTier = settings.serviceTier;
+  if (serviceTier) params.serviceTier = serviceTier;
   if (settings.reasoning) params.effort = settings.reasoning;
   return params;
 }
@@ -5654,7 +5772,7 @@ function appServerThreadConfig() {
   return Object.keys(config).length ? config : null;
 }
 
-function appServerStartParams(session) {
+function appServerStartParams(session, options = {}) {
   const params = {
     cwd: CONFIG.workspace,
     approvalPolicy: "never",
@@ -5663,10 +5781,10 @@ function appServerStartParams(session) {
     config: appServerThreadConfig(),
     serviceName: "codex-feishu-bridge",
   };
-  return applySessionThreadOverrides(params, session);
+  return applySessionThreadOverrides(params, session, options);
 }
 
-function appServerResumeParams(session) {
+function appServerResumeParams(session, options = {}) {
   const params = {
     threadId: session.codexThreadId,
     cwd: CONFIG.workspace,
@@ -5674,7 +5792,7 @@ function appServerResumeParams(session) {
     sandbox: CONFIG.codexSandbox,
     config: appServerThreadConfig(),
   };
-  return applySessionThreadOverrides(params, session);
+  return applySessionThreadOverrides(params, session, options);
 }
 
 function appServerInputItems(event, userContent) {
@@ -5690,7 +5808,7 @@ function appServerInputItems(event, userContent) {
   return input;
 }
 
-function appServerTurnParams(threadId, event, userContent, session) {
+function appServerTurnParams(threadId, event, userContent, session, options = {}) {
   const params = {
     threadId,
     input: appServerInputItems(event, userContent),
@@ -5699,7 +5817,7 @@ function appServerTurnParams(threadId, event, userContent, session) {
     approvalPolicy: "never",
     sandboxPolicy: { type: "dangerFullAccess" },
   };
-  return applySessionTurnOverrides(params, session);
+  return applySessionTurnOverrides(params, session, options);
 }
 
 function appServerSteerParams(threadId, turnId, event, userContent) {
@@ -6719,12 +6837,12 @@ async function testCurrentProviderModel(session, modelId) {
   }
 }
 
-async function startOrResumeAppServerThread(client, session) {
-  const params = appServerStartParams(session);
+async function startOrResumeAppServerThread(client, session, options = {}) {
+  const params = appServerStartParams(session, options);
   if (session.codexThreadId) {
     const previousThreadId = session.codexThreadId;
     try {
-      const resumed = await client.request("thread/resume", appServerResumeParams(session), 60_000);
+      const resumed = await client.request("thread/resume", appServerResumeParams(session, options), 60_000);
       await verifyAppServerThreadRegistration(resumed.thread.id);
       await ensureAppServerThreadVisible(resumed.thread.id, "thread/resume");
       return resumed.thread.id;
@@ -6786,9 +6904,12 @@ async function runCodexAppServer(event, session, state = null, onState = null, o
     void client.stop();
     setTimeout(() => terminateProcessTree(client.child?.pid, true), 5000).unref?.();
   });
+  let serviceTierPlan = null;
 
   try {
     const settings = effectiveSessionSettings(session);
+    serviceTierPlan = serviceTierPlanForTurnSettings(settings, options);
+    const serviceTier = serviceTierPlan.serviceTier;
     log("INFO", "starting codex app-server turn", {
       messageId,
       sessionId: session.id,
@@ -6796,7 +6917,10 @@ async function runCodexAppServer(event, session, state = null, onState = null, o
       model: settings.model || "",
       provider: settings.provider || "",
       reasoning: settings.reasoning || "",
-      serviceTier: settings.serviceTier || "",
+      serviceTier,
+      requestedServiceTier: settings.serviceTier || "",
+      serviceTierPolicy: serviceTierPlan.policy,
+      serviceTierAutoFallback: Boolean(serviceTierPlan.autoFallback),
       timeoutMs: CONFIG.codexTimeoutMs,
       idleTimeoutMs: CONFIG.codexIdleTimeoutMs,
       disableMcp: CONFIG.disableMcp,
@@ -6806,7 +6930,7 @@ async function runCodexAppServer(event, session, state = null, onState = null, o
     watchdog.touch();
     liveState.meta.model = initialized.userAgent || liveState.meta.model;
 
-    const threadId = await startOrResumeAppServerThread(client, session);
+    const threadId = await startOrResumeAppServerThread(client, session, options);
     watchdog.touch();
     liveState.threadId = threadId;
     activeJob.threadId = threadId;
@@ -6814,7 +6938,7 @@ async function runCodexAppServer(event, session, state = null, onState = null, o
       await flushState();
     }
 
-    const turn = await client.request("turn/start", appServerTurnParams(threadId, event, userContent, session), 60_000);
+    const turn = await client.request("turn/start", appServerTurnParams(threadId, event, userContent, session, options), 60_000);
     watchdog.touch();
     const turnId = turn?.turn?.id || "";
     activeJob.turnId = turnId;
@@ -6905,6 +7029,26 @@ async function runCodexAppServer(event, session, state = null, onState = null, o
         liveState.failure = failure;
         liveState.errorMsg = failureDetailText(failure).slice(0, 1500);
         updateSessionFailure(liveState.session, failure);
+      } else if (shouldRetryWithoutServiceTier(failure, serviceTierPlan, options)) {
+        const fallbackFailure = serviceTierFallbackFailure(failure, serviceTierPlan);
+        markRunRecovering(liveState, fallbackFailure, 1);
+        if (state) await flushState();
+        log("WARN", "retrying codex app-server turn without service_tier", {
+          messageId,
+          sessionId: session.id,
+          provider: effectiveSessionSettings(session).provider || "",
+          requestedServiceTier: serviceTierPlan?.requestedServiceTier || "",
+          serviceTierPolicy: serviceTierPlan?.policy || "",
+          kind: failure.kind,
+          detail: failure.detail.slice(0, 1000),
+        });
+        await client.stop();
+        return await runCodexAppServer(event, session, liveState, onState, {
+          ...options,
+          disableServiceTier: true,
+          serviceTierFallbackAttempt: true,
+          rootMessageId: activeJob.rootMessageId,
+        });
       } else if (shouldRecoverCodexRun(failure, recoveryAttempt)) {
         stats.recovered += 1;
         markRunRecovering(liveState, failure, recoveryAttempt + 1);
@@ -6984,6 +7128,8 @@ async function runCodex(event, session, state = null, onState = null) {
   const promptFile = path.join(promptDir, `${Date.now()}-${safeFilePart(messageId)}.md`);
   fs.writeFileSync(promptFile, buildPrompt(event, session), "utf8");
   const settings = effectiveSessionSettings(session);
+  const serviceTierPlan = serviceTierPlanForExecSettings(settings);
+  const serviceTier = serviceTierPlan.serviceTier;
 
   const args = [
     "exec",
@@ -7001,7 +7147,7 @@ async function runCodex(event, session, state = null, onState = null) {
   if (settings.model) args.push("-m", settings.model);
   if (settings.provider) args.push("-c", `model_provider="${settings.provider}"`);
   if (settings.reasoning) args.push("-c", `model_reasoning_effort="${settings.reasoning}"`);
-  if (settings.serviceTier) args.push("-c", `service_tier="${settings.serviceTier}"`);
+  if (serviceTier) args.push("-c", `service_tier="${serviceTier}"`);
   for (const attachment of Array.isArray(event.attachments) ? event.attachments : []) {
     if (attachment?.type === "image" && attachment.path && fs.existsSync(attachment.path)) {
       args.push("--image", attachment.path);
@@ -7020,7 +7166,10 @@ async function runCodex(event, session, state = null, onState = null) {
     model: settings.model || "",
     provider: settings.provider || "",
     reasoning: settings.reasoning || "",
-    serviceTier: settings.serviceTier || "",
+    serviceTier,
+    requestedServiceTier: settings.serviceTier || "",
+    serviceTierPolicy: serviceTierPlan.policy,
+    serviceTierAutoFallback: Boolean(serviceTierPlan.autoFallback),
     timeoutMs: CONFIG.codexTimeoutMs,
     idleTimeoutMs: CONFIG.codexIdleTimeoutMs,
     disableMcp: CONFIG.disableMcp,
@@ -8491,6 +8640,7 @@ function providerDetailLine(provider) {
   } else if (!provider.requiresOpenaiAuth) {
     parts.push("未配置 env_key");
   }
+  parts.push(serviceTierForProviderDetail(provider));
   if (provider.builtIn) parts.push("内置");
   return parts.join("；") || "无额外信息";
 }

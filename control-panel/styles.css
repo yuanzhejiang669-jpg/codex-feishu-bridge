@@ -554,17 +554,17 @@ table {
 
 .provider-table th:nth-child(1),
 .provider-table td:nth-child(1) {
-  width: 18%;
+  width: 14%;
 }
 
 .provider-table th:nth-child(2),
 .provider-table td:nth-child(2) {
-  width: 20%;
+  width: 17%;
 }
 
 .provider-table th:nth-child(3),
 .provider-table td:nth-child(3) {
-  width: 30%;
+  width: 27%;
 }
 
 .provider-table th:nth-child(4),
@@ -574,7 +574,12 @@ table {
 
 .provider-table th:nth-child(5),
 .provider-table td:nth-child(5) {
-  width: 210px;
+  width: 190px;
+}
+
+.provider-table th:nth-child(6),
+.provider-table td:nth-child(6) {
+  width: 128px;
 }
 
 .provider-table td {
@@ -741,6 +746,18 @@ textarea:focus {
 
 .form-wide {
   grid-column: 1 / -1;
+}
+
+.form-check {
+  display: flex !important;
+  align-items: center;
+  gap: 8px;
+}
+
+.form-check input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
 }
 
 .button-row {

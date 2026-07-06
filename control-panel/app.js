@@ -249,6 +249,9 @@ function renderProviders(data) {
           ? statusBadge("good", `${provider.envKey} ${provider.envSource === "user" ? "用户环境可见" : "进程可见"}`)
           : statusBadge("warn", `${provider.envKey} 不可见`)
         : statusBadge("info", "无 env_key");
+      const serviceTier = provider.serviceTierPassthrough
+        ? statusBadge("good", "直接透传")
+        : statusBadge("info", "自动尝试");
       return `
         <tr>
           <td>${providerMonoCell(provider.id, "provider-id")}</td>
@@ -256,6 +259,7 @@ function renderProviders(data) {
           <td>${providerMonoCell(provider.baseUrl || "-", "provider-url")}</td>
           <td>${providerMonoCell(provider.wireApi || "-", "provider-wire")}</td>
           <td>${env}</td>
+          <td>${serviceTier}</td>
         </tr>
       `;
     })
@@ -486,6 +490,13 @@ function render(data) {
   showPanel(state.activePanel, { updateHash: false, scrollToTop: false });
 }
 
+const providerActionButtonIds = [
+  "previewProviderButton",
+  "testProviderButton",
+  "addProviderButton",
+  "replaceProviderEnvButton",
+];
+
 function providerFormData() {
   const form = $("providerForm");
   return {
@@ -496,6 +507,7 @@ function providerFormData() {
     apiKey: form.elements.apiKey.value.trim(),
     model: form.elements.model.value.trim(),
     confirm: form.elements.confirm.value.trim(),
+    serviceTierPassthrough: Boolean(form.elements.serviceTierPassthrough?.checked),
     wireApi: "responses",
   };
 }
@@ -1894,7 +1906,7 @@ function handleCleanupClick(event) {
 }
 
 async function previewProvider() {
-  setButtonsDisabled(["previewProviderButton", "testProviderButton", "addProviderButton"], true);
+  setButtonsDisabled(providerActionButtonIds, true);
   setActionResult("providerActionResult", "info", "正在请求当前 provider 的 /models。");
   try {
     const data = await postJson("/api/provider/preview", providerFormData());
@@ -1912,12 +1924,12 @@ async function previewProvider() {
   } catch (error) {
     setActionResult("providerActionResult", "bad", `<strong>拉取失败</strong><pre class="mono">${escapeHtml(error.message)}</pre>`);
   } finally {
-    setButtonsDisabled(["previewProviderButton", "testProviderButton", "addProviderButton"], false);
+    setButtonsDisabled(providerActionButtonIds, false);
   }
 }
 
 async function testProviderModel() {
-  setButtonsDisabled(["previewProviderButton", "testProviderButton", "addProviderButton"], true);
+  setButtonsDisabled(providerActionButtonIds, true);
   setActionResult("providerActionResult", "info", "正在用测试模型请求 /responses 轻量探针。");
   try {
     const data = await postJson("/api/provider/test", providerFormData());
@@ -1941,7 +1953,7 @@ async function testProviderModel() {
   } catch (error) {
     setActionResult("providerActionResult", "bad", `<strong>模型测活失败</strong><pre class="mono">${escapeHtml(error.message)}</pre>`);
   } finally {
-    setButtonsDisabled(["previewProviderButton", "testProviderButton", "addProviderButton"], false);
+    setButtonsDisabled(providerActionButtonIds, false);
   }
 }
 
@@ -1952,7 +1964,7 @@ async function addProvider() {
     return;
   }
 
-  setButtonsDisabled(["previewProviderButton", "testProviderButton", "addProviderButton"], true);
+  setButtonsDisabled(providerActionButtonIds, true);
   setActionResult("providerActionResult", "info", "正在写入用户级 config.toml。");
   try {
     const data = await postJson("/api/provider/add", payload);
@@ -1963,6 +1975,7 @@ async function addProvider() {
         <strong>Provider 已写入。</strong>
         <div>provider：${mono(data.provider?.id)}</div>
         <div>环境变量：${data.envWritten ? `已写入用户环境变量 ${mono(data.envKey)}` : `沿用已有环境变量 ${mono(data.envKey)}`}</div>
+        <div>service_tier：${data.provider?.serviceTierPassthrough ? "确认支持，直接透传" : "自动尝试；失败自动降级"}</div>
         <div>配置文件：${mono(data.configPath)}</div>
         <div class="muted">之后可在飞书里用 /provider ${escapeHtml(data.provider?.id || "")} 切换。新增 env_key 需要对应 Bot 的 Bridge 进程重启后才会被看见。</div>
       `,
@@ -1971,7 +1984,41 @@ async function addProvider() {
   } catch (error) {
     setActionResult("providerActionResult", "bad", `<strong>写入失败</strong><pre class="mono">${escapeHtml(error.message)}</pre>`);
   } finally {
-    setButtonsDisabled(["previewProviderButton", "testProviderButton", "addProviderButton"], false);
+    setButtonsDisabled(providerActionButtonIds, false);
+  }
+}
+
+async function replaceProviderEnv() {
+  const payload = providerFormData();
+  if (payload.confirm !== payload.id) {
+    setActionResult("providerActionResult", "warn", "替换前，请在“确认写入”里输入完整 provider id。");
+    return;
+  }
+  if (!payload.apiKey) {
+    setActionResult("providerActionResult", "warn", "替换环境变量必须填写新的 API Key。");
+    return;
+  }
+
+  setButtonsDisabled(providerActionButtonIds, true);
+  setActionResult("providerActionResult", "info", "正在用新 Key 测活，随后删除并替换用户环境变量。");
+  try {
+    const data = await postJson("/api/provider/replace-env", payload);
+    setActionResult(
+      "providerActionResult",
+      "good",
+      `
+        <strong>环境变量已替换。</strong>
+        <div>provider：${mono(data.provider?.id)}</div>
+        <div>环境变量：已清除旧用户变量并写入 ${mono(data.envKey)}</div>
+        <div>model：${mono(data.model)}</div>
+        <div class="muted">正在运行的 Bot 需要重启 Bridge 进程后才会读取新 Key。</div>
+      `,
+    );
+    await refresh();
+  } catch (error) {
+    setActionResult("providerActionResult", "bad", `<strong>替换失败</strong><pre class="mono">${escapeHtml(error.message)}</pre>`);
+  } finally {
+    setButtonsDisabled(providerActionButtonIds, false);
   }
 }
 
@@ -2258,6 +2305,7 @@ $("sidebarToggle").addEventListener("click", toggleSidebar);
 $("previewProviderButton").addEventListener("click", previewProvider);
 $("testProviderButton").addEventListener("click", testProviderModel);
 $("addProviderButton").addEventListener("click", addProvider);
+$("replaceProviderEnvButton").addEventListener("click", replaceProviderEnv);
 $("previewProviderSyncButton").addEventListener("click", previewProviderSync);
 $("syncProvidersButton").addEventListener("click", syncProvidersToSpaces);
 $("providerForm").addEventListener("submit", (event) => event.preventDefault());

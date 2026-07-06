@@ -165,6 +165,7 @@
                 <th>base_url</th>
                 <th>wire_api</th>
                 <th>环境变量</th>
+                <th>service_tier</th>
               </tr>
             </thead>
             <tbody id="providerRows"></tbody>
@@ -193,6 +194,7 @@
               <label>base_url<input name="baseUrl" placeholder="https://example.com/v1" autocomplete="off" /></label>
               <label>env_key<input name="envKey" placeholder="EXAMPLE_API_KEY" autocomplete="off" /></label>
               <label class="form-wide">API Key<input name="apiKey" type="password" placeholder="可选：填写后自动写入用户环境变量" autocomplete="off" /></label>
+              <label class="form-wide form-check"><input name="serviceTierPassthrough" type="checkbox" /> 确认支持 service_tier，直接透传</label>
               <label>测试模型 ID<input name="model" placeholder="gpt-5.5" autocomplete="off" /></label>
               <label>确认写入<input name="confirm" placeholder="写入时输入 provider id" autocomplete="off" /></label>
             </form>
@@ -200,6 +202,7 @@
               <button id="previewProviderButton" type="button">拉取模型并预览</button>
               <button id="testProviderButton" type="button">测活模型</button>
               <button id="addProviderButton" type="button" class="danger-button">写入 config.toml</button>
+              <button id="replaceProviderEnvButton" type="button" class="danger-button">替换环境变量</button>
             </div>
             <div id="providerActionResult" class="action-result"></div>
           </article>

@@ -2223,11 +2223,16 @@ function readFactoryScopesBaseline(profile) {
   });
 }
 
-function validateProviderPayload(payload) {
-  const id = requireString(payload.id, "provider id", 80);
+function validateProviderId(value) {
+  const id = requireString(value, "provider id", 80);
   if (!/^[A-Za-z0-9_.-]+$/.test(id)) {
     throw new Error("provider id 只能包含英文字母、数字、下划线、点和短横线");
   }
+  return id;
+}
+
+function validateProviderPayload(payload) {
+  const id = validateProviderId(payload.id);
 
   const name = requireString(payload.name || payload.id, "name", 160);
   const baseUrl = requireString(payload.baseUrl, "base_url", 500).replace(/\/+$/, "");
@@ -2257,6 +2262,9 @@ function validateProviderPayload(payload) {
     baseUrl,
     wireApi,
     envKey,
+    serviceTierPassthrough:
+      payload.serviceTierPassthrough === true
+      || String(payload.serviceTierPassthrough || "").toLowerCase() === "true",
   };
 }
 
@@ -2270,13 +2278,19 @@ function providerRuntimeKey(provider, apiKey = "") {
   return apiKey || environmentVariableValue(provider.envKey) || "";
 }
 
-function setUserEnvironmentVariable(name, value) {
+function setUserEnvironmentVariable(name, value, options = {}) {
+  const clearExisting = Boolean(options.clearExisting);
   return new Promise((resolve, reject) => {
     const script = [
       "$ErrorActionPreference = 'Stop'",
       "$name = $env:CODEX_FEISHU_ENV_NAME",
       "$value = $env:CODEX_FEISHU_ENV_VALUE",
+      "$clearExisting = $env:CODEX_FEISHU_ENV_CLEAR_EXISTING -eq '1'",
       "if ([string]::IsNullOrWhiteSpace($name)) { throw 'Environment variable name is empty.' }",
+      "if ($clearExisting) {",
+      "  Remove-Item -Path ('Env:' + $name) -ErrorAction SilentlyContinue",
+      "  [Environment]::SetEnvironmentVariable($name, $null, 'User')",
+      "}",
       "[Environment]::SetEnvironmentVariable($name, $value, 'User')",
     ].join("\n");
     execFile(
@@ -2296,6 +2310,7 @@ function setUserEnvironmentVariable(name, value) {
           ...process.env,
           CODEX_FEISHU_ENV_NAME: name,
           CODEX_FEISHU_ENV_VALUE: value,
+          CODEX_FEISHU_ENV_CLEAR_EXISTING: clearExisting ? "1" : "0",
         },
       },
       (error, stdout, stderr) => {
@@ -2303,6 +2318,7 @@ function setUserEnvironmentVariable(name, value) {
           reject(new Error(redactSensitiveText(stderr || stdout || error.message, [value])));
           return;
         }
+        if (clearExisting) delete process.env[name];
         process.env[name] = value;
         resolve();
       },
@@ -2322,6 +2338,7 @@ function providerTomlBlock(provider) {
     `base_url = "${redactTomlString(provider.baseUrl)}"`,
     `wire_api = "${redactTomlString(provider.wireApi)}"`,
     `env_key = "${redactTomlString(provider.envKey)}"`,
+    ...(provider.serviceTierPassthrough ? ["service_tier_passthrough = true"] : []),
     "",
   ].join("\n");
 }
@@ -2343,6 +2360,35 @@ async function appendProviderToConfig(provider, apiKey = "") {
   const nextText = `${currentText.replace(/\s*$/, "\n")}${providerTomlBlock(provider)}`;
   await writeFile(codexConfigPath, nextText, "utf8");
   return readCodexConfig();
+}
+
+async function replaceProviderEnvironmentVariable(providerId, apiKey, model, submittedEnvKey = "") {
+  if (!apiKey) throw new Error("替换环境变量必须填写新的 API Key");
+  const config = await readCodexConfig();
+  const provider = config.providers.find((item) => item.id === providerId);
+  if (!provider) {
+    throw new Error(`provider 不存在：${providerId}。请先新增 provider，或确认 provider id 是否正确。`);
+  }
+  if (!provider.envKey) {
+    throw new Error(`provider ${providerId} 没有 env_key，无法替换环境变量。`);
+  }
+  if (submittedEnvKey && submittedEnvKey !== provider.envKey) {
+    throw new Error(`env_key 与现有 provider 不一致。当前 ${providerId} 使用 ${provider.envKey}。`);
+  }
+
+  const models = await providerModels(provider, apiKey);
+  const test = await providerResponsesTest(provider, model, apiKey);
+  await setUserEnvironmentVariable(provider.envKey, apiKey, { clearExisting: true });
+  return {
+    provider,
+    model,
+    models,
+    test,
+    envKey: provider.envKey,
+    envReplaced: true,
+    configPath: codexConfigPath,
+    config: await readCodexConfig(),
+  };
 }
 
 async function providerModels(provider, apiKey = "") {
@@ -2598,6 +2644,7 @@ async function readCodexConfig() {
         envKey: "",
         envVisible: false,
         envSource: "",
+        serviceTierPassthrough: false,
       };
       result.providers.push(currentProvider);
       continue;
@@ -2616,6 +2663,9 @@ async function readCodexConfig() {
       if (key === "name") currentProvider.name = value;
       if (key === "base_url") currentProvider.baseUrl = value;
       if (key === "wire_api") currentProvider.wireApi = value;
+      if (key === "service_tier_passthrough" || key === "supports_service_tier") {
+        currentProvider.serviceTierPassthrough = String(value).toLowerCase() === "true";
+      }
       if (key === "env_key") {
         currentProvider.envKey = value;
         currentProvider.envVisible = Boolean(environmentVariableValue(value));
@@ -3997,6 +4047,32 @@ async function requestHandler(req, res) {
         envKey: provider.envKey,
         configPath: codexConfigPath,
         config,
+      });
+    } catch (error) {
+      jsonResponse(res, 400, {
+        ok: false,
+        error: errorMessage(error, [apiKeyForError]),
+      });
+    }
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/provider/replace-env") {
+    let apiKeyForError = "";
+    try {
+      const body = await readRequestJson(req);
+      const providerId = validateProviderId(body.id);
+      const apiKey = providerApiKeyFromPayload(body);
+      apiKeyForError = apiKey;
+      const model = requireString(body.model, "测试模型 ID", 160);
+      const submittedEnvKey = optionalString(body.envKey, 120);
+      if (body.confirm !== providerId) {
+        throw new Error("确认文本不匹配。请在确认框输入 provider id。");
+      }
+      const result = await replaceProviderEnvironmentVariable(providerId, apiKey, model, submittedEnvKey);
+      jsonResponse(res, 200, {
+        ok: true,
+        ...result,
       });
     } catch (error) {
       jsonResponse(res, 400, {
