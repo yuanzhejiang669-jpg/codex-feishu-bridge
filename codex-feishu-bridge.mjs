@@ -6,6 +6,54 @@ import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
+import {
+  clearTimer,
+  durationConfigLabel,
+  hasDuration,
+  normalizeRunMode,
+  parseDurationMs,
+  parseEventKeys,
+  parseToolEnv,
+  resolveDefaultDataRoot,
+  resolveDefaultTools,
+  resolveLarkEventLockScope,
+  withLarkProfile,
+} from "./src/config/env.mjs";
+import {
+  normalizeUserContent,
+  parseCommand as parseCommandInput,
+} from "./src/commands/parser.mjs";
+import { sameResolvedPath, stripWindowsLongPathPrefix } from "./src/config/paths.mjs";
+import { createPendingAttachmentStore } from "./src/attachments/pending.mjs";
+import { createLogger } from "./src/logging/logger.mjs";
+import {
+  FAST_SERVICE_TIER,
+  STANDARD_SERVICE_TIER,
+  createServiceTierPolicy,
+} from "./src/config/service-tier.mjs";
+import { createCodexProviderConfig } from "./src/providers/codex-config.mjs";
+import { createActiveRunStore } from "./src/runtime/active-runs.mjs";
+import { createRecalledMessageStore } from "./src/runtime/recalled-messages.mjs";
+import { createSeenEventsStore } from "./src/runtime/seen-events.mjs";
+import {
+  contextUsageFromTokenUsage,
+  maxContextUsage,
+  normalizeContextUsage,
+  normalizeGoal,
+  normalizeTimestamp,
+  normalizeTokenUsage,
+} from "./src/sessions/normalize.mjs";
+import {
+  classifyCodexFailure,
+  emptyCompletionError,
+  errorFromFailure,
+  errorText,
+  failureDetailText,
+  failureShortText,
+  isNoGoalExistsError,
+  normalizeFailure,
+  safeJson,
+} from "./src/logging/errors.mjs";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_TOOLS = resolveDefaultTools();
@@ -60,6 +108,7 @@ const CONFIG = {
 };
 
 const logPath = path.join(CONFIG.logDir, "codex-feishu-bridge.log");
+const log = createLogger(logPath);
 const seenPath = path.join(CONFIG.stateDir, "seen-events.json");
 const sessionsPath = path.join(CONFIG.stateDir, "sessions.json");
 const activeRunsPath = path.join(CONFIG.stateDir, "active-runs.json");
@@ -82,15 +131,48 @@ const desktopCodexGlobalStatePath = CONFIG.desktopCodexHome ? path.join(CONFIG.d
 const desktopCodexSidebarLockPath = CONFIG.desktopCodexHome ? path.join(CONFIG.desktopCodexHome, ".codex-feishu-sidebar-sync.lock") : "";
 const shouldMirrorDesktopCodexHome = Boolean(CONFIG.desktopCodexHome)
   && !sameResolvedPath(CONFIG.desktopCodexHome, CONFIG.codexHome);
-const codexReasoningLabel = CONFIG.codexReasoning || "config";
-const codexModelLabel = CONFIG.codexModel || resolveCodexConfigModel() || "默认模型";
-
 fs.mkdirSync(CONFIG.logDir, { recursive: true });
 fs.mkdirSync(CONFIG.stateDir, { recursive: true });
 fs.mkdirSync(eventLocksDir, { recursive: true });
 fs.mkdirSync(outputDir, { recursive: true });
 fs.mkdirSync(promptDir, { recursive: true });
 fs.mkdirSync(attachmentDir, { recursive: true });
+const seenEvents = createSeenEventsStore({
+  seenPath,
+  eventLocksDir,
+  instanceName: process.env.CODEX_FEISHU_INSTANCE_NAME || "",
+  log,
+});
+const { rememberEvent } = seenEvents;
+const activeRunStore = createActiveRunStore({
+  activeRunsPath,
+  bridgePid: process.pid,
+  workspace: CONFIG.workspace,
+});
+const {
+  activeRuns,
+  clearActiveRun,
+  recordActiveRun,
+  saveActiveRuns,
+  touchActiveRun,
+} = activeRunStore;
+const pendingAttachmentStore = createPendingAttachmentStore({
+  maxPendingAttachments: CONFIG.maxPendingAttachments,
+  pendingTtlMs: CONFIG.attachmentPendingTtlMs,
+});
+const {
+  add: addPendingAttachments,
+  cleanup: cleanupPendingAttachments,
+  dropForMessage: dropPendingAttachmentsForMessage,
+  take: takePendingAttachments,
+} = pendingAttachmentStore;
+const recalledMessageStore = createRecalledMessageStore({
+  ttlMs: CONFIG.recalledMessageTtlMs,
+});
+const {
+  has: isMessageRecalled,
+  remember: rememberRecalledMessage,
+} = recalledMessageStore;
 acquireSingleInstanceLock();
 try {
   fs.rmSync(stopPath, { force: true });
@@ -101,12 +183,9 @@ const shutdownCallbacks = new Set();
 const activeChildren = new Map();
 const activeCodexJobs = new Map();
 const activeGoalRuns = new Map();
-const pendingAttachmentsByChat = new Map();
 const pendingDeleteConfirmations = new Map();
 const stoppedJobs = new Set();
 const REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh"]);
-const FAST_SERVICE_TIER = "fast";
-const STANDARD_SERVICE_TIER = "standard";
 const MIN_SIDEBAR_RECONCILE_INTERVAL_MS = 5_000;
 const PROVIDER_MODEL_LIST_TIMEOUT_MS = 30_000;
 const PROVIDER_MODEL_TEST_TIMEOUT_MS = 60_000;
@@ -155,17 +234,41 @@ const PROVIDER_BUNDLES = [
     reasoning: "xhigh",
   },
 ];
-const PROVIDER_BUNDLE_BY_ID = new Map(PROVIDER_BUNDLES.map((item) => [item.id, item]));
+const codexProviderConfig = createCodexProviderConfig({
+  codexHome: CONFIG.codexHome,
+  providerBundles: PROVIDER_BUNDLES,
+});
+const {
+  findCodexProvider,
+  findProviderBundle,
+  listCodexProviders,
+  providerBundleLabel,
+  providerModelsUrl,
+  providerResponsesUrl,
+  resolveCodexConfigModel,
+  resolveCodexConfigValue,
+  writeTopLevelCodexConfigValue,
+} = codexProviderConfig;
+const codexReasoningLabel = CONFIG.codexReasoning || "config";
+const codexModelLabel = CONFIG.codexModel || resolveCodexConfigModel() || "默认模型";
+const {
+  displayServiceTier,
+  serviceTierFallbackFailure,
+  serviceTierForExecSettings,
+  serviceTierForProviderDetail,
+  serviceTierForThreadSettings,
+  serviceTierForTurnSettings,
+  serviceTierPlanForExecSettings,
+  serviceTierPlanForTurnSettings,
+  shouldRetryWithoutServiceTier,
+} = createServiceTierPolicy({ findProvider: findCodexProvider });
 let shuttingDown = false;
 let activeJobs = 0;
 let sidebarReconcileInFlight = false;
 let sidebarReconcileQueuedReason = "";
 const pendingEvents = [];
-const recalledMessages = new Map();
-const seen = loadSeen();
 const sessions = loadSessions();
-const activeRuns = loadActiveRuns();
-cleanupOldEventLocks();
+seenEvents.cleanupOldEventLocks();
 const stats = {
   startedAt: Date.now(),
   events: 0,
@@ -175,298 +278,6 @@ const stats = {
   recovered: 0,
   failuresByKind: {},
 };
-
-function sameResolvedPath(left, right) {
-  const normalize = (value) => stripWindowsLongPathPrefix(path.resolve(String(value || "")));
-  const a = normalize(left);
-  const b = normalize(right);
-  return process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b;
-}
-
-function resolveDefaultTools() {
-  if (process.platform !== "win32") {
-    return {
-      larkCli: { command: "lark-cli", argsPrefix: [] },
-      codexCli: { command: "codex", argsPrefix: [] },
-    };
-  }
-
-  const appData = process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming");
-  const npmRoot = path.join(appData, "npm", "node_modules");
-  const larkEntry = path.join(npmRoot, "@larksuite", "cli", "scripts", "run.js");
-  const codexEntry = path.join(npmRoot, "@openai", "codex", "bin", "codex.js");
-  return {
-    larkCli: fs.existsSync(larkEntry)
-      ? { command: process.execPath, argsPrefix: [larkEntry] }
-      : { command: "cmd.exe", argsPrefix: ["/d", "/s", "/c", "lark-cli.cmd"] },
-    codexCli: fs.existsSync(codexEntry)
-      ? { command: process.execPath, argsPrefix: [codexEntry] }
-      : { command: "cmd.exe", argsPrefix: ["/d", "/s", "/c", "codex.cmd"] },
-  };
-}
-
-function resolveDefaultDataRoot() {
-  if (process.platform === "win32") {
-    return path.join(
-      process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"),
-      "CodexFeishuBridge",
-    );
-  }
-
-  if (process.platform === "darwin") {
-    return path.join(os.homedir(), "Library", "Application Support", "CodexFeishuBridge");
-  }
-
-  return path.join(
-    process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state"),
-    "codex-feishu-bridge",
-  );
-}
-
-function parseToolEnv(envName, fallback) {
-  const value = process.env[envName];
-  if (!value) return fallback;
-  if (process.platform === "win32") {
-    const lower = value.toLowerCase();
-    if (lower.endsWith(".cmd") || lower.endsWith(".bat")) {
-      return { command: "cmd.exe", argsPrefix: ["/d", "/s", "/c", value] };
-    }
-    if (lower.endsWith(".ps1")) {
-      return {
-        command: "powershell.exe",
-        argsPrefix: ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", value],
-      };
-    }
-  }
-  return { command: value, argsPrefix: [] };
-}
-
-function parseEventKeys(value) {
-  const keys = String(value || "")
-    .split(/[,\s;]+/)
-    .map((item) => item.trim())
-    .filter(Boolean);
-  const unique = [...new Set(keys)];
-  return unique.length ? unique : ["im.message.receive_v1"];
-}
-
-function parseDurationMs(value, fallbackMs) {
-  const raw = String(value ?? "").trim().toLowerCase();
-  if (!raw) return fallbackMs;
-  if (["0", "none", "never", "infinite", "infinity", "off", "disabled", "false"].includes(raw)) return 0;
-  const match = raw.match(/^([0-9]+(?:\.[0-9]+)?)(ms|s|m|h)?$/);
-  if (!match) return fallbackMs;
-  const number = Number(match[1]);
-  if (!Number.isFinite(number) || number < 0) return fallbackMs;
-  const unit = match[2] || "ms";
-  const factor = unit === "h" ? 60 * 60_000 : unit === "m" ? 60_000 : unit === "s" ? 1000 : 1;
-  return Math.round(number * factor);
-}
-
-function hasDuration(ms) {
-  return Number.isFinite(ms) && ms > 0;
-}
-
-function durationConfigLabel(ms) {
-  return hasDuration(ms) ? `${Math.round(ms / 1000)}s` : "disabled";
-}
-
-function clearTimer(timer) {
-  if (timer) clearTimeout(timer);
-}
-
-function withLarkProfile(tool, profile) {
-  const name = String(profile || "").trim();
-  if (!name) return tool;
-  return { ...tool, argsPrefix: [...(tool.argsPrefix || []), "--profile", name] };
-}
-
-function resolveLarkEventLockScope(profile) {
-  const appId = resolveLarkConfigAppId(profile);
-  const raw = appId ? `app-${appId}` : `profile-${String(profile || "default").trim() || "default"}`;
-  return raw.replace(/[^a-zA-Z0-9_.-]/g, "-").slice(0, 96) || "default";
-}
-
-function resolveLarkConfigAppId(profile) {
-  const wanted = String(profile || "").trim();
-  try {
-    const configPath = path.join(os.homedir(), ".lark-cli", "config.json");
-    const parsed = JSON.parse(fs.readFileSync(configPath, "utf8"));
-    const apps = Array.isArray(parsed?.apps) ? parsed.apps : [];
-    const app = wanted
-      ? apps.find((item) => String(item?.name || "").trim() === wanted)
-      : (apps.find((item) => !String(item?.name || "").trim()) || apps[0]);
-    return String(app?.appId || app?.app_id || "").trim();
-  } catch {
-    return "";
-  }
-}
-
-function normalizeRunMode(value) {
-  const mode = String(value || "").trim().toLowerCase();
-  if (["exec", "cli"].includes(mode)) return "exec";
-  if (["app-server", "appserver", "native", "native-app"].includes(mode)) return "app-server";
-  if (["auto", "fallback"].includes(mode)) return "auto";
-  return "app-server";
-}
-
-function codexUserConfigPath() {
-  return path.join(CONFIG.codexHome, "config.toml");
-}
-
-function readCodexConfigText() {
-  try {
-    return fs.readFileSync(codexUserConfigPath(), "utf8");
-  } catch {
-    return "";
-  }
-}
-
-function resolveCodexConfigModel() {
-  return resolveCodexConfigValue("model");
-}
-
-function resolveCodexConfigValue(key) {
-  const text = readCodexConfigText();
-  if (!text) return "";
-  const escaped = escapeRegExp(key);
-  const match = text.match(new RegExp(`^\\s*${escaped}\\s*=\\s*([\"'])(.*?)\\1\\s*(?:#.*)?$`, "m"));
-  return match?.[2]?.trim() || "";
-}
-
-function escapeRegExp(value) {
-  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function compactProviderInfo(info) {
-  if (!info) return null;
-  const envKey = String(info.envKey || "").trim();
-  return {
-    id: String(info.id || "").trim(),
-    name: String(info.name || info.id || "").trim(),
-    baseUrl: String(info.baseUrl || "").trim(),
-    envKey,
-    requiresOpenaiAuth: Boolean(info.requiresOpenaiAuth),
-    serviceTierPassthrough: Boolean(info.serviceTierPassthrough),
-    envVisible: envKey ? Object.prototype.hasOwnProperty.call(process.env, envKey) : null,
-    builtIn: Boolean(info.builtIn),
-  };
-}
-
-function listCodexProviders() {
-  const providers = new Map();
-  const add = (info) => {
-    const item = compactProviderInfo(info);
-    if (item?.id) providers.set(item.id, item);
-  };
-  add({ id: "openai", name: "OpenAI", requiresOpenaiAuth: true, builtIn: true });
-  add({ id: "ollama", name: "Ollama", builtIn: true });
-  add({ id: "lmstudio", name: "LM Studio", builtIn: true });
-  add({ id: "amazon-bedrock", name: "Amazon Bedrock", builtIn: true });
-
-  const text = readCodexConfigText();
-  const tableRe = /^\s*\[model_providers\.([A-Za-z0-9_.-]+)\]\s*$/gm;
-  const matches = [...text.matchAll(tableRe)];
-  for (let i = 0; i < matches.length; i += 1) {
-    const id = matches[i][1];
-    const start = matches[i].index + matches[i][0].length;
-    const end = i + 1 < matches.length ? matches[i + 1].index : text.length;
-    const body = text.slice(start, end);
-    add({
-      id,
-      name: tomlStringValue(body, "name") || id,
-      baseUrl: tomlStringValue(body, "base_url"),
-      envKey: tomlStringValue(body, "env_key"),
-      requiresOpenaiAuth: tomlBooleanValue(body, "requires_openai_auth"),
-      serviceTierPassthrough:
-        tomlBooleanValue(body, "service_tier_passthrough")
-        || tomlBooleanValue(body, "supports_service_tier"),
-      builtIn: false,
-    });
-  }
-  return [...providers.values()].sort((a, b) => a.id.localeCompare(b.id));
-}
-
-function findCodexProvider(id) {
-  const target = String(id || "").trim();
-  if (!target) return null;
-  return listCodexProviders().find((item) => item.id === target) || null;
-}
-
-function findProviderBundle(id) {
-  const target = String(id || "").trim();
-  if (!target) return null;
-  return PROVIDER_BUNDLE_BY_ID.get(target) || null;
-}
-
-function providerBundleLabel(bundle) {
-  if (!bundle) return "";
-  const parts = [`provider ${bundle.provider}`, `model ${bundle.model}`];
-  if (bundle.reasoning) parts.push(`reasoning ${bundle.reasoning}`);
-  return parts.join("；");
-}
-
-function providerApiUrl(provider, route) {
-  const baseUrl = String(provider?.baseUrl || "").trim();
-  if (!baseUrl) return "";
-  try {
-    return new URL(route, baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`).toString();
-  } catch {
-    return "";
-  }
-}
-
-function providerModelsUrl(provider) {
-  return providerApiUrl(provider, "models");
-}
-
-function providerResponsesUrl(provider) {
-  return providerApiUrl(provider, "responses");
-}
-
-function tomlStringValue(text, key) {
-  const match = String(text || "").match(new RegExp(`^\\s*${escapeRegExp(key)}\\s*=\\s*([\"'])(.*?)\\1\\s*(?:#.*)?$`, "m"));
-  return match?.[2]?.trim() || "";
-}
-
-function tomlBooleanValue(text, key) {
-  const match = String(text || "").match(new RegExp(`^\\s*${escapeRegExp(key)}\\s*=\\s*(true|false)\\s*(?:#.*)?$`, "mi"));
-  return match ? match[1].toLowerCase() === "true" : false;
-}
-
-function tomlStringLiteral(value) {
-  return `"${String(value || "").replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
-}
-
-function writeTopLevelCodexConfigValue(keyPath, value) {
-  const key = String(keyPath || "").trim();
-  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
-    throw new Error(`只支持写入顶层 config.toml 字符串键：${keyPath}`);
-  }
-  const configPath = codexUserConfigPath();
-  fs.mkdirSync(path.dirname(configPath), { recursive: true });
-  const original = fs.existsSync(configPath) ? fs.readFileSync(configPath, "utf8") : "";
-  const lines = original.replace(/\r\n/g, "\n").split("\n");
-  const replacement = `${key} = ${tomlStringLiteral(value)}`;
-  let replaced = false;
-  let inTopLevel = true;
-  const nextLines = lines.map((line) => {
-    if (/^\s*\[/.test(line)) inTopLevel = false;
-    if (inTopLevel && new RegExp(`^\\s*${escapeRegExp(key)}\\s*=`).test(line)) {
-      replaced = true;
-      return replacement;
-    }
-    return line;
-  });
-  if (!replaced) {
-    let insertAt = nextLines.findIndex((line) => /^\s*\[/.test(line));
-    if (insertAt < 0) insertAt = nextLines.length;
-    while (insertAt > 0 && nextLines[insertAt - 1] === "") insertAt -= 1;
-    nextLines.splice(insertAt, 0, replacement);
-  }
-  fs.writeFileSync(configPath, `${nextLines.join("\n").replace(/\n+$/g, "")}\n`, "utf8");
-  return { path: configPath, keyPath: key, value };
-}
 
 function cleanOverride(value) {
   const text = String(value || "").trim();
@@ -489,126 +300,6 @@ function settingsSummary(session) {
     `reasoning ${settings.reasoning || "默认"}`,
     `speed ${displayServiceTier(settings.serviceTier) || "默认"}`,
   ].join(" · ");
-}
-
-function displayServiceTier(value) {
-  const tier = cleanOverride(value);
-  if (!tier) return "";
-  if (tier === FAST_SERVICE_TIER || tier === "priority") return "fast";
-  if (tier === STANDARD_SERVICE_TIER) return "standard";
-  return tier;
-}
-
-function serviceTierPlanForSettings(settings, options = {}) {
-  const serviceTier = cleanOverride(settings?.serviceTier);
-  const provider = findCodexProvider(settings?.provider || "");
-  const requestedServiceTier = serviceTier;
-  const requiresOpenaiAuth = Boolean(provider?.requiresOpenaiAuth);
-  const directPassthrough = Boolean(provider?.serviceTierPassthrough);
-  const phase = String(options.phase || "turn");
-  if (!serviceTier || options.disableServiceTier) {
-    return {
-      requestedServiceTier,
-      serviceTier: "",
-      phase,
-      policy: options.disableServiceTier ? "disabled" : "none",
-      autoFallback: false,
-      requiresOpenaiAuth,
-      directPassthrough,
-    };
-  }
-
-  if (requiresOpenaiAuth || directPassthrough) {
-    return {
-      requestedServiceTier,
-      serviceTier,
-      phase,
-      policy: requiresOpenaiAuth ? "openai-auth" : "direct-passthrough",
-      autoFallback: !requiresOpenaiAuth,
-      requiresOpenaiAuth,
-      directPassthrough,
-    };
-  }
-
-  if (phase === "thread") {
-    return {
-      requestedServiceTier,
-      serviceTier: "",
-      phase,
-      policy: "auto-third-party-thread-deferred",
-      autoFallback: false,
-      requiresOpenaiAuth,
-      directPassthrough,
-    };
-  }
-
-  return {
-    requestedServiceTier,
-    serviceTier,
-    phase,
-    policy: "auto-third-party",
-    autoFallback: true,
-    requiresOpenaiAuth,
-    directPassthrough,
-  };
-}
-
-function serviceTierForSettings(settings, options = {}) {
-  return serviceTierPlanForSettings(settings, options).serviceTier;
-}
-
-function shouldRetryWithoutServiceTier(failure, tierPlan, options = {}) {
-  if (options.disableServiceTier || options.serviceTierFallbackAttempt) return false;
-  if (!tierPlan?.serviceTier || !tierPlan.autoFallback) return false;
-  const item = normalizeFailure(failure) || classifyCodexFailure(failure);
-  if (["user_stop", "feishu_card", "missing_rollout", "empty_completion", "stream_disconnect"].includes(item.kind)) {
-    return false;
-  }
-  const lower = errorText(item.detail || item.message || failure, "").toLowerCase();
-  return item.kind !== "timeout"
-    || lower.includes("service_tier")
-    || lower.includes("service tier")
-    || lower.includes("service-tier")
-    || lower.includes("fast")
-    || lower.includes("priority");
-}
-
-function serviceTierFallbackFailure(failure, tierPlan) {
-  const item = normalizeFailure(failure) || classifyCodexFailure(failure);
-  return {
-    ...item,
-    kind: "service_tier_fallback",
-    label: "service_tier 自动降级",
-    recoverable: true,
-    message: `Provider 未确认支持 ${displayServiceTier(tierPlan?.serviceTier) || tierPlan?.serviceTier || "service_tier"}，Bridge 正在不带 service_tier 自动重试。`,
-    suggestion: "如果重试成功，本轮会直接返回结果；如果仍失败，会显示真实错误。",
-  };
-}
-
-function serviceTierForProviderDetail(provider) {
-  if (provider?.requiresOpenaiAuth) return "service_tier 官方鉴权";
-  if (provider?.serviceTierPassthrough) return "service_tier 直接透传";
-  return "service_tier 自动尝试";
-}
-
-function serviceTierForThreadSettings(settings, options = {}) {
-  return serviceTierForSettings(settings, { ...options, phase: "thread" });
-}
-
-function serviceTierForTurnSettings(settings, options = {}) {
-  return serviceTierForSettings(settings, { ...options, phase: "turn" });
-}
-
-function serviceTierForExecSettings(settings, options = {}) {
-  return serviceTierForSettings(settings, { ...options, phase: "exec" });
-}
-
-function serviceTierPlanForTurnSettings(settings, options = {}) {
-  return serviceTierPlanForSettings(settings, { ...options, phase: "turn" });
-}
-
-function serviceTierPlanForExecSettings(settings, options = {}) {
-  return serviceTierPlanForSettings(settings, { ...options, phase: "exec" });
 }
 
 function applySessionThreadOverrides(params, session, options = {}) {
@@ -652,350 +343,9 @@ function applyProviderBundleOverride(session, bundle) {
   saveSessions();
 }
 
-function nowIso() {
-  return new Date().toISOString();
-}
-
-function log(level, message, meta = undefined) {
-  const line = meta === undefined
-    ? `${nowIso()} ${level} ${message}`
-    : `${nowIso()} ${level} ${message} ${safeJson(meta)}`;
-  fs.appendFileSync(logPath, `${line}\n`, "utf8");
-  const stream = level === "ERROR" ? process.stderr : process.stdout;
-  stream.write(`${line}\n`);
-}
-
-function safeJson(value) {
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return String(value);
-  }
-}
-
-function errorText(value, fallback = "Codex 运行失败") {
-  if (value instanceof Error) return value.message || fallback;
-  if (typeof value === "string") return value || fallback;
-  if (!value || typeof value !== "object") return String(value || fallback);
-
-  const parts = [];
-  const message = value.message;
-  if (typeof message === "string") parts.push(message);
-  else if (message && typeof message === "object") parts.push(errorText(message, ""));
-
-  const error = value.error;
-  if (typeof error === "string") parts.push(error);
-  else if (error && typeof error === "object") parts.push(errorText(error, ""));
-
-  if (typeof value.additionalDetails === "string") parts.push(value.additionalDetails);
-  if (value.codexErrorInfo) parts.push(`codexErrorInfo: ${safeJson(value.codexErrorInfo)}`);
-  if (value.threadId) parts.push(`threadId: ${value.threadId}`);
-  if (value.turnId) parts.push(`turnId: ${value.turnId}`);
-  if (value.willRetry !== undefined) parts.push(`willRetry: ${value.willRetry}`);
-
-  const text = parts.filter(Boolean).join("\n");
-  return text || safeJson(value) || fallback;
-}
-
-function classifyCodexFailure(value, fallback = "Codex 运行失败") {
-  if (value?.codexFailure) return normalizeFailure(value.codexFailure);
-
-  const detail = errorText(value, fallback);
-  const lower = detail.toLowerCase();
-  const httpStatus = httpStatusFromText(detail);
-  const base = {
-    kind: "unknown",
-    label: "未知错误",
-    recoverable: false,
-    message: "Codex 运行失败，但 Bridge 无法明确判断原因。",
-    suggestion: "查看日志中的原始错误；如果是偶发问题，可以手动重试。",
-    detail,
-    at: Date.now(),
-  };
-
-  if (
-    lower.includes("cloud config bundle")
-    || lower.includes("failed to load configuration")
-    || lower.includes("timed out waiting for cloud config")
-  ) {
-    return {
-      ...base,
-      kind: "cloud_config",
-      label: "Codex cloud config timeout",
-      recoverable: false,
-      message: "Codex cloud config 加载超时，当前无法开始这一轮。",
-      suggestion: "这通常是临时服务或网络问题；Bridge 会保留原 thread 绑定，请稍后重试同一个会话。",
-    };
-  }
-
-  if (lower.includes("no rollout found for thread id")) {
-    return {
-      ...base,
-      kind: "missing_rollout",
-      label: "Codex 会话文件缺失",
-      recoverable: false,
-      message: "当前会话绑定的 Codex 原生 thread 已经找不到 rollout 文件，无法继续续接。",
-      suggestion: "发送 /list 查看该会话状态；如果它显示异常，请用 /delete <序号> 清理坏绑定后重新发送普通消息创建新会话。",
-    };
-  }
-
-  if (lower.includes("stopped by user") || lower.includes("已停止") || lower.includes("interrupted")) {
-    return { ...base, kind: "user_stop", label: "用户停止", message: "任务已被用户停止。", suggestion: "" };
-  }
-
-  if (
-    httpStatus === 401
-    || lower.includes("invalid_api_key")
-    || lower.includes("invalid api key")
-    || lower.includes("unauthorized")
-    || lower.includes("not logged in")
-    || lower.includes("authentication")
-  ) {
-    return {
-      ...base,
-      kind: "auth",
-      label: "Codex 鉴权失败",
-      message: "Codex 登录或 API Key 鉴权失败。",
-      suggestion: "这类失败不自动续跑；需要先修复 Codex 登录/API Key。",
-    };
-  }
-
-  if (
-    lower.includes("insufficient_quota")
-    || lower.includes("quota")
-    || lower.includes("billing")
-    || lower.includes("credit")
-    || lower.includes("usage limit")
-    || lower.includes("budget")
-  ) {
-    return {
-      ...base,
-      kind: "quota",
-      label: "Codex 额度不足",
-      message: "Codex 额度、账单或预算限制导致任务停止。",
-      suggestion: "这类失败不自动续跑；需要补充额度或调整账号限制后再继续。",
-    };
-  }
-
-  if (httpStatus === 429 || lower.includes("rate limit") || lower.includes("rate_limit") || lower.includes("too many requests")) {
-    return {
-      ...base,
-      kind: "rate_limit",
-      label: "Codex 限流",
-      message: "Codex 上游限流，当前不适合立即自动续跑。",
-      suggestion: "稍后手动重试，或降低并发。",
-    };
-  }
-
-  if (lower.includes("card update failed") || lower.includes("cardkit") || lower.includes("lark-cli failed")) {
-    return {
-      ...base,
-      kind: "feishu_card",
-      label: "飞书卡片更新失败",
-      message: "Codex 可能仍在运行，但飞书动态卡片刷新失败。",
-      suggestion: "这类问题应重试发卡或看日志，不应该重跑 Codex 任务。",
-    };
-  }
-
-  if (lower.includes("timed out")) {
-    return {
-      ...base,
-      kind: "timeout",
-      label: "Bridge 超时",
-      message: "Bridge 等待 Codex 任务超过配置时限。",
-      suggestion: "如果任务确实很长，可以调大超时；否则查看 Codex 是否卡住。",
-    };
-  }
-
-  if (
-    lower.includes("responsestreamdisconnected")
-    || lower.includes("responsesstreamdisconnected")
-    || lower.includes("stream disconnected before completion")
-    || lower.includes("transport error")
-    || lower.includes("network error")
-    || lower.includes("error decoding response body")
-  ) {
-    return {
-      ...base,
-      kind: "stream_disconnect",
-      label: "Codex 流式连接断开",
-      recoverable: true,
-      message: "Codex 原生输出流在完成前断开。",
-      suggestion: "Bridge 会等待原生重连；如果最终仍失败，仅对这类断流尝试一次断点续跑。",
-    };
-  }
-
-  if (lower.includes("ended before turn completed") || lower.includes("app-server exited")) {
-    return {
-      ...base,
-      kind: "app_server",
-      label: "Codex app-server 提前结束",
-      message: "Codex app-server 在 turn 完成前结束。",
-      suggestion: "查看 app-server stderr；如果前面出现过断流，可尝试手动继续。",
-    };
-  }
-
-  return base;
-}
-
-function isNoGoalExistsError(value) {
-  const lower = errorText(value, "").toLowerCase();
-  return lower.includes("no goal exists")
-    || lower.includes("goal does not exist")
-    || lower.includes("no current goal");
-}
-
-function httpStatusFromText(text) {
-  const value = String(text || "");
-  const match = value.match(/httpStatusCode["']?\s*[:=]\s*(\d{3})/i)
-    || value.match(/\b(\d{3})\s+(?:Unauthorized|Too Many Requests|Forbidden|Payment Required)\b/i);
-  return match ? Number(match[1]) : null;
-}
-
-function failureDetailText(failure) {
-  const item = normalizeFailure(failure) || classifyCodexFailure(failure);
-  const parts = [
-    `类型：${item.label}`,
-    item.message,
-    item.suggestion ? `建议：${item.suggestion}` : "",
-    "",
-    item.detail,
-  ].filter((line) => line !== "");
-  return parts.join("\n");
-}
-
-function failureShortText(failure) {
-  const item = normalizeFailure(failure) || classifyCodexFailure(failure);
-  if (item.kind === "missing_rollout") {
-    return [
-      `${item.label}：${item.message}`,
-      "",
-      "这通常表示 /list 里的当前会话已经变成异常绑定：Bridge 还记着 threadId，但 Codex 原生 DB 或 rollout 文件已经不完整。",
-      "处理方式：先发 /list 找到标记为异常的当前会话，再用 /delete <序号> 预览并 /confirm delete <序号> 清理；清理后重新发普通消息会创建新会话。",
-    ].join("\n");
-  }
-  return item.suggestion ? `${item.label}：${item.message} ${item.suggestion}` : `${item.label}：${item.message}`;
-}
-
-function errorFromFailure(failure) {
-  const item = normalizeFailure(failure) || classifyCodexFailure(failure);
-  const error = new Error(failureDetailText(item));
-  error.codexFailure = item;
-  return error;
-}
-
-function emptyCompletionFailure({ messageId = "", sessionId = "", threadId = "", turnId = "", durationMs = 0, tokens = "" } = {}) {
-  return {
-    kind: "empty_completion",
-    label: "Codex empty completion",
-    recoverable: true,
-    message: "Codex app-server completed the turn without any assistant output.",
-    suggestion: "Bridge will clear this app-server thread and fall back to codex exec.",
-    detail: [
-      messageId ? `messageId: ${messageId}` : "",
-      sessionId ? `sessionId: ${sessionId}` : "",
-      threadId ? `threadId: ${threadId}` : "",
-      turnId ? `turnId: ${turnId}` : "",
-      durationMs ? `durationMs: ${durationMs}` : "",
-      tokens ? `tokens: ${tokens}` : "",
-    ].filter(Boolean).join("\n"),
-    at: Date.now(),
-  };
-}
-
-function emptyCompletionError(context = {}) {
-  return errorFromFailure(emptyCompletionFailure(context));
-}
-
 function recordFailureStats(failure) {
   const item = normalizeFailure(failure) || classifyCodexFailure(failure);
   stats.failuresByKind[item.kind] = (stats.failuresByKind[item.kind] || 0) + 1;
-}
-
-function loadSeen() {
-  try {
-    const parsed = JSON.parse(fs.readFileSync(seenPath, "utf8"));
-    return new Set(Array.isArray(parsed) ? parsed : []);
-  } catch {
-    return new Set();
-  }
-}
-
-function saveSeen() {
-  const last = [...seen].slice(-1000);
-  fs.writeFileSync(seenPath, JSON.stringify(last, null, 2), "utf8");
-}
-
-function loadActiveRuns() {
-  try {
-    const parsed = JSON.parse(fs.readFileSync(activeRunsPath, "utf8"));
-    if (parsed && typeof parsed === "object" && parsed.runs && typeof parsed.runs === "object") return parsed;
-  } catch {}
-  return { runs: {} };
-}
-
-function saveActiveRuns() {
-  fs.writeFileSync(activeRunsPath, JSON.stringify(activeRuns, null, 2), "utf8");
-}
-
-function remember(id) {
-  if (!id) return false;
-  if (seen.has(id)) return true;
-  seen.add(id);
-  if (seen.size > 1200) {
-    const trimmed = [...seen].slice(-1000);
-    seen.clear();
-    for (const item of trimmed) seen.add(item);
-  }
-  saveSeen();
-  return false;
-}
-
-function eventLockPath(id) {
-  const hash = crypto.createHash("sha256").update(String(id || "")).digest("hex").slice(0, 32);
-  return path.join(eventLocksDir, `${hash}.json`);
-}
-
-function cleanupOldEventLocks() {
-  const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
-  try {
-    for (const entry of fs.readdirSync(eventLocksDir, { withFileTypes: true })) {
-      if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
-      const file = path.join(eventLocksDir, entry.name);
-      const stat = fs.statSync(file);
-      if (stat.mtimeMs < cutoff) fs.rmSync(file, { force: true });
-    }
-  } catch (error) {
-    log("WARN", "event lock cleanup failed", { error: String(error.message || error) });
-  }
-}
-
-function rememberEvent(id, messageId = "") {
-  if (!id) return false;
-  if (seen.has(id)) return true;
-
-  const file = eventLockPath(id);
-  try {
-    const fd = fs.openSync(file, "wx");
-    fs.writeFileSync(fd, JSON.stringify({
-      id,
-      messageId,
-      pid: process.pid,
-      instance: process.env.CODEX_FEISHU_INSTANCE_NAME || "",
-      createdAt: Date.now(),
-    }, null, 2), "utf8");
-    fs.closeSync(fd);
-  } catch (error) {
-    if (error?.code === "EEXIST") return true;
-    log("WARN", "event lock failed; falling back to local dedupe", {
-      id,
-      messageId,
-      error: String(error.message || error),
-    });
-  }
-
-  remember(id);
-  return false;
 }
 
 function eventTypeOf(event) {
@@ -1236,112 +586,6 @@ function normalizeSessionData(session) {
 
 function normalizeRenameTitle(value) {
   return shorten(String(value || "").replace(/\r\n/g, "\n").replace(/\n+/g, " "), 120);
-}
-
-function normalizeGoal(value) {
-  if (!value || typeof value !== "object") return null;
-  const objective = String(value.objective || "").trim();
-  if (!objective) return null;
-  const status = String(value.status || "active");
-  return {
-    threadId: String(value.threadId || ""),
-    objective,
-    status,
-    tokenBudget: Number.isFinite(Number(value.tokenBudget)) ? Number(value.tokenBudget) : null,
-    tokensUsed: Number(value.tokensUsed) || 0,
-    timeUsedSeconds: Number(value.timeUsedSeconds) || 0,
-    createdAt: normalizeTimestamp(value.createdAt),
-    updatedAt: normalizeTimestamp(value.updatedAt) || Date.now(),
-  };
-}
-
-function normalizeTimestamp(value) {
-  const number = Number(value);
-  if (!Number.isFinite(number) || number <= 0) return null;
-  return number < 10_000_000_000 ? number * 1000 : number;
-}
-
-function normalizeFailure(value) {
-  if (!value || typeof value !== "object") return null;
-  const kind = String(value.kind || "").trim();
-  if (!kind) return null;
-  return {
-    kind,
-    label: String(value.label || kind),
-    recoverable: Boolean(value.recoverable),
-    message: String(value.message || ""),
-    suggestion: String(value.suggestion || ""),
-    detail: String(value.detail || ""),
-    at: Number(value.at) || Date.now(),
-  };
-}
-
-function normalizeTokenUsage(value) {
-  if (!value || typeof value !== "object") return null;
-  const total = normalizeTokenUsageBreakdown(value.total);
-  const last = normalizeTokenUsageBreakdown(value.last);
-  const modelContextWindow = Number(value.modelContextWindow);
-  return {
-    total,
-    last,
-    modelContextWindow: Number.isFinite(modelContextWindow) && modelContextWindow > 0 ? modelContextWindow : null,
-  };
-}
-
-function normalizeTokenUsageBreakdown(value) {
-  const source = value && typeof value === "object" ? value : {};
-  return {
-    totalTokens: Number(source.totalTokens) || 0,
-    inputTokens: Number(source.inputTokens) || 0,
-    cachedInputTokens: Number(source.cachedInputTokens) || 0,
-    outputTokens: Number(source.outputTokens) || 0,
-    reasoningOutputTokens: Number(source.reasoningOutputTokens) || 0,
-  };
-}
-
-function normalizeContextUsage(value) {
-  if (!value || typeof value !== "object") return null;
-  const usedTokens = Number(value.usedTokens);
-  const contextWindow = Number(value.contextWindow);
-  const percent = Number(value.percent);
-  if (!Number.isFinite(usedTokens) && !Number.isFinite(contextWindow) && !Number.isFinite(percent)) return null;
-  return {
-    usedTokens: Number.isFinite(usedTokens) ? usedTokens : null,
-    contextWindow: Number.isFinite(contextWindow) && contextWindow > 0 ? contextWindow : null,
-    percent: Number.isFinite(percent) ? percent : null,
-    updatedAt: Number(value.updatedAt) || Date.now(),
-  };
-}
-
-function contextUsageFromTokenUsage(value) {
-  const usage = normalizeTokenUsage(value);
-  if (!usage) return null;
-  const last = usage.last || {};
-  const contextWindow = Number(usage.modelContextWindow) || 0;
-  const rawUsedTokens = Number(last.totalTokens) || Number(last.inputTokens) + Number(last.outputTokens) || 0;
-  const usedTokens = contextWindow > 0 ? Math.min(rawUsedTokens, contextWindow) : rawUsedTokens;
-  const percent = contextWindow > 0 ? Math.round((usedTokens / contextWindow) * 1000) / 10 : null;
-  return normalizeContextUsage({
-    usedTokens,
-    contextWindow: contextWindow || null,
-    percent,
-    updatedAt: Date.now(),
-  });
-}
-
-function maxContextUsage(current, candidate) {
-  const currentUsage = normalizeContextUsage(current);
-  const candidateUsage = normalizeContextUsage(candidate);
-  if (!candidateUsage) return currentUsage;
-  if (!currentUsage) return candidateUsage;
-
-  const currentScore = Number.isFinite(Number(currentUsage.percent))
-    ? Number(currentUsage.percent)
-    : Number(currentUsage.usedTokens) || 0;
-  const candidateScore = Number.isFinite(Number(candidateUsage.percent))
-    ? Number(candidateUsage.percent)
-    : Number(candidateUsage.usedTokens) || 0;
-  return candidateScore >= currentScore ? candidateUsage : currentUsage;
 }
 
 function updateSessionTokenUsage(session, tokenUsage) {
@@ -3287,42 +2531,6 @@ function cardMarkdownContent(content) {
   }).join("\n");
 }
 
-function activeRunKey(messageId) {
-  return String(messageId || "").trim();
-}
-
-function recordActiveRun(record) {
-  const key = activeRunKey(record?.messageId);
-  if (!key) return;
-  activeRuns.runs[key] = {
-    messageId: key,
-    chatId: String(record.chatId || ""),
-    sessionId: String(record.sessionId || ""),
-    cardId: String(record.cardId || ""),
-    cardMessageId: String(record.cardMessageId || ""),
-    startedAt: Number(record.startedAt || 0) || Date.now(),
-    updatedAt: Date.now(),
-    bridgePid: process.pid,
-    workspace: CONFIG.workspace,
-  };
-  saveActiveRuns();
-}
-
-function touchActiveRun(messageId) {
-  const key = activeRunKey(messageId);
-  if (!key || !activeRuns.runs[key]) return;
-  if (Date.now() - Number(activeRuns.runs[key].updatedAt || 0) < 10_000) return;
-  activeRuns.runs[key].updatedAt = Date.now();
-  saveActiveRuns();
-}
-
-function clearActiveRun(messageId) {
-  const key = activeRunKey(messageId);
-  if (!key || !activeRuns.runs[key]) return;
-  delete activeRuns.runs[key];
-  saveActiveRuns();
-}
-
 function staleCardUpdateSequence(record) {
   const recorded = Math.floor(Number(record?.sequence || 0));
   const epochSeconds = Math.floor(Date.now() / 1000);
@@ -4409,46 +3617,7 @@ function formatBytes(bytes) {
   return `${(value / 1024 / 1024).toFixed(1)} MB`;
 }
 
-function addPendingAttachments(chatId, attachments) {
-  if (!chatId || !attachments.length) return;
-  cleanupPendingAttachments(chatId);
-  const current = pendingAttachmentsByChat.get(chatId) || [];
-  const next = [...current, ...attachments].slice(-CONFIG.maxPendingAttachments);
-  pendingAttachmentsByChat.set(chatId, next);
-}
-
-function cleanupPendingAttachments(chatId) {
-  const current = pendingAttachmentsByChat.get(chatId);
-  if (!current?.length) return [];
-  const cutoff = Date.now() - CONFIG.attachmentPendingTtlMs;
-  const next = current.filter((item) => Number(item.receivedAt || 0) >= cutoff);
-  if (next.length) pendingAttachmentsByChat.set(chatId, next);
-  else pendingAttachmentsByChat.delete(chatId);
-  return next;
-}
-
-function takePendingAttachments(chatId) {
-  const current = cleanupPendingAttachments(chatId);
-  pendingAttachmentsByChat.delete(chatId);
-  return current;
-}
-
-function normalizeUserContent(content) {
-  return String(content || "")
-    .replace(/^@\S+\s*/u, "")
-    .trim();
-}
-
-function parseCommand(content) {
-  const text = userTextFromContent(content) || normalizeUserContent(content);
-  if (!text.startsWith("/")) return null;
-  const [nameRaw, ...rest] = text.split(/\s+/);
-  return {
-    name: nameRaw.toLowerCase(),
-    rest: rest.join(" ").trim(),
-    text,
-  };
-}
+const parseCommand = (content) => parseCommandInput(content, { extractText: userTextFromContent });
 
 function attachmentPromptBlock(attachments) {
   const items = Array.isArray(attachments) ? attachments : [];
@@ -5346,15 +4515,6 @@ async function deleteByThreadIdIfPossible(statements, tables, tableName, dbPath 
   } else if (columns.has("id")) {
     statements.push(`DELETE FROM ${tableName} WHERE id = ?1;`);
   }
-}
-
-function stripWindowsLongPathPrefix(value) {
-  let text = String(value || "");
-  if (process.platform === "win32") {
-    text = text.replace(/^\\\\\?\\UNC\\/i, "\\\\");
-    text = text.replace(/^\\\\\?\\/i, "");
-  }
-  return text;
 }
 
 function resolveSafeCodexRolloutPath(rolloutPath, threadId, codexHome = CONFIG.codexHome) {
@@ -7471,50 +6631,6 @@ function parseTokens(stdout) {
 
 function safeFilePart(value) {
   return String(value).replace(/[^a-zA-Z0-9_.-]/g, "_").slice(0, 80);
-}
-
-function cleanupRecalledMessages() {
-  if (!hasDuration(CONFIG.recalledMessageTtlMs)) return;
-  const cutoff = Date.now() - CONFIG.recalledMessageTtlMs;
-  for (const [messageId, record] of recalledMessages) {
-    if (Number(record?.at || 0) < cutoff) recalledMessages.delete(messageId);
-  }
-}
-
-function rememberRecalledMessage(messageId, record = {}) {
-  const id = String(messageId || "").trim();
-  if (!id) return false;
-  cleanupRecalledMessages();
-  recalledMessages.set(id, {
-    messageId: id,
-    chatId: String(record.chatId || ""),
-    eventId: String(record.eventId || ""),
-    at: Number(record.at || 0) || Date.now(),
-    reason: String(record.reason || "recall"),
-  });
-  return true;
-}
-
-function isMessageRecalled(messageId) {
-  cleanupRecalledMessages();
-  return recalledMessages.has(String(messageId || "").trim());
-}
-
-function dropPendingAttachmentsForMessage(messageId, chatId = "") {
-  const target = String(messageId || "").trim();
-  if (!target) return 0;
-  let removed = 0;
-  for (const [key, items] of pendingAttachmentsByChat) {
-    if (chatId && key !== chatId) continue;
-    const next = (items || []).filter((item) => {
-      const keep = String(item?.messageId || "") !== target;
-      if (!keep) removed += 1;
-      return keep;
-    });
-    if (next.length) pendingAttachmentsByChat.set(key, next);
-    else pendingAttachmentsByChat.delete(key);
-  }
-  return removed;
 }
 
 function removePendingEventsByMessageId(messageId) {
