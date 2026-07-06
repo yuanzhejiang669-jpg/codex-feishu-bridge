@@ -151,10 +151,65 @@
 
 - 未重启任何 Bot。
 
-## 当前待执行
+## 2026-07-07 阶段 7：提交、推送和设备同步
 
-- 最终本机验证
-- 提交并推送 GitHub
-- 同步旧设备
-- 重启新旧设备 active run 为 0 的空闲 Bot
-- 跳过仍有 active run 的 Bot，并记录跳过名单
+改动：
+
+- 提交架构重构：`ac47603e3bf0208890c1962723c4f2b6a7156b70`
+- 推送 GitHub `origin/main`
+- 旧设备仓库从 `0e57d3206cc75997058c918ec37a7afe26f5716b` 同步到 `ac47603e3bf0208890c1962723c4f2b6a7156b70`
+
+验证：
+
+- 本机 `npm run check` 通过
+- 旧设备 `npm run check` 通过
+- GitHub `origin/main` 与本机 `HEAD` 一致
+- 旧设备 `HEAD` 与 GitHub `origin/main` 一致
+
+进程情况：
+
+- 文档和代码推送后需要重启 Bridge 进程加载 `src` 新模块。
+
+## 2026-07-07 阶段 8：新旧设备空闲 Bot 重启
+
+新设备：
+
+- `codex-assistant-1`：active run = 1，按规则跳过，没有重启
+- 已重启并在线：`codex-assistant-11-writing`
+- 已重启并在线：`codex-assistant-1-writing`
+- 已重启并在线：`codex-assistant-2`
+- 已重启并在线：`codex-assistant-2-writing`
+- 已重启并在线：`codex-assistant-3`
+- 已重启并在线：`codex-assistant-3-writing`
+- 已重启并在线：`codex-assistant-4`
+- 已重启并在线：`codex-assistant-5`
+- 已重启并在线：`codex-assistant-6`
+- 已重启并在线：`codex-assistant-7`
+- 已重启并在线：`codex-assistant-8`
+- 已重启并在线：`codex-assistant-9`
+
+旧设备：
+
+- 17 个 Bot 均 active run = 0，全部重启并在线
+- 已重启并在线：`codex-assistant-mobile`
+- 已重启并在线：`codex-assistant-old`
+- 已重启并在线：`codex-assistant-old1`
+- 已重启并在线：`codex-assistant-old2`
+- 已重启并在线：`codex-assistant-old3`
+- 已重启并在线：`codex-assistant-old4`
+- 已重启并在线：`codex-assistant-old5`
+- 已重启并在线：`codex-assistant-old6`
+- 已重启并在线：`codex-assistant-old7`
+- 已重启并在线：`codex-assistant-old8`
+- 已重启并在线：`codex-assistant-old9`
+- 已重启并在线：`codex-assistant-old-baike`
+- 已重启并在线：`codex-assistant-old-baike-1`
+- 已重启并在线：`codex-assistant-old-baike-2`
+- 已重启并在线：`codex-assistant-old-baike-3`
+- 已重启并在线：`codex-assistant-old-baike-4`
+- 已重启并在线：`codex-assistant-old-baike-5`
+
+备注：
+
+- 新设备 `codex-assistant-2-writing` 和 `codex-assistant-8` 第一次重启时 lark-cli 拉取飞书 tenant token 超时，第二次触发计划任务后均恢复在线。
+- 本阶段未重启控制面板，因为本次未修改控制面板代码。
