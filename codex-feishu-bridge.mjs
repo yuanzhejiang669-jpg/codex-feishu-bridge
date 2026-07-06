@@ -1471,17 +1471,117 @@ async function loadVisibleCodexThreadIds() {
   return new Set(rows.map((row) => String(row.id || "").trim()).filter(Boolean));
 }
 
+function codexThreadResumeInfoFromRecord(threadId, record) {
+  const id = String(threadId || record?.id || "").trim();
+  const hasDb = Boolean(record);
+  const archived = hasDb && Number(record.archived || 0) !== 0;
+  const rolloutPath = hasDb ? stripWindowsLongPathPrefix(record.rollout_path || "") : "";
+  const hasRollout = Boolean(rolloutPath && fs.existsSync(rolloutPath));
+  let reason = "";
+  if (!id) reason = "missing-thread-id";
+  else if (!hasDb) reason = "missing-db";
+  else if (archived) reason = "archived";
+  else if (!rolloutPath) reason = "missing-rollout-path";
+  else if (!hasRollout) reason = "missing-rollout-file";
+
+  return {
+    threadId: id,
+    record: record || null,
+    hasDb,
+    archived,
+    rolloutPath,
+    hasRollout,
+    resumeable: Boolean(id && hasDb && !archived && hasRollout),
+    reason,
+  };
+}
+
+async function loadCodexThreadResumeInfo(threadId) {
+  const id = String(threadId || "").trim();
+  if (!id) return codexThreadResumeInfoFromRecord("", null);
+  const record = fs.existsSync(codexStateDbPath) ? await loadCodexThreadRecord(id) : null;
+  return codexThreadResumeInfoFromRecord(id, record);
+}
+
+async function loadCodexThreadResumeInfoMap(threadIds) {
+  const ids = [...new Set((threadIds || []).map((value) => String(value || "").trim()).filter(Boolean))];
+  const map = new Map();
+  for (const id of ids) {
+    map.set(id, await loadCodexThreadResumeInfo(id));
+  }
+  return map;
+}
+
+function missingRolloutFailureForThread(threadId, reason = "") {
+  const suffix = reason ? ` (${reason})` : "";
+  return classifyCodexFailure(new Error(`no rollout found for thread id ${threadId}${suffix}`));
+}
+
+function markSessionResumeFailure(session, info) {
+  if (!session) return;
+  const threadId = String(session.codexThreadId || info?.threadId || "").trim();
+  if (!threadId) return;
+  session.lastFailure = normalizeFailure(missingRolloutFailureForThread(threadId, info?.reason || ""));
+  session.lastThreadStatus = "missing_rollout";
+}
+
+function sessionHasRunnableCodexBinding(session, resumeInfoByThread = null) {
+  const threadId = String(session?.codexThreadId || "").trim();
+  if (!threadId) return true;
+  if (!resumeInfoByThread) return true;
+  return Boolean(resumeInfoByThread.get(threadId)?.resumeable);
+}
+
 function shouldKeepEmptyCurrentSession(session, chatState) {
   if (!session || session.id !== chatState.currentSessionId) return false;
   if (String(session.codexThreadId || "").trim()) return false;
-  if (Array.isArray(session.messages) && session.messages.length > 0) return false;
+  if (Array.isArray(session.messages) && session.messages.length > 0) return true;
   const createdAt = Number(session.createdAt || session.updatedAt || 0);
   const ageMs = Date.now() - createdAt;
   return Number.isFinite(ageMs) && ageMs >= 0 && ageMs <= CONFIG.keepEmptySessionMs;
 }
 
+function ensureRunnableCurrentSession(chatId, chatState, resumeInfoByThread, reason = "sync") {
+  if (!chatState || !Array.isArray(chatState.sessions)) return { changed: false, session: null };
+
+  const current = chatState.sessions.find((session) => session.id === chatState.currentSessionId) || null;
+  if (current && sessionHasRunnableCodexBinding(current, resumeInfoByThread)) {
+    return { changed: false, session: current };
+  }
+
+  if (current) {
+    markSessionResumeFailure(current, resumeInfoByThread?.get(String(current.codexThreadId || "").trim()));
+  }
+
+  let fallback = current
+    ? null
+    : chatState.sessions.find((session) => sessionHasRunnableCodexBinding(session, resumeInfoByThread));
+  let createdNew = false;
+  if (!fallback) {
+    fallback = createSessionData(current?.title || "新会话");
+    chatState.sessions.unshift(fallback);
+    createdNew = true;
+  }
+
+  const previousSessionId = chatState.currentSessionId || "";
+  const previousThreadId = String(current?.codexThreadId || "").trim();
+  chatState.currentSessionId = fallback.id;
+  chatState.sessions = dedupeSessions(chatState.sessions).slice(0, sessionListLimit());
+  log("WARN", "current session is not resumable; switched current session", {
+    chatId,
+    reason,
+    previousSessionId,
+    previousThreadId,
+    nextSessionId: fallback.id,
+    nextThreadId: fallback.codexThreadId || "",
+    createdNew,
+  });
+  return { changed: true, session: fallback, previous: current, createdNew };
+}
+
 async function syncChatSessionsWithCodex(chatId, options = {}) {
   const keepEmptyCurrent = options.keepEmptyCurrent !== false;
+  const ensureRunnableCurrent = options.ensureRunnableCurrent !== false;
   if (!CONFIG.syncSessionsFromCodex) return sessions.chats[chatId]?.sessions || [];
   const chatState = sessions.chats[chatId];
   if (!chatState || !Array.isArray(chatState.sessions)) return [];
@@ -1489,6 +1589,9 @@ async function syncChatSessionsWithCodex(chatId, options = {}) {
   const before = chatState.sessions.length;
   const beforeCurrent = chatState.currentSessionId || "";
   const normalized = dedupeSessions(chatState.sessions.map(normalizeSessionData)).slice(0, sessionListLimit());
+  const resumeInfoByThread = await loadCodexThreadResumeInfoMap(
+    normalized.map((session) => session.codexThreadId),
+  );
   chatState.sessions = normalized.filter((session) => {
     const threadId = String(session.codexThreadId || "").trim();
     if (threadId) return true;
@@ -1499,9 +1602,14 @@ async function syncChatSessionsWithCodex(chatId, options = {}) {
     chatState.currentSessionId = chatState.sessions[0]?.id || "";
   }
 
+  const runnableCurrent = ensureRunnableCurrent
+    ? ensureRunnableCurrentSession(chatId, chatState, resumeInfoByThread, options.reason || "sync")
+    : { changed: false };
+
   const changed = before !== chatState.sessions.length
     || beforeCurrent !== (chatState.currentSessionId || "")
-    || normalized.length !== before;
+    || normalized.length !== before
+    || runnableCurrent.changed;
   if (changed) {
     saveSessions();
     log("INFO", "synced feishu sessions from codex state", {
@@ -1558,7 +1666,9 @@ function normalizeThreadSource(value) {
 }
 
 function threadSourcesText(entry) {
+  const threadId = String(entry?.codexThreadId || "").trim();
   const flags = threadSourceFlags(entry);
+  if (!threadId && flags.hasBridge) return "Bridge 本地空会话";
   if (flags.hasPrimaryDb && flags.hasPrimaryRollout) {
     const parts = [shouldMirrorDesktopCodexHome ? "源空间完整" : "全局 Codex Home 完整"];
     if (flags.hasBridge) parts.push("Bridge绑定");
@@ -1667,11 +1777,20 @@ function threadListGroupTitle(group) {
   }
 }
 
+function threadEntryIsRunnable(entry) {
+  const threadId = String(entry?.codexThreadId || "").trim();
+  if (!threadId) return true;
+  const flags = threadSourceFlags(entry);
+  return Boolean(flags.hasPrimaryDb && flags.hasPrimaryRollout);
+}
+
 function threadListStatusText(entry) {
   const group = threadListGroup(entry);
   const flags = threadSourceFlags(entry);
+  const threadId = String(entry?.codexThreadId || "").trim();
 
   if (group === "current") {
+    if (!threadId) return "当前：尚未创建 Codex thread，下一条普通消息会创建";
     if (flags.hasBridge && (!flags.hasPrimaryDb || !flags.hasPrimaryRollout)) return "当前异常：Codex 原生记录或 rollout 缺失";
     if (shouldMirrorDesktopCodexHome && flags.hasPrimaryDb && flags.hasPrimaryRollout && !(flags.hasDesktopDb && flags.hasDesktopRollout)) return "当前：桌面镜像告警";
     return "当前";
@@ -6838,7 +6957,25 @@ async function testCurrentProviderModel(session, modelId) {
 }
 
 async function startOrResumeAppServerThread(client, session, options = {}) {
-  const params = appServerStartParams(session, options);
+  if (session.codexThreadId) {
+    const previousThreadId = session.codexThreadId;
+    const resumeInfo = await loadCodexThreadResumeInfo(previousThreadId);
+    if (!resumeInfo.resumeable) {
+      markSessionResumeFailure(session, resumeInfo);
+      session.codexThreadId = "";
+      session.updatedAt = Date.now();
+      saveSessions();
+      log("WARN", "app-server thread binding is not resumable; starting new thread", {
+        sessionId: session.id,
+        threadId: previousThreadId,
+        reason: resumeInfo.reason,
+        hasDb: resumeInfo.hasDb,
+        hasRollout: resumeInfo.hasRollout,
+        rolloutPath: resumeInfo.rolloutPath || "",
+      });
+    }
+  }
+
   if (session.codexThreadId) {
     const previousThreadId = session.codexThreadId;
     try {
@@ -6866,6 +7003,7 @@ async function startOrResumeAppServerThread(client, session, options = {}) {
     }
   }
 
+  const params = appServerStartParams(session, options);
   const started = await client.request("thread/start", params, 60_000);
   session.codexThreadId = started.thread.id;
   session.updatedAt = Date.now();
@@ -7800,7 +7938,7 @@ async function handleCommand(event, command) {
       return;
     case "/sessions":
     case "/list": {
-      const markdown = await sessionsMarkdown(chatId);
+      const markdown = await sessionsMarkdown(chatId, command.rest);
       log("INFO", "sessions command rendered", { messageId, chatId, chars: markdown.length });
       await sendMarkdown(chatId, markdown, "sessions", messageId);
       log("INFO", "sessions command sent", { messageId, chatId });
@@ -7841,11 +7979,30 @@ async function handleSwitchCommand(chatId, target, messageId) {
     return;
   }
   await syncChatSessionsWithCodex(chatId);
-  const session = await switchSession(chatId, target);
-  if (!session) {
+  const match = await findSessionEntry(chatId, target);
+  if (!match) {
     await sendText(chatId, "没有找到这个会话。发送 /sessions 查看可切换的会话。", "switch-miss", messageId);
     return;
   }
+  if (!threadEntryIsRunnable(match.entry)) {
+    await sendMarkdown(
+      chatId,
+      [
+        "**会话不能续接**",
+        "",
+        `序号：${match.index}`,
+        `会话：${match.entry.title || "未命名会话"} (${match.entry.id})`,
+        `Thread：${codexThreadLink(match.entry.codexThreadId)}`,
+        `状态：${threadListStatusText(match.entry)}`,
+        "",
+        "这个条目是异常绑定或残留记录，不能切成当前可运行会话。需要继续对话请用 `/new`；需要清理请用 `/delete <序号或ID>` 后按预览确认。",
+      ].join("\n"),
+      "switch-not-runnable",
+      messageId,
+    );
+    return;
+  }
+  const session = materializeSessionForChat(chatId, match.entry);
   await sendText(chatId, `已切换到：${session.title || "未命名会话"} (${session.id})`, "switch", messageId);
 }
 
@@ -9359,21 +9516,51 @@ function listMarkdown(chatId) {
   ].join("\n");
 }
 
-async function sessionsMarkdown(chatId) {
-  const list = await listChatSessionsSynced(chatId);
+function parseSessionsListMode(rest = "") {
+  const mode = String(rest || "").trim().split(/\s+/)[0]?.toLowerCase() || "";
+  if (["all", "full"].includes(mode)) return "all";
+  if (["residue", "residues", "trash"].includes(mode)) return "residue";
+  return "default";
+}
+
+function visibleSessionItemsForListMode(list, mode) {
+  return list
+    .map((session, index) => ({ session, index: index + 1 }))
+    .filter(({ session }) => {
+      if (mode === "all") return true;
+      if (mode === "residue") return threadListGroup(session) === "residue";
+      return threadListGroup(session) !== "residue";
+    });
+}
+
+async function sessionsMarkdown(chatId, rest = "") {
+  const fullList = await listChatSessionsSynced(chatId);
+  const mode = parseSessionsListMode(rest);
+  const visibleItems = visibleSessionItemsForListMode(fullList, mode);
+  const hiddenResidue = mode === "default" ? fullList.length - visibleItems.length : 0;
   const currentId = sessions.chats[chatId]?.currentSessionId || "";
-  if (!list.length) {
+  if (!fullList.length) {
     return [
       "**Codex 会话列表**",
       "",
       "当前没有与 Codex 侧边栏同步的可见会话。",
       "直接发送普通消息，或使用 `/new [标题]` 创建新的飞书 Codex 会话。",
     ].join("\n");
-    return "还没有记录过 Codex 会话。直接发送普通消息会自动创建。";
   }
-  const lines = [`**Codex 会话列表（共 ${list.length} 个）**`, ""];
+  if (!visibleItems.length) {
+    return [
+      "**Codex 会话列表**",
+      "",
+      mode === "residue" ? "当前没有残留记录。" : "当前没有可显示的会话。",
+      hiddenResidue ? `已隐藏 ${hiddenResidue} 条残留记录；发送 \`/list all\` 查看全部，或 \`/list residue\` 只看残留。` : "",
+    ].filter(Boolean).join("\n");
+  }
+  const countText = hiddenResidue ? `共 ${visibleItems.length} 个，隐藏残留 ${hiddenResidue} 个` : `共 ${visibleItems.length} 个`;
+  const lines = [`**Codex 会话列表（${countText}）**`, ""];
+  if (mode === "all") lines.push("模式：全部记录（包含侧边栏/镜像残留）。", "");
+  if (mode === "residue") lines.push("模式：只看残留记录。", "");
   let previousGroup = "";
-  list.forEach((session, index) => {
+  visibleItems.forEach(({ session, index }) => {
     const marker = session._isCurrent || session.id === currentId ? " ← 当前" : "";
     const thread = codexThreadLink(session.codexThreadId);
     const group = threadListGroup(session);
@@ -9383,10 +9570,14 @@ async function sessionsMarkdown(chatId) {
       previousGroup = group;
     }
     lines.push(
-      `${index + 1}. ${session.title || "未命名会话"} (${session.id}) · ${thread} · ${threadListStatusText(session)} · 来源：${threadSourcesText(session)} · ${threadDeleteStateText(session)}${threadLocationText(session)} · ${threadListTimeLabelName(session)}：${threadListTimeLabel(session)} · ${session.messages.length} 条${marker}`,
+      `${index}. ${session.title || "未命名会话"} (${session.id}) · ${thread} · ${threadListStatusText(session)} · 来源：${threadSourcesText(session)} · ${threadDeleteStateText(session)}${threadLocationText(session)} · ${threadListTimeLabelName(session)}：${threadListTimeLabel(session)} · ${session.messages.length} 条${marker}`,
     );
   });
   lines.push("");
+  if (hiddenResidue) {
+    lines.push(`已隐藏 ${hiddenResidue} 条侧边栏/镜像残留；发送 \`/list all\` 查看全部，或 \`/list residue\` 只看残留。`);
+    lines.push("");
+  }
   lines.push("使用 `/switch <序号或ID>` 切换会话；使用 `/rename 新标题` 或 `/rename <序号> 新标题` 改名；使用 `/delete <序号或ID>`、`/delete 1 2 3`、`/delete 1-18`、`/delete 3-7 8-12` 删除会话；删除需按预览里的 `/confirm delete <序号或区间>` 确认；使用 `/new [标题]` 创建新会话。");
   return lines.join("\n");
 }

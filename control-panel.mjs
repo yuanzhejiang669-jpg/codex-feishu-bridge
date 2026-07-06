@@ -2278,52 +2278,69 @@ function providerRuntimeKey(provider, apiKey = "") {
   return apiKey || environmentVariableValue(provider.envKey) || "";
 }
 
-function setUserEnvironmentVariable(name, value, options = {}) {
+async function setUserEnvironmentVariable(name, value, options = {}) {
   const clearExisting = Boolean(options.clearExisting);
-  return new Promise((resolve, reject) => {
-    const script = [
-      "$ErrorActionPreference = 'Stop'",
-      "$name = $env:CODEX_FEISHU_ENV_NAME",
-      "$value = $env:CODEX_FEISHU_ENV_VALUE",
-      "$clearExisting = $env:CODEX_FEISHU_ENV_CLEAR_EXISTING -eq '1'",
-      "if ([string]::IsNullOrWhiteSpace($name)) { throw 'Environment variable name is empty.' }",
-      "if ($clearExisting) {",
-      "  Remove-Item -Path ('Env:' + $name) -ErrorAction SilentlyContinue",
-      "  [Environment]::SetEnvironmentVariable($name, $null, 'User')",
-      "}",
-      "[Environment]::SetEnvironmentVariable($name, $value, 'User')",
-    ].join("\n");
-    execFile(
-      "powershell.exe",
-      [
-        "-NoProfile",
-        "-NonInteractive",
-        "-Command",
-        script,
-      ],
-      {
-        encoding: "utf8",
-        windowsHide: true,
-        timeout: 15_000,
-        maxBuffer: 256 * 1024,
-        env: {
-          ...process.env,
-          CODEX_FEISHU_ENV_NAME: name,
-          CODEX_FEISHU_ENV_VALUE: value,
-          CODEX_FEISHU_ENV_CLEAR_EXISTING: clearExisting ? "1" : "0",
+  const tempName = `codex-feishu-env-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const scriptPath = path.join(os.tmpdir(), `${tempName}.ps1`);
+  const valuePath = path.join(os.tmpdir(), `${tempName}.txt`);
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    "$name = $env:CODEX_FEISHU_ENV_NAME",
+    "$valuePath = $env:CODEX_FEISHU_ENV_VALUE_FILE",
+    "$clearExisting = $env:CODEX_FEISHU_ENV_CLEAR_EXISTING -eq '1'",
+    "if ([string]::IsNullOrWhiteSpace($name)) { throw 'Environment variable name is empty.' }",
+    "if ([string]::IsNullOrWhiteSpace($valuePath)) { throw 'Environment variable value file is empty.' }",
+    "if (-not (Test-Path -LiteralPath $valuePath)) { throw 'Environment variable value file is missing.' }",
+    "$value = [System.Text.Encoding]::UTF8.GetString([System.IO.File]::ReadAllBytes($valuePath))",
+    "if ($clearExisting) {",
+    "  Remove-Item -Path ('Env:' + $name) -ErrorAction SilentlyContinue",
+    "  [Environment]::SetEnvironmentVariable($name, $null, 'User')",
+    "}",
+    "[Environment]::SetEnvironmentVariable($name, $value, 'User')",
+  ].join("\n");
+
+  try {
+    await writeFile(valuePath, value, "utf8");
+    await writeFile(scriptPath, script, "utf8");
+    await new Promise((resolve, reject) => {
+      execFile(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-NonInteractive",
+          "-File",
+          scriptPath,
+        ],
+        {
+          encoding: "utf8",
+          windowsHide: true,
+          timeout: 15_000,
+          maxBuffer: 256 * 1024,
+          env: {
+            ...process.env,
+            CODEX_FEISHU_ENV_NAME: name,
+            CODEX_FEISHU_ENV_VALUE_FILE: valuePath,
+            CODEX_FEISHU_ENV_CLEAR_EXISTING: clearExisting ? "1" : "0",
+          },
         },
-      },
-      (error, stdout, stderr) => {
-        if (error) {
-          reject(new Error(redactSensitiveText(stderr || stdout || error.message, [value])));
-          return;
-        }
-        if (clearExisting) delete process.env[name];
-        process.env[name] = value;
-        resolve();
-      },
-    );
-  });
+        (error, stdout, stderr) => {
+          if (error) {
+            const detail = [stderr, stdout, error.message].filter(Boolean).join("\n").trim();
+            reject(new Error(redactSensitiveText(`PowerShell user environment update failed: ${detail}`, [value])));
+            return;
+          }
+          resolve();
+        },
+      );
+    });
+    if (clearExisting) delete process.env[name];
+    process.env[name] = value;
+  } finally {
+    await Promise.all([
+      unlink(valuePath).catch(() => {}),
+      unlink(scriptPath).catch(() => {}),
+    ]);
+  }
 }
 
 function redactTomlString(value) {
