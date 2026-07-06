@@ -7,6 +7,8 @@ $logDir = Join-Path $panelRoot "logs"
 $pidFile = Join-Path $stateDir "control-panel.pid"
 $stopLog = Join-Path $logDir "control-panel-stop.log"
 $panelScript = Join-Path $PSScriptRoot "control-panel.mjs"
+$panelScriptName = Split-Path -Leaf $panelScript
+$pidFileProcessId = $null
 
 New-Item -ItemType Directory -Force -Path $stateDir, $logDir | Out-Null
 
@@ -19,15 +21,29 @@ function Test-IsControlPanelProcess {
   param([int]$ProcessIdValue)
   $processInfo = Get-CimInstance Win32_Process -Filter "ProcessId=$ProcessIdValue" -ErrorAction SilentlyContinue
   if (-not $processInfo) { return $false }
-  return ([string]$processInfo.CommandLine) -like "*$panelScript*"
+  $commandLine = [string]$processInfo.CommandLine
+  if ($commandLine -notlike "*$panelScriptName*") { return $false }
+  if ($commandLine -like "*$panelScript*") { return $true }
+  if ($pidFileProcessId -and $ProcessIdValue -eq $pidFileProcessId) { return $true }
+
+  $portOwners = @(Get-NetTCPConnection -LocalAddress "127.0.0.1" -LocalPort 8320 -State Listen -ErrorAction SilentlyContinue |
+    Select-Object -ExpandProperty OwningProcess -Unique)
+  return $portOwners -contains $ProcessIdValue
 }
 
 $targets = @()
 if (Test-Path -LiteralPath $pidFile) {
   $processIdText = (Get-Content -LiteralPath $pidFile -Raw -ErrorAction SilentlyContinue).Trim()
   if ($processIdText -match '^\d+$') {
-    $targets += [int]$processIdText
+    $pidFileProcessId = [int]$processIdText
+    $targets += $pidFileProcessId
   }
+}
+
+$portProcessIds = @(Get-NetTCPConnection -LocalAddress "127.0.0.1" -LocalPort 8320 -State Listen -ErrorAction SilentlyContinue |
+  Select-Object -ExpandProperty OwningProcess -Unique)
+foreach ($processIdValue in $portProcessIds) {
+  $targets += [int]$processIdValue
 }
 
 $processInfos = Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue

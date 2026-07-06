@@ -6504,7 +6504,23 @@ async function maybeRouteMessageToGoal(chatId, event, session, userContent, mess
     return true;
   }
 
-  const goal = await getAppServerGoal(session);
+  const cachedGoal = normalizeGoal(session.lastGoal);
+  if (!goalStatusIsActive(cachedGoal?.status)) return false;
+
+  let goal = null;
+  try {
+    goal = await getAppServerGoal(session);
+  } catch (error) {
+    const failure = classifyCodexFailure(error);
+    log("WARN", "goal state preflight failed; continuing as normal message", {
+      chatId,
+      messageId,
+      sessionId: session.id,
+      kind: failure.kind,
+      detail: failure.detail.slice(0, 1000),
+    });
+    return false;
+  }
   if (goal?.status !== "active") return false;
   const job = activeCodexJobs.get(chatId);
   if (job && job.mode !== "app-server-goal") return false;
