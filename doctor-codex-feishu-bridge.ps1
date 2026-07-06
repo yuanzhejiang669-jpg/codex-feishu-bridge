@@ -5,12 +5,54 @@
 $ErrorActionPreference = "Stop"
 
 $scriptRoot = $PSScriptRoot
-$instancesConfigPath = Join-Path $scriptRoot "bridge.instances.json"
+$bundledInstancesConfigPath = Join-Path $scriptRoot "bridge.instances.json"
+$localInstancesConfigPath = Join-Path $scriptRoot "bridge.instances.local.json"
+$instancesConfigPath = if ($env:CODEX_FEISHU_INSTANCES_CONFIG) {
+  [System.IO.Path]::GetFullPath($env:CODEX_FEISHU_INSTANCES_CONFIG)
+} elseif (Test-Path -LiteralPath $localInstancesConfigPath -PathType Leaf) {
+  $localInstancesConfigPath
+} else {
+  $bundledInstancesConfigPath
+}
 $codexConfigPath = Join-Path $env:USERPROFILE ".codex\config.toml"
+
+function Resolve-ConfiguredPath {
+  param([string]$Path)
+  if (-not $Path) { return "" }
+  $value = [string]$Path
+  $value = $value.Replace("C:\Users\<you>", $env:USERPROFILE)
+  $value = $value.Replace("C:/Users/<you>", ($env:USERPROFILE -replace "\\", "/"))
+  $value = $value.Replace("%USERPROFILE%", $env:USERPROFILE)
+  if ($value -eq "C:\path\to\codex-feishu-bridge") { return $scriptRoot }
+  if ($value -eq "C:/path/to/codex-feishu-bridge") { return ($scriptRoot -replace "\\", "/") }
+  if ($value -like "C:\path\to\codex-feishu-bridge\*") {
+    return (Join-Path $scriptRoot $value.Substring("C:\path\to\codex-feishu-bridge\".Length))
+  }
+  if ($value -like "C:/path/to/codex-feishu-bridge/*") {
+    return (($scriptRoot -replace "\\", "/") + "/" + $value.Substring("C:/path/to/codex-feishu-bridge/".Length))
+  }
+  return $value
+}
+
+function Test-SafePath {
+  param(
+    [string]$Path,
+    [string]$PathType = ""
+  )
+  if (-not $Path) { return $false }
+  try {
+    if ($PathType) {
+      return (Test-Path -LiteralPath $Path -PathType $PathType)
+    }
+    return (Test-Path -LiteralPath $Path)
+  } catch {
+    return $false
+  }
+}
 
 function Read-Utf8Text {
   param([string]$Path)
-  if (-not (Test-Path -LiteralPath $Path)) { return $null }
+  if (-not (Test-SafePath -Path $Path -PathType Leaf)) { return $null }
   return [System.Text.Encoding]::UTF8.GetString([System.IO.File]::ReadAllBytes($Path))
 }
 
@@ -24,18 +66,18 @@ function Read-Utf8Json {
 function Test-DirectoryPath {
   param([string]$Path)
   if (-not $Path) { return $false }
-  return (Test-Path -LiteralPath $Path -PathType Container)
+  return (Test-SafePath -Path $Path -PathType Container)
 }
 
 function Test-FilePath {
   param([string]$Path)
   if (-not $Path) { return $false }
-  return (Test-Path -LiteralPath $Path -PathType Leaf)
+  return (Test-SafePath -Path $Path -PathType Leaf)
 }
 
 function Get-FileSummary {
   param([string]$Path)
-  if (-not (Test-Path -LiteralPath $Path)) {
+  if (-not (Test-SafePath -Path $Path)) {
     return [pscustomobject]@{
       path = $Path
       exists = $false
@@ -55,7 +97,7 @@ function Get-FileSummary {
 
 function Get-DirectorySummary {
   param([string]$Path)
-  if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
+  if (-not (Test-SafePath -Path $Path -PathType Container)) {
     return [pscustomobject]@{
       path = $Path
       exists = $false
@@ -269,12 +311,12 @@ if (-not $config) {
     instances = @()
   }
 } else {
-  $checks += New-Check -Group "配置" -Name "统一实例配置" -Status "ok" -Message "bridge.instances.json 可读取。" -Path $instancesConfigPath
+  $checks += New-Check -Group "配置" -Name "统一实例配置" -Status "ok" -Message "实例配置可读取。" -Path $instancesConfigPath
 }
 
-$sourceRoot = if ($config.paths.sourceRoot) { [string]$config.paths.sourceRoot } else { $scriptRoot }
-$runtimeRoot = if ($config.paths.runtimeRoot) { [string]$config.paths.runtimeRoot } else { Join-Path $env:LOCALAPPDATA "CodexFeishuBridge" }
-$codexConfigPath = if ($config.paths.codexConfig) { [string]$config.paths.codexConfig } else { $codexConfigPath }
+$sourceRoot = Resolve-ConfiguredPath -Path $(if ($config.paths.sourceRoot) { [string]$config.paths.sourceRoot } else { $scriptRoot })
+$runtimeRoot = Resolve-ConfiguredPath -Path $(if ($config.paths.runtimeRoot) { [string]$config.paths.runtimeRoot } else { Join-Path $env:LOCALAPPDATA "CodexFeishuBridge" })
+$codexConfigPath = Resolve-ConfiguredPath -Path $(if ($config.paths.codexConfig) { [string]$config.paths.codexConfig } else { $codexConfigPath })
 
 $node = Get-Command "node.exe" -ErrorAction SilentlyContinue
 if ($node) {
@@ -326,6 +368,7 @@ $controlPanelPidFile = [string]$config.controlPanel.pidFile
 if (-not $controlPanelPidFile) {
   $controlPanelPidFile = Join-Path $runtimeRoot "control-panel\state\control-panel.pid"
 }
+$controlPanelPidFile = Resolve-ConfiguredPath -Path $controlPanelPidFile
 $controlPanelProcess = Get-PidFileProcess -PidFile $controlPanelPidFile
 $controlPanelPort = if ($config.controlPanel.port) { [int]$config.controlPanel.port } else { 8320 }
 $controlPanelPortStatus = Test-PortListen -Port $controlPanelPort
@@ -351,14 +394,17 @@ if ($controlPanelTask.exists) {
 
 $instances = @()
 foreach ($instance in @($config.instances)) {
-  $runtime = [string]$instance.runtimeRoot
+  $runtime = Resolve-ConfiguredPath -Path ([string]$instance.runtimeRoot)
+  $workspace = Resolve-ConfiguredPath -Path ([string]$instance.workspace)
+  $codexHome = Resolve-ConfiguredPath -Path ([string]$instance.codexHome)
+  $desktopCodexHome = Resolve-ConfiguredPath -Path ([string]$instance.desktopCodexHome)
   $stateDir = Join-Path $runtime "state"
   $logDir = Join-Path $runtime "logs"
   $paths = [ordered]@{
     runtimeRoot = $runtime
-    workspace = [string]$instance.workspace
-    codexHome = [string]$instance.codexHome
-    desktopCodexHome = [string]$instance.desktopCodexHome
+    workspace = $workspace
+    codexHome = $codexHome
+    desktopCodexHome = $desktopCodexHome
     stateDir = $stateDir
     logDir = $logDir
     bridgePidFile = (Join-Path $stateDir "bridge.pid")
@@ -366,9 +412,9 @@ foreach ($instance in @($config.instances)) {
     launchConfigFile = (Join-Path $stateDir "launch-config.json")
     watchdogLogFile = (Join-Path $logDir "watchdog.log")
     bridgeLogFile = (Join-Path $logDir "codex-feishu-bridge.log")
-    stateDbFile = (Join-Path ([string]$instance.codexHome) "state_5.sqlite")
-    sessionIndexFile = (Join-Path ([string]$instance.codexHome) "session_index.jsonl")
-    sessionsDir = (Join-Path ([string]$instance.codexHome) "sessions")
+    stateDbFile = (Join-Path $codexHome "state_5.sqlite")
+    sessionIndexFile = (Join-Path $codexHome "session_index.jsonl")
+    sessionsDir = (Join-Path $codexHome "sessions")
   }
 
   $process = Get-PidFileProcess -PidFile $paths.bridgePidFile
@@ -424,21 +470,29 @@ foreach ($instance in @($config.instances)) {
 }
 
 $proxyRows = @()
-foreach ($proxy in @($config.proxies)) {
+$configuredProxies = @()
+if ($config.proxies) {
+  $configuredProxies = @($config.proxies)
+} elseif ($config.localProxies) {
+  $configuredProxies = @($config.localProxies)
+}
+foreach ($proxy in $configuredProxies) {
   $portStatus = Test-PortListen -Port ([int]$proxy.port)
+  $proxyId = if ($proxy.id) { [string]$proxy.id } else { [string]$proxy.name }
+  $proxyUrl = if ($proxy.url) { [string]$proxy.url } else { "http://127.0.0.1:{0}/v1" -f ([int]$proxy.port) }
   $proxyRows += [pscustomobject]@{
-    id = [string]$proxy.id
+    id = $proxyId
     label = [string]$proxy.label
     port = [int]$proxy.port
-    url = [string]$proxy.url
+    url = $proxyUrl
     online = [bool]$portStatus.listening
     owningProcess = $portStatus.owningProcess
     note = [string]$proxy.note
   }
   if ($portStatus.listening) {
-    $checks += New-Check -Group "本地代理" -Name $proxy.id -Status "ok" -Message ("端口 {0} 正在监听。" -f $proxy.port) -Path ([string]$proxy.url)
+    $checks += New-Check -Group "本地代理" -Name $proxyId -Status "ok" -Message ("端口 {0} 正在监听。" -f $proxy.port) -Path $proxyUrl
   } else {
-    $checks += New-Check -Group "本地代理" -Name $proxy.id -Status "bad" -Message ("端口 {0} 未监听。" -f $proxy.port) -Path ([string]$proxy.url) -Impact "对应非 GPT 模型 Provider 无法使用。" -NextStep "检查 Mimo2CodexProxyWatchdog 或 start-mimo2codex-proxies.ps1。"
+    $checks += New-Check -Group "本地代理" -Name $proxyId -Status "bad" -Message ("端口 {0} 未监听。" -f $proxy.port) -Path $proxyUrl -Impact "对应非 GPT 模型 Provider 无法使用。" -NextStep "检查 Mimo2CodexProxyWatchdog 或 start-mimo2codex-proxies.ps1。"
   }
 }
 
