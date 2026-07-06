@@ -144,10 +144,6 @@ http://127.0.0.1:8320/
 - [配置与安全边界](docs/configuration-and-security.md)
 - [故障排查](docs/troubleshooting.md)
 
-## 社区
-
-本项目整理和发布时参考了 [LINUX DO](https://linux.do/) 社区的开源推广规范与开源项目分享风格。
-
 ## 不会提交的内容
 
 - `.env`、密钥、token、飞书 app secret、API key
