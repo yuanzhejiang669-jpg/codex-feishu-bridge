@@ -60,6 +60,7 @@ function Read-Utf8Json {
   param([string]$Path)
   $text = Read-Utf8Text -Path $Path
   if (-not $text) { return $null }
+  $text = $text.TrimStart([char]0xFEFF)
   return $text | ConvertFrom-Json
 }
 
