@@ -18,7 +18,9 @@ Provider 添加、测试、环境变量替换、同步到空间 Codex Home 和�
 
 ![Provider 与安全重启](docs/assets/readme/provider-operations.jpg)
 
-> 飞书对话运行图稍后补充：建议展示一次真实任务从飞书消息进入、Codex 工具调用、动态卡片更新到最终回复的完整过程。
+飞书对话卡片展示 Codex 任务进度、工具调用折叠和最终结果，长任务结束后只保留最近 20 个调用明细。
+
+![飞书运行卡片](docs/assets/readme/feishu-run-card.png)
 
 ## 核心能力
 
