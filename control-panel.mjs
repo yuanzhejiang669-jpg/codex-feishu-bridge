@@ -6,6 +6,7 @@ import {
   rm,
   mkdir,
   readdir,
+  readFile,
   stat,
   unlink,
   writeFile,
