@@ -50,7 +50,7 @@ import {
 } from "./src/config/service-tier.mjs";
 import { createCodexProviderConfig } from "./src/providers/codex-config.mjs";
 import { createActiveRunStore } from "./src/runtime/active-runs.mjs";
-import { createProcessRunner } from "./src/runtime/process-runner.mjs";
+import { createProcessRunner, isProcessAlive as isProcessAlivePid } from "./src/runtime/process-runner.mjs";
 import { createRecalledMessageStore } from "./src/runtime/recalled-messages.mjs";
 import { createSeenEventsStore } from "./src/runtime/seen-events.mjs";
 import {
@@ -432,7 +432,7 @@ function pidFileMatches(pid) {
 }
 
 function isActiveBridgeLock(current) {
-  if (!current?.pid || !isProcessAlive(current.pid)) return false;
+  if (!current?.pid || !isProcessAlivePid(current.pid)) return false;
   return pidFileMatches(current.pid);
 }
 
