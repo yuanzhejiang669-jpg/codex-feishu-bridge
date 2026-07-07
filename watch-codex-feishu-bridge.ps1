@@ -148,7 +148,13 @@ function Get-BridgeProcess {
   $process = Get-Process -Id ([int]$pidText) -ErrorAction SilentlyContinue
   if (-not $process) { return $null }
   $cmd = (Get-CimInstance Win32_Process -Filter "ProcessId=$pidText" -ErrorAction SilentlyContinue).CommandLine
-  if ($cmd -notlike "*codex-feishu-bridge*") { return $null }
+  if ($cmd) {
+    if ($cmd -notlike "*codex-feishu-bridge*") { return $null }
+  } elseif ($process.ProcessName -notlike "node*") {
+    return $null
+  } else {
+    Write-WatchdogLog "bridge command line unavailable; trusting live node pid=$pidText"
+  }
   return $process
 }
 
