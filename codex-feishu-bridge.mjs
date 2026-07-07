@@ -2186,7 +2186,7 @@ async function repairStaleActiveRunsOnStartup() {
       }
       repaired += 1;
     } catch (error) {
-      const key = activeRunKey(record?.messageId);
+      const key = String(record?.messageId || "").trim();
       if (key) {
         remaining[key] = {
           ...record,

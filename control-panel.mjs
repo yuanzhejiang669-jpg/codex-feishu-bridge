@@ -3650,8 +3650,10 @@ async function requestHandler(req, res) {
   }
 
   if (req.method === "POST" && url.pathname === "/api/cleanup/space-uninstall") {
+    let body = {};
     try {
-      jsonResponse(res, 200, await uninstallSpace(await readRequestJson(req)));
+      body = await readRequestJson(req);
+      jsonResponse(res, 200, await uninstallSpace(body));
     } catch (error) {
       jsonResponse(res, 400, {
         ok: false,
