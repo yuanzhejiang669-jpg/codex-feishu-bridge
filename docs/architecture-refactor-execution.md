@@ -257,3 +257,74 @@
 - 同步到 GitHub 和旧设备后，需要重启新旧设备所有 active run 为 0 的 Bridge Bot。
 - 因为本阶段修改了控制面板后端，控制面板也需要重启。
 - 当前记录时尚未推送 GitHub、尚未同步旧设备、尚未重启 Bot；这些动作在本地验证完成后执行。
+
+## 2026-07-07 阶段 10：提交、推送、旧设备同步和空闲 Bot 重启
+
+提交与同步：
+
+- 本机提交并推送 GitHub：`cf678a643809a5e9bc1be40cda8fabf40acc9ae7`
+- GitHub `origin/main` 已指向该提交。
+- 旧设备仓库 `C:\Users\12644\Documents\Codex\tools\codex-feishu-bridge` 从 `42642de543b24dc15046f58893cfc9020a0f5374` 快进到 `cf678a643809a5e9bc1be40cda8fabf40acc9ae7`。
+
+验证：
+
+- 本机 `npm run check` 通过。
+- 新增模块动态 import 验证通过。
+- 旧设备 `npm run check` 通过。
+- 本机、GitHub、旧设备代码提交一致。
+
+新设备重启结果：
+
+- 控制面板已重启，最终 PID：`78928`
+- 总 Bot：14
+- 在线 Bot：14
+- active run：1
+- watchdog 不健康：0
+- 代理在线：2/2
+- 跳过：`codex-assistant-1`，active run = 1，是当前对话所在 Bot。
+- 已重启并在线：`default`
+- 已重启并在线：`codex-assistant-2`
+- 已重启并在线：`codex-assistant-3`
+- 已重启并在线：`codex-assistant-4`
+- 已重启并在线：`codex-assistant-5`
+- 已重启并在线：`codex-assistant-6`
+- 已重启并在线：`codex-assistant-7`
+- 已重启并在线：`codex-assistant-8`
+- 已重启并在线：`codex-assistant-9`
+- 已重启并在线：`codex-assistant-1-writing`
+- 已重启并在线：`codex-assistant-2-writing`
+- 已重启并在线：`codex-assistant-3-writing`
+- 已重启并在线：`codex-assistant-11-writing`
+
+旧设备重启结果：
+
+- 控制面板已通过计划任务重启，最终 PID：`41052`
+- 总 Bot：17
+- 在线 Bot：17
+- active run：1
+- watchdog 不健康：0
+- 代理在线：2/2
+- 跳过：`codex-assistant-old-baike`，active run = 1。
+- 已重启并在线：`codex-assistant-old`
+- 已重启并在线：`codex-assistant-old1`
+- 已重启并在线：`codex-assistant-old2`
+- 已重启并在线：`codex-assistant-old3`
+- 已重启并在线：`codex-assistant-old4`
+- 已重启并在线：`codex-assistant-old5`
+- 已重启并在线：`codex-assistant-old6`
+- 已重启并在线：`codex-assistant-old7`
+- 已重启并在线：`codex-assistant-old8`
+- 已重启并在线：`codex-assistant-old9`
+- 已重启并在线：`codex-assistant-old-baike-1`
+- 已重启并在线：`codex-assistant-old-baike-2`
+- 已重启并在线：`codex-assistant-old-baike-3`
+- 已重启并在线：`codex-assistant-old-baike-4`
+- 已重启并在线：`codex-assistant-old-baike-5`
+- 已重启并在线：`codex-assistant-mobile`
+
+备注：
+
+- 批量重启接口是串行处理，单次大批量请求会超过 HTTP 超时；实际采用小批次补重启。
+- 旧设备控制面板不能通过临时 SSH 会话里的 `Start-Process` 可靠保活，最终改用已有计划任务 `CodexFeishuBridgeControlPanel` 启动。
+- `codex-assistant-old6` 和 `codex-assistant-old-baike-3` 曾出现“启动后未确认到 PID”，后续状态复查均已在线。
+- `codex-assistant-old-baike-3` 的 watchdog 初次未刷新健康行，单独触发 `CodexFeishuBridgeWatchdog-codex-assistant-old-baike-3` 后恢复 healthy。
