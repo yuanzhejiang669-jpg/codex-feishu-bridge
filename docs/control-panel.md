@@ -2,6 +2,8 @@
 
 控制面板是本机可视化入口，默认运行在 `http://127.0.0.1:8320/`。它读取 Bridge 运行状态、日志、注册队列和配置文件，把原本分散在 PowerShell、日志和 JSON 文件里的信息整理成网页。
 
+![控制面板总览](assets/readme/control-panel-overview.jpg)
+
 ## 启动
 
 ```powershell
@@ -21,6 +23,12 @@ powershell.exe -NoProfile -File .\start-control-panel.ps1
 - 工作空间工厂：生成垂类 Bot 队列、注册飞书 APP/profile、展示二维码、校验 scopes、写入实例配置、安装 watchdog、启动 Bot。
 - 卸载与清理：清理未完成注册残留、卸载垂类 Bot、卸载整个空间。
 - 日志：聚合最近 WARN / ERROR / failed / 502 等关键日志。
+
+![Bot 状态](assets/readme/bot-status.jpg)
+
+![本地模型代理](assets/readme/local-proxies.jpg)
+
+![Provider 列表](assets/readme/provider-list.jpg)
 
 ## 实例配置
 

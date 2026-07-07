@@ -4,6 +4,22 @@
 
 > 当前项目面向个人本机部署和多 Bot 工作流，不是云端托管服务。仓库只保存代码、脚本、示例配置和公开文档；真实密钥、飞书 profile、运行日志、二维码、会话状态和本机实例配置不会提交。
 
+## 界面预览
+
+控制面板把多 Bot、watchdog、本地模型代理、Provider 和工作空间管理集中到一个本机网页里。
+
+![控制面板总览](docs/assets/readme/control-panel-overview.jpg)
+
+每个 Bot 都可以单独查看 PID、active run、watchdog、最近运行模型和 Codex Desktop 侧边栏索引状态。
+
+![Bot 运行状态](docs/assets/readme/bot-status.jpg)
+
+Provider 添加、测试、环境变量替换、同步到空间 Codex Home 和空闲 Bot 重启都在同一个安全操作区完成。
+
+![Provider 与安全重启](docs/assets/readme/provider-operations.jpg)
+
+> 飞书对话运行图稍后补充：建议展示一次真实任务从飞书消息进入、Codex 工具调用、动态卡片更新到最终回复的完整过程。
+
 ## 核心能力
 
 - 飞书消息到本机 Codex：支持普通对话、继续当前线程、附件输入、图片/文件下载。

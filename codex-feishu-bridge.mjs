@@ -2330,6 +2330,8 @@ function toolSummaryTitle(total, counts, finalized) {
 
 function toolSummaryFinalBody(tools, counts) {
   const lines = [`完成 ${counts.done} 个，失败 ${counts.error} 个，运行中 ${counts.running} 个。`];
+  const visibleTools = limitRunningToolDetails(tools);
+  const omitted = Math.max(0, tools.length - visibleTools.length);
   if (counts.error) {
     lines.push("");
     lines.push("失败步骤已在下方展开；多数探索命令未命中不一定影响最终结论。");
@@ -2339,7 +2341,10 @@ function toolSummaryFinalBody(tools, counts) {
   }
   const names = [...new Set(tools.map((tool) => displayToolName(tool)).filter(Boolean))].slice(0, 6);
   if (names.length) lines.push(`工具：${names.join(" · ")}`);
-  const auditLines = tools.map((tool, index) => `${index + 1}. ${toolHeaderText(tool, false)}`);
+  if (omitted > 0) {
+    lines.push(`只显示最近 ${visibleTools.length} 个调用明细；更早 ${omitted} 个已折叠，完整过程仍在本机日志中。`);
+  }
+  const auditLines = visibleTools.map((tool, index) => `${omitted + index + 1}. ${toolHeaderText(tool, false)}`);
   if (auditLines.length) {
     lines.push("");
     lines.push("调用明细：");

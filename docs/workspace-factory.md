@@ -2,6 +2,8 @@
 
 工作空间工厂用于批量创建垂类 Bot，例如写作 Bot、百科 Bot、画图 Bot。它把过去需要手工执行的创建目录、迁移配置、注册飞书 APP、写入 profile、安装 watchdog、启动 Bridge 串成一个可跟踪队列。
 
+![工作空间工厂](assets/readme/workspace-factory.jpg)
+
 ## 推荐流程
 
 1. 在控制面板打开“工作空间工厂”。
