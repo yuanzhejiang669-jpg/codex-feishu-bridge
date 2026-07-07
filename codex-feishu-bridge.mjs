@@ -24,6 +24,23 @@ import {
   parseCommand as parseCommandInput,
 } from "./src/commands/parser.mjs";
 import { sameResolvedPath, stripWindowsLongPathPrefix } from "./src/config/paths.mjs";
+import {
+  chatIdOf,
+  eventIdOf,
+  eventTypeOf,
+  isRecallEvent,
+  messageIdOf,
+} from "./src/feishu/events.mjs";
+import { createLarkClient } from "./src/feishu/lark-cli.mjs";
+import { createManagedCardClass } from "./src/feishu/cards/managed-card.mjs";
+import {
+  cardMarkdownContent,
+  idempotencyKey,
+  markdown,
+  noteMd,
+  splitText,
+  truncateCardText,
+} from "./src/feishu/cards/primitives.mjs";
 import { createPendingAttachmentStore } from "./src/attachments/pending.mjs";
 import { createLogger } from "./src/logging/logger.mjs";
 import {
@@ -33,6 +50,7 @@ import {
 } from "./src/config/service-tier.mjs";
 import { createCodexProviderConfig } from "./src/providers/codex-config.mjs";
 import { createActiveRunStore } from "./src/runtime/active-runs.mjs";
+import { createProcessRunner } from "./src/runtime/process-runner.mjs";
 import { createRecalledMessageStore } from "./src/runtime/recalled-messages.mjs";
 import { createSeenEventsStore } from "./src/runtime/seen-events.mjs";
 import {
@@ -43,6 +61,8 @@ import {
   normalizeTimestamp,
   normalizeTokenUsage,
 } from "./src/sessions/normalize.mjs";
+import { createSessionStore } from "./src/sessions/store.mjs";
+import { findDeepKey, parseJsonLoose, readJsonFile } from "./src/utils/json.mjs";
 import {
   classifyCodexFailure,
   emptyCompletionError,
@@ -189,6 +209,44 @@ const activeCodexJobs = new Map();
 const activeGoalRuns = new Map();
 const pendingDeleteConfirmations = new Map();
 const stoppedJobs = new Set();
+const processRunner = createProcessRunner({
+  activeChildren,
+  workspace: CONFIG.workspace,
+});
+const {
+  isProcessAlive,
+  runTool,
+  terminateProcessTree,
+} = processRunner;
+const larkClient = createLarkClient({
+  larkCli: CONFIG.larkCli,
+  runTool,
+  delay,
+  splitText,
+  idempotencyKey,
+  maxReplyChars: CONFIG.maxReplyChars,
+  useThreadReply: CONFIG.useThreadReply,
+  dataFileThreshold: CONFIG.larkDataFileThreshold,
+  dataTempDir: larkDataTempDir,
+  log,
+});
+const {
+  larkJson,
+  larkJsonWithData,
+  replyFallback,
+  runLark,
+  sendMarkdown,
+  sendText,
+} = larkClient;
+const ManagedCard = createManagedCardClass({
+  larkJson,
+  larkJsonWithData,
+  findDeepKey,
+  idempotencyKey,
+  useThreadReply: CONFIG.useThreadReply,
+  cardThrottleMs: CONFIG.cardThrottleMs,
+  log,
+});
 const REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh"]);
 const MIN_SIDEBAR_RECONCILE_INTERVAL_MS = 5_000;
 const PROVIDER_MODEL_LIST_TIMEOUT_MS = 30_000;
@@ -271,7 +329,20 @@ let activeJobs = 0;
 let sidebarReconcileInFlight = false;
 let sidebarReconcileQueuedReason = "";
 const pendingEvents = [];
-const sessions = loadSessions();
+const sessionStore = createSessionStore({
+  sessionsPath,
+  createSessionData,
+  normalizeSessionData,
+  dedupeSessions,
+  sessionListLimit,
+});
+const {
+  getChatState,
+  getSession,
+  resetSession,
+  saveSessions,
+  sessions,
+} = sessionStore;
 seenEvents.cleanupOldEventLocks();
 const stats = {
   startedAt: Date.now(),
@@ -352,66 +423,6 @@ function recordFailureStats(failure) {
   stats.failuresByKind[item.kind] = (stats.failuresByKind[item.kind] || 0) + 1;
 }
 
-function eventTypeOf(event) {
-  return String(
-    event?.event_type
-      || event?.type
-      || event?.header?.event_type
-      || event?.event?.event_type
-      || findDeepKey(event, "event_type")
-      || "",
-  ).trim();
-}
-
-function eventIdOf(event) {
-  return String(
-    event?.event_id
-      || event?.header?.event_id
-      || event?.event?.event_id
-      || findDeepKey(event, "event_id")
-      || "",
-  ).trim();
-}
-
-function messageIdOf(event) {
-  return String(
-    event?.message_id
-      || event?.event?.message_id
-      || event?.message?.message_id
-      || findDeepKey(event, "message_id")
-      || findDeepKey(event, "messageId")
-      || event?.id
-      || "",
-  ).trim();
-}
-
-function chatIdOf(event) {
-  return String(
-    event?.chat_id
-      || event?.event?.chat_id
-      || event?.message?.chat_id
-      || findDeepKey(event, "chat_id")
-      || findDeepKey(event, "chatId")
-      || "",
-  ).trim();
-}
-
-function isRecallEvent(event) {
-  const type = eventTypeOf(event);
-  return type === "im.message.recalled_v1" || Boolean(event?.recall_time || event?.event?.recall_time);
-}
-
-function isProcessAlive(pid) {
-  const number = Number(pid);
-  if (!Number.isInteger(number) || number <= 0) return false;
-  try {
-    process.kill(number, 0);
-    return true;
-  } catch (error) {
-    return error?.code === "EPERM";
-  }
-}
-
 function pidFileMatches(pid) {
   try {
     return fs.existsSync(pidPath) && fs.readFileSync(pidPath, "utf8").trim() === String(pid);
@@ -423,14 +434,6 @@ function pidFileMatches(pid) {
 function isActiveBridgeLock(current) {
   if (!current?.pid || !isProcessAlive(current.pid)) return false;
   return pidFileMatches(current.pid);
-}
-
-function readJsonFile(file) {
-  try {
-    return JSON.parse(fs.readFileSync(file, "utf8"));
-  } catch {
-    return null;
-  }
 }
 
 function acquireSingleInstanceLock() {
@@ -478,40 +481,6 @@ function releaseSingleInstanceLock() {
   } catch {}
 }
 
-function loadSessions() {
-  try {
-    const parsed = JSON.parse(fs.readFileSync(sessionsPath, "utf8"));
-    if (parsed && typeof parsed === "object" && parsed.chats) return parsed;
-  } catch {}
-  return { chats: {} };
-}
-
-function saveSessions() {
-  fs.writeFileSync(sessionsPath, JSON.stringify(sessions, null, 2), "utf8");
-}
-
-function getSession(chatId) {
-  const chatState = getChatState(chatId);
-  let session = chatState.sessions.find((item) => item.id === chatState.currentSessionId);
-  if (!session) {
-    session = chatState.sessions[0] || createSessionData("默认会话");
-    if (!chatState.sessions.includes(session)) chatState.sessions.unshift(session);
-    chatState.currentSessionId = session.id;
-    saveSessions();
-  }
-  return session;
-}
-
-function resetSession(chatId, title = "") {
-  const session = createSessionData(title || "新会话");
-  const chatState = getChatState(chatId);
-  chatState.currentSessionId = session.id;
-  chatState.sessions.unshift(session);
-  chatState.sessions = dedupeSessions(chatState.sessions).slice(0, sessionListLimit());
-  saveSessions();
-  return session;
-}
-
 async function resetCurrentSession(chatId) {
   await syncChatSessionsWithCodex(chatId);
   const session = getSession(chatId);
@@ -525,43 +494,6 @@ async function resetCurrentSession(chatId) {
   session.updatedAt = Date.now();
   saveSessions();
   return session;
-}
-
-function getChatState(chatId) {
-  const current = sessions.chats[chatId];
-  if (!current) {
-    const session = createSessionData("默认会话");
-    sessions.chats[chatId] = {
-      currentSessionId: session.id,
-      sessions: [session],
-    };
-    saveSessions();
-    return sessions.chats[chatId];
-  }
-
-  if (Array.isArray(current.sessions)) {
-    current.sessions = dedupeSessions(current.sessions.map(normalizeSessionData)).slice(0, sessionListLimit());
-    if (!current.currentSessionId && current.sessions[0]) current.currentSessionId = current.sessions[0].id;
-    return current;
-  }
-
-  if (current.id) {
-    const migrated = normalizeSessionData(current);
-    sessions.chats[chatId] = {
-      currentSessionId: migrated.id,
-      sessions: [migrated],
-    };
-    saveSessions();
-    return sessions.chats[chatId];
-  }
-
-  const session = createSessionData("默认会话");
-  sessions.chats[chatId] = {
-    currentSessionId: session.id,
-    sessions: [session],
-  };
-  saveSessions();
-  return sessions.chats[chatId];
 }
 
 function normalizeSessionData(session) {
@@ -1705,353 +1637,6 @@ function appendHistory(session, role, content) {
   saveSessions();
 }
 
-function runTool(tool, args, options = {}) {
-  const finalArgs = [...tool.argsPrefix, ...args];
-  const child = spawn(tool.command, finalArgs, {
-    cwd: options.cwd || CONFIG.workspace,
-    env: { ...process.env, ...(options.env || {}) },
-    windowsHide: true,
-    stdio: ["pipe", "pipe", "pipe"],
-  });
-  activeChildren.set(child.pid, { child, label: `${tool.command} ${finalArgs.join(" ")}` });
-  options.onSpawn?.(child);
-
-  const stdoutChunks = [];
-  const stderrChunks = [];
-  child.stdout.on("data", (chunk) => stdoutChunks.push(chunk));
-  child.stderr.on("data", (chunk) => stderrChunks.push(chunk));
-
-  if (options.stdin) {
-    child.stdin.end(options.stdin);
-  } else {
-    child.stdin.end();
-  }
-
-  return new Promise((resolve, reject) => {
-    let timedOut = false;
-    const timer = options.timeoutMs
-      ? setTimeout(() => {
-          timedOut = true;
-          terminateProcessTree(child.pid, false);
-          setTimeout(() => terminateProcessTree(child.pid, true), 5000).unref?.();
-        }, options.timeoutMs)
-      : null;
-
-    child.on("error", reject);
-    child.on("close", (code) => {
-      if (timer) clearTimeout(timer);
-      activeChildren.delete(child.pid);
-      const stdout = Buffer.concat(stdoutChunks).toString("utf8");
-      const stderr = Buffer.concat(stderrChunks).toString("utf8");
-      resolve({ code, stdout, stderr, timedOut, pid: child.pid });
-    });
-  });
-}
-
-async function runLark(args, options = {}) {
-  const attempts = options.attempts ?? 3;
-  let last;
-  for (let attempt = 1; attempt <= attempts; attempt += 1) {
-    last = await runTool(CONFIG.larkCli, args, { timeoutMs: options.timeoutMs || 60_000 });
-    if (last.code === 0) return last;
-    if (attempt < attempts && isTransientLarkError(last)) {
-      await delay(1500 * attempt);
-      continue;
-    }
-    return last;
-  }
-  return last;
-}
-
-function isTransientLarkError(result) {
-  const text = `${result?.stderr || ""}\n${result?.stdout || ""}`;
-  return /connectex|ECONN|ETIMEDOUT|open\.feishu\.cn|tenant_access_token|socket|cardid is invalid|ErrCode:\s*11310/i.test(text);
-}
-
-function terminateProcessTree(pid, force) {
-  if (!pid) return;
-  if (process.platform === "win32") {
-    const args = ["/PID", String(pid), "/T"];
-    if (force) args.push("/F");
-    const killer = spawn("taskkill.exe", args, {
-      windowsHide: true,
-      stdio: "ignore",
-    });
-    killer.on("error", () => {});
-    return;
-  }
-  try {
-    process.kill(pid, force ? "SIGKILL" : "SIGTERM");
-  } catch {}
-}
-
-async function sendText(chatId, text, idempotencySuffix, baseId = chatId) {
-  const chunks = splitText(text, CONFIG.maxReplyChars);
-  for (let i = 0; i < chunks.length; i += 1) {
-    const result = await runLark([
-      "im",
-      "+messages-send",
-      "--as",
-      "bot",
-      "--chat-id",
-      chatId,
-      "--text",
-      chunks[i],
-      "--idempotency-key",
-      idempotencyKey(baseId, `${idempotencySuffix}-text-${i}`),
-    ]);
-    if (result.code !== 0) throw new Error(`lark-cli send failed (${result.code}): ${result.stderr || result.stdout}`);
-  }
-}
-
-async function sendMarkdown(chatId, markdown, idempotencySuffix, baseId = chatId) {
-  const chunks = splitText(markdown, CONFIG.maxReplyChars);
-  for (let i = 0; i < chunks.length; i += 1) {
-    const result = await runLark([
-      "im",
-      "+messages-send",
-      "--as",
-      "bot",
-      "--chat-id",
-      chatId,
-      "--markdown",
-      chunks[i],
-      "--idempotency-key",
-      idempotencyKey(baseId, `${idempotencySuffix}-md-${i}`),
-    ]);
-    if (result.code !== 0) throw new Error(`lark-cli markdown send failed (${result.code}): ${result.stderr || result.stdout}`);
-  }
-}
-
-async function replyFallback(messageId, text, idempotencySuffix) {
-  const chunks = splitText(text, CONFIG.maxReplyChars);
-  for (let i = 0; i < chunks.length; i += 1) {
-    const args = [
-      "im",
-      "+messages-reply",
-      "--as",
-      "bot",
-      "--message-id",
-      messageId,
-      "--text",
-      chunks[i],
-      "--idempotency-key",
-      idempotencyKey(messageId, `${idempotencySuffix}-${i}`),
-    ];
-    if (CONFIG.useThreadReply) args.push("--reply-in-thread");
-    const result = await runLark(args);
-    if (result.code !== 0) throw new Error(`lark-cli reply failed (${result.code}): ${result.stderr || result.stdout}`);
-  }
-}
-
-function parseJsonLoose(text) {
-  const raw = String(text || "").trim();
-  if (!raw) return null;
-  try {
-    return JSON.parse(raw);
-  } catch {}
-
-  const start = raw.indexOf("{");
-  const end = raw.lastIndexOf("}");
-  if (start >= 0 && end > start) {
-    try {
-      return JSON.parse(raw.slice(start, end + 1));
-    } catch {}
-  }
-  return null;
-}
-
-function findDeepKey(value, key) {
-  if (!value || typeof value !== "object") return undefined;
-  if (Object.prototype.hasOwnProperty.call(value, key)) return value[key];
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const found = findDeepKey(item, key);
-      if (found !== undefined) return found;
-    }
-    return undefined;
-  }
-  for (const item of Object.values(value)) {
-    const found = findDeepKey(item, key);
-    if (found !== undefined) return found;
-  }
-  return undefined;
-}
-
-async function larkJson(args, options = {}) {
-  const result = await runLark(args, options);
-  if (result.code !== 0) {
-    throw new Error(`lark-cli failed (${result.code}): ${result.stderr || result.stdout}`);
-  }
-  return parseJsonLoose(result.stdout) || {};
-}
-
-async function larkJsonWithData(args, data, options = {}) {
-  const payload = JSON.stringify(data);
-  if (!shouldUseLarkDataFile(payload)) {
-    return larkJson([...args, "--data", payload], options);
-  }
-
-  const dataFile = await writeLarkDataFile(payload);
-  try {
-    return await larkJson([...args, "--data", `@${dataFile}`], options);
-  } finally {
-    await fs.promises.rm(dataFile, { force: true }).catch((error) => {
-      log("WARN", "failed to remove temporary lark data file", {
-        path: dataFile,
-        error: String(error.message || error).slice(0, 500),
-      });
-    });
-  }
-}
-
-function shouldUseLarkDataFile(payload) {
-  const threshold = Math.max(0, Number(CONFIG.larkDataFileThreshold || 0));
-  return threshold === 0 || Buffer.byteLength(String(payload || ""), "utf8") > threshold;
-}
-
-async function writeLarkDataFile(payload) {
-  await fs.promises.mkdir(larkDataTempDir, { recursive: true });
-  const fileName = `lark-data-${process.pid}-${Date.now()}-${crypto.randomUUID()}.json`;
-  const dataFile = path.join(larkDataTempDir, fileName);
-  await fs.promises.writeFile(dataFile, payload, { encoding: "utf8", flag: "wx" });
-  return dataFile;
-}
-
-class ManagedCard {
-  constructor(cardId, messageId) {
-    this.cardId = cardId;
-    this.messageId = messageId;
-    this.sequence = 0;
-    this.pendingCard = null;
-    this.pendingTimer = null;
-    this.inFlight = null;
-    this.closed = false;
-    this.lastFlushOk = true;
-  }
-
-  static async open(chatId, replyToMessageId, initialCard, idempotencyBase) {
-    const created = await larkJsonWithData([
-      "api",
-      "POST",
-      "/open-apis/cardkit/v1/cards",
-      "--as",
-      "bot",
-    ], { type: "card_json", data: JSON.stringify(initialCard) }, { timeoutMs: 60_000, attempts: 2 });
-
-    const cardId = findDeepKey(created, "card_id");
-    if (!cardId) {
-      throw new Error(`CardKit create returned no card_id: ${JSON.stringify(created).slice(0, 500)}`);
-    }
-
-    const content = JSON.stringify({ type: "card", data: { card_id: cardId } });
-    let sent;
-    if (replyToMessageId) {
-      const args = [
-        "im",
-        "+messages-reply",
-        "--as",
-        "bot",
-        "--message-id",
-        replyToMessageId,
-        "--msg-type",
-        "interactive",
-        "--content",
-        content,
-        "--idempotency-key",
-        idempotencyKey(idempotencyBase, "card-reply"),
-      ];
-      if (CONFIG.useThreadReply) args.push("--reply-in-thread");
-      try {
-        sent = await larkJson(args, { timeoutMs: 60_000, attempts: 2 });
-      } catch (error) {
-        log("WARN", "card reply failed; falling back to chat send", { error: String(error.message || error) });
-      }
-    }
-
-    if (!sent) {
-      sent = await larkJson([
-        "im",
-        "+messages-send",
-        "--as",
-        "bot",
-        "--chat-id",
-        chatId,
-        "--msg-type",
-        "interactive",
-        "--content",
-        content,
-        "--idempotency-key",
-        idempotencyKey(idempotencyBase, "card-send"),
-      ], { timeoutMs: 60_000, attempts: 2 });
-    }
-
-    const messageId = findDeepKey(sent, "message_id") || "";
-    return new ManagedCard(cardId, messageId);
-  }
-
-  update(card) {
-    if (this.closed) return;
-    this.pendingCard = card;
-    if (this.pendingTimer || this.inFlight) return;
-    this.pendingTimer = setTimeout(() => {
-      this.pendingTimer = null;
-      void this.flush();
-    }, CONFIG.cardThrottleMs);
-  }
-
-  async flush(card) {
-    if (this.closed) return;
-    if (card) this.pendingCard = card;
-    if (this.pendingTimer) {
-      clearTimeout(this.pendingTimer);
-      this.pendingTimer = null;
-    }
-    if (this.inFlight) {
-      await this.inFlight.catch(() => {});
-    }
-    if (!this.pendingCard) return true;
-
-    const next = this.pendingCard;
-    this.pendingCard = null;
-    const sequence = ++this.sequence;
-    this.inFlight = (async () => {
-      try {
-        await larkJsonWithData([
-          "api",
-          "PUT",
-          `/open-apis/cardkit/v1/cards/${this.cardId}`,
-          "--as",
-          "bot",
-        ], {
-          card: { type: "card_json", data: JSON.stringify(next) },
-          sequence,
-        }, { timeoutMs: 60_000, attempts: 2 });
-        this.lastFlushOk = true;
-        return true;
-      } catch (error) {
-        this.lastFlushOk = false;
-        log("WARN", "card update failed", {
-          cardId: this.cardId,
-          sequence,
-          error: String(error.message || error).slice(0, 1000),
-        });
-        return false;
-      }
-    })();
-    const ok = await this.inFlight;
-    this.inFlight = null;
-    if (this.pendingCard && !this.closed) this.update(this.pendingCard);
-    return ok;
-  }
-
-  close() {
-    this.closed = true;
-    if (this.pendingTimer) clearTimeout(this.pendingTimer);
-    this.pendingTimer = null;
-  }
-}
-
 function createRunState(session, event, userContent) {
   const settings = effectiveSessionSettings(session);
   return {
@@ -2527,14 +2112,6 @@ function renderRunCard(state) {
   };
 }
 
-function markdown(content) {
-  return { tag: "markdown", content: cardMarkdownContent(content) };
-}
-
-function noteMd(content) {
-  return { tag: "markdown", content: cardMarkdownContent(content), text_size: "notation" };
-}
-
 function goalRunHeaderMarkdown(state, goal, elapsed) {
   const parts = [`状态：${goalStatusLabel(goal.status)}`, `运行：${elapsed}`];
   if (goal.tokensUsed) parts.push(`已用 ${formatNumber(goal.tokensUsed)} tokens`);
@@ -2548,19 +2125,6 @@ function goalRunHeaderMarkdown(state, goal, elapsed) {
     parts.join(" · "),
     "操作：/goal pause · /goal resume · /goal clear · /stop",
   ].join("\n");
-}
-
-function cardMarkdownContent(content) {
-  const lines = String(content || "").split(/\r?\n/);
-  let inFence = false;
-  return lines.map((line) => {
-    if (/^\s*(```|~~~)/.test(line)) {
-      inFence = !inFence;
-      return line;
-    }
-    if (inFence) return line;
-    return line.replace(/(^|[^`])`([^`\r\n]+)`(?!`)/g, "$1$2");
-  }).join("\n");
 }
 
 function staleCardUpdateSequence(record) {
@@ -3303,35 +2867,6 @@ function cardSummary(state) {
   if (state.footer === "tool_running") return "正在调用工具";
   if (state.footer === "streaming") return "正在输出";
   return "正在处理";
-}
-
-function truncateCardText(text, max) {
-  const value = String(text || "");
-  return value.length > max ? `${value.slice(0, max)}\n\n...(已截断)` : value;
-}
-
-function splitText(text, maxChars) {
-  const normalized = String(text || "").trim() || "(Codex 没有返回内容)";
-  if (normalized.length <= maxChars) return [normalized];
-
-  const chunks = [];
-  let rest = normalized;
-  while (rest.length > maxChars) {
-    let cut = rest.lastIndexOf("\n", maxChars);
-    if (cut < maxChars * 0.5) cut = maxChars;
-    chunks.push(rest.slice(0, cut).trimEnd());
-    rest = rest.slice(cut).trimStart();
-  }
-  if (rest) chunks.push(rest);
-  return chunks;
-}
-
-function idempotencyKey(baseId, suffix) {
-  return crypto
-    .createHash("sha256")
-    .update(`${baseId}:${suffix}`)
-    .digest("hex")
-    .slice(0, 32);
 }
 
 function safeRelativePath(value, fallback) {

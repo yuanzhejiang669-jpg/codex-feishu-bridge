@@ -213,3 +213,47 @@
 
 - 新设备 `codex-assistant-2-writing` 和 `codex-assistant-8` 第一次重启时 lark-cli 拉取飞书 tenant token 超时，第二次触发计划任务后均恢复在线。
 - 本阶段未重启控制面板，因为本次未修改控制面板代码。
+
+## 2026-07-07 阶段 9：Feishu、CardKit、进程、会话和控制面板基础层继续拆分
+
+改动：
+
+- 新增 `src/utils/json.mjs`，迁移通用 JSON 读取、宽松 JSON 解析、深层 key 查找。
+- 新增 `src/feishu/events.mjs`，迁移飞书事件类型、event id、message id、chat id、撤回事件识别。
+- 新增 `src/feishu/lark-cli.mjs`，迁移 lark-cli 调用、重试、文本/Markdown 发送、reply fallback、`--data @temp-file` 逻辑。
+- 新增 `src/feishu/cards/managed-card.mjs`，迁移 CardKit 托管卡片创建、发送、节流刷新和关闭逻辑。
+- 新增 `src/feishu/cards/primitives.mjs`，迁移 CardKit markdown 元素、notation 元素、卡片文本截断、消息分片、幂等 key。
+- 新增 `src/runtime/process-runner.mjs`，迁移 `runTool`、`terminateProcessTree`、`isProcessAlive`。
+- 新增 `src/sessions/store.mjs`，迁移 `sessions.json` 基础 store：加载、保存、当前会话获取、默认会话创建、新会话重置。
+- 新增 `src/control-panel/http.mjs`，迁移控制面板 JSON/text/binary 响应、文本/JSON 文件读取、请求 JSON 读取。
+- 新增 `src/control-panel/validation.mjs`，迁移控制面板字符串和整数输入校验。
+- 新增 `src/control-panel/environment.mjs`，迁移 Windows 用户环境变量读取和 Provider env 可见性判断。
+- `codex-feishu-bridge.mjs` 改为导入上述 Bridge 模块，保留启动、编排和高耦合运行流。
+- `control-panel.mjs` 改为导入控制面板基础模块，业务 route 行为不变。
+
+规模变化：
+
+- `codex-feishu-bridge.mjs`：约 8280 行降至 7866 行。
+- `control-panel.mjs`：约 3888 行降至 3787 行。
+- 本阶段新增模块均小于 140 行，后续 PR 可以按目录边界继续迁移。
+
+验证：
+
+- `npm run check` 通过。
+- 检查覆盖：
+  - `codex-feishu-bridge.mjs`
+  - `control-panel.mjs`
+  - `control-panel/app.js`
+  - `register-codex-feishu-bot.mjs`
+  - `src/control-panel/*.mjs`
+  - `src/feishu/**/*.mjs`
+  - `src/runtime/process-runner.mjs`
+  - `src/sessions/store.mjs`
+  - `src/utils/json.mjs`
+
+进程情况：
+
+- 本阶段已经修改 `codex-feishu-bridge.mjs`、`control-panel.mjs` 和 `src/**/*.mjs`。
+- 同步到 GitHub 和旧设备后，需要重启新旧设备所有 active run 为 0 的 Bridge Bot。
+- 因为本阶段修改了控制面板后端，控制面板也需要重启。
+- 当前记录时尚未推送 GitHub、尚未同步旧设备、尚未重启 Bot；这些动作在本地验证完成后执行。

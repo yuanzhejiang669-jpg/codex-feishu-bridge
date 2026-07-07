@@ -222,3 +222,26 @@ codex-feishu-bridge/
 - 新旧设备空闲 Bot 已重启并在线。
 - 有 active run 的 Bot 被明确列出并跳过。
 - 后续新增 Provider、命令、附件、运行时状态、会话归一化时有清晰目录入口。
+
+## 2026-07-07 追加落地方向
+
+阶段 9 已继续把以下边界落实到 `src/`：
+
+- `src/utils/json.mjs`：通用 JSON 工具。
+- `src/feishu/events.mjs`：飞书事件字段解析。
+- `src/feishu/lark-cli.mjs`：lark-cli 调用和消息发送。
+- `src/feishu/cards/managed-card.mjs`：CardKit 托管卡片。
+- `src/feishu/cards/primitives.mjs`：CardKit markdown、截断、分片、幂等 key。
+- `src/runtime/process-runner.mjs`：子进程运行、进程树终止、进程存活判断。
+- `src/sessions/store.mjs`：`sessions.json` 基础 store。
+- `src/control-panel/http.mjs`：控制面板 HTTP 响应和请求读取。
+- `src/control-panel/validation.mjs`：控制面板输入校验。
+- `src/control-panel/environment.mjs`：控制面板环境变量读取。
+
+这一步的定位仍然是“模块化单体”，不是拆微服务。后续继续迁移时优先拆：
+
+- `src/feishu/cards/render-run-card.mjs`
+- `src/sessions/codex-index.mjs`
+- `src/codex/app-server-runner.mjs`
+- `src/commands/registry.mjs`
+- `src/control-panel/routes/*.mjs`

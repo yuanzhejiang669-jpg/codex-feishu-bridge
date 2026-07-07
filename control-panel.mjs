@@ -1,11 +1,10 @@
-import { execFile, execFileSync, spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { existsSync, readFileSync } from "node:fs";
 import {
   cp,
   rm,
   mkdir,
-  readFile,
   readdir,
   stat,
   unlink,
@@ -14,6 +13,23 @@ import {
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  binaryResponse,
+  jsonResponse,
+  readJsonFile,
+  readRequestJson,
+  readTextFile,
+  textResponse,
+} from "./src/control-panel/http.mjs";
+import {
+  optionalString,
+  requireString,
+  safeInteger,
+} from "./src/control-panel/validation.mjs";
+import {
+  environmentVariableSource,
+  environmentVariableValue,
+} from "./src/control-panel/environment.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -237,137 +253,6 @@ async function writeWritableInstancesConfig(config) {
 
 function instanceDescriptors(config = loadInstancesConfig()) {
   return config.instances || [];
-}
-
-function jsonResponse(res, statusCode, payload) {
-  const body = JSON.stringify(payload, null, 2);
-  res.writeHead(statusCode, {
-    "Content-Type": "application/json; charset=utf-8",
-    "Cache-Control": "no-store",
-  });
-  res.end(body);
-}
-
-function textResponse(res, statusCode, body, contentType = "text/plain; charset=utf-8") {
-  res.writeHead(statusCode, {
-    "Content-Type": contentType,
-    "Cache-Control": "no-store",
-  });
-  res.end(body);
-}
-
-function binaryResponse(res, statusCode, body, contentType) {
-  res.writeHead(statusCode, {
-    "Content-Type": contentType,
-    "Cache-Control": "no-store",
-  });
-  res.end(body);
-}
-
-async function readTextFile(filePath) {
-  try {
-    return await readFile(filePath, "utf8");
-  } catch {
-    return null;
-  }
-}
-
-async function readJsonFile(filePath) {
-  const rawText = await readTextFile(filePath);
-  const text = rawText?.replace(/^\uFEFF/, "");
-  if (!text) return null;
-  try {
-    return JSON.parse(text);
-  } catch {
-    return null;
-  }
-}
-
-async function readRequestJson(req, maxBytes = 64_000) {
-  const chunks = [];
-  let total = 0;
-  for await (const chunk of req) {
-    total += chunk.length;
-    if (total > maxBytes) {
-      throw new Error("请求体过大");
-    }
-    chunks.push(chunk);
-  }
-  const text = Buffer.concat(chunks).toString("utf8");
-  if (!text.trim()) return {};
-  return JSON.parse(text);
-}
-
-function requireString(value, field, maxLength = 240) {
-  const text = String(value || "").trim();
-  if (!text) throw new Error(`${field} 不能为空`);
-  if (text.length > maxLength) throw new Error(`${field} 太长`);
-  return text;
-}
-
-function optionalString(value, maxLength = 500) {
-  const text = String(value || "").trim();
-  if (text.length > maxLength) throw new Error("输入内容太长");
-  return text;
-}
-
-function normalizeEnvName(name) {
-  return String(name || "").trim();
-}
-
-function readWindowsUserEnvironmentVariables() {
-  if (process.platform !== "win32") return {};
-  try {
-    const raw = execFileSync(
-      "reg.exe",
-      ["query", "HKCU\\Environment"],
-      {
-        encoding: "utf8",
-        windowsHide: true,
-        timeout: 5_000,
-        maxBuffer: 1024 * 1024,
-      },
-    );
-    const result = {};
-    for (const line of raw.split(/\r?\n/)) {
-      const match = line.match(/^\s*([^\s]+)\s+REG_(?:SZ|EXPAND_SZ)\s+(.*)$/);
-      if (!match) continue;
-      result[match[1].toUpperCase()] = match[2];
-    }
-    return result;
-  } catch {
-    return {};
-  }
-}
-
-function userEnvironmentVariable(name) {
-  const key = normalizeEnvName(name);
-  if (!key) return "";
-  const env = readWindowsUserEnvironmentVariables();
-  return env[key.toUpperCase()] || "";
-}
-
-function environmentVariableValue(name) {
-  const key = normalizeEnvName(name);
-  if (!key) return "";
-  return process.env[key] || userEnvironmentVariable(key) || "";
-}
-
-function environmentVariableSource(name) {
-  const key = normalizeEnvName(name);
-  if (!key) return "";
-  if (process.env[key]) return "process";
-  if (userEnvironmentVariable(key)) return "user";
-  return "";
-}
-
-function safeInteger(value, field, fallback, min, max) {
-  const raw = value == null || value === "" ? fallback : value;
-  const number = Number(raw);
-  if (!Number.isInteger(number) || number < min || number > max) {
-    throw new Error(`${field} 必须是 ${min} 到 ${max} 之间的整数`);
-  }
-  return number;
 }
 
 function validateFactoryPayload(payload) {
