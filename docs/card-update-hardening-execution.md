@@ -8,8 +8,8 @@
 
 - 本地新设备仓库：`C:\Users\yzjiang\Documents\Codex\tools\codex-feishu-bridge`
 - GitHub 远程仓库：`git@github.com:yuanzhejiang669-jpg/codex-feishu-bridge.git`
-- 旧设备同步：待执行
-- 新旧设备空闲 Bot 重启：待执行
+- 旧设备仓库：`C:\Users\12644\Documents\Codex\tools\codex-feishu-bridge`
+- 新旧设备空闲 Bot 重启：已执行
 
 ## 已执行变更
 
@@ -71,10 +71,86 @@
 - `codex-assistant-1` 当前有 1 个 active run，是当前对话所在 Bot，不按空闲 Bot 重启。
 - 其他已运行实例可按空闲 Bot 重启。
 
-## 待同步和重启
+## GitHub 同步
 
-- 提交并推送 GitHub
-- 同步旧设备仓库
-- 重启新设备空闲 Bot
-- 重启旧设备空闲 Bot
-- 验证新旧设备 Bridge 进程存活
+- 代码和初始文档提交：`3b8f95b8ff3d4c1bfa5b288ced93ba425e3208de`
+- GitHub `origin/main` 已推送到该提交。
+- 旧设备仓库已从 `60b20f9c31fcd7e4331be5347a75d64b9e679e45` 快进到 `3b8f95b8ff3d4c1bfa5b288ced93ba425e3208de`。
+- 旧设备 `npm run check`：通过。
+
+## 新设备重启结果
+
+控制面板状态：
+
+- 总 Bot：14
+- 在线 Bot：14
+- active run：1
+- watchdog 不健康：0
+- 代理在线：2/2
+
+已重启并在线：
+
+- `default`
+- `codex-assistant-2`
+- `codex-assistant-3`
+- `codex-assistant-4`
+- `codex-assistant-5`
+- `codex-assistant-6`
+- `codex-assistant-7`
+- `codex-assistant-8`
+- `codex-assistant-9`
+- `codex-assistant-1-writing`
+- `codex-assistant-2-writing`
+- `codex-assistant-3-writing`
+- `codex-assistant-11-writing`
+
+跳过：
+
+- `codex-assistant-1`：active run = 1，是当前对话所在 Bot，未重启。
+
+备注：
+
+- `codex-assistant-3-writing` 和 `codex-assistant-11-writing` 的控制面板 API 返回过“启动后未确认到 PID”，原因是 PID 文件读取早于 Bridge 写入；后续状态检查确认两者均已在线且 watchdog healthy。
+
+## 旧设备重启结果
+
+控制面板状态：
+
+- 总 Bot：17
+- 在线 Bot：17
+- active run：1
+- watchdog 不健康：0
+- 代理在线：2/2
+
+已重启并在线：
+
+- `codex-assistant-mobile`
+- `codex-assistant-old`
+- `codex-assistant-old1`
+- `codex-assistant-old2`
+- `codex-assistant-old3`
+- `codex-assistant-old4`
+- `codex-assistant-old5`
+- `codex-assistant-old6`
+- `codex-assistant-old7`
+- `codex-assistant-old8`
+- `codex-assistant-old9`
+- `codex-assistant-old-baike-1`
+- `codex-assistant-old-baike-2`
+- `codex-assistant-old-baike-3`
+- `codex-assistant-old-baike-4`
+- `codex-assistant-old-baike-5`
+
+跳过：
+
+- `codex-assistant-old-baike`：active run = 1，未重启。
+
+备注：
+
+- 旧设备批量触发 watchdog 后，部分日志最后一行短暂显示 `another watchdog instance is already running`。逐个触发健康检查后，所有在线 Bot 的 watchdog 状态恢复 healthy。
+
+## 结论
+
+- 新设备、旧设备、GitHub 远程仓库的功能代码已同步。
+- 修改了 `codex-feishu-bridge.mjs`，所以空闲 Bot 的 Bridge 进程确实需要重启；已经按 active run 规则完成。
+- 仍在运行任务的 Bot 已跳过，避免中断当前任务。
