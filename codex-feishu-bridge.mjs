@@ -82,6 +82,8 @@ const CONFIG = {
   cardThrottleMs: Number(process.env.CODEX_FEISHU_CARD_THROTTLE_MS || "400"),
   debugCards: (process.env.CODEX_FEISHU_CARD_DEBUG || "0") === "1",
   showFinalSteps: (process.env.CODEX_FEISHU_SHOW_FINAL_STEPS || "1") === "1",
+  maxRunningToolDetails: Number(process.env.CODEX_FEISHU_CARD_MAX_RUNNING_TOOL_DETAILS || "20"),
+  larkDataFileThreshold: Number(process.env.CODEX_FEISHU_LARK_DATA_FILE_THRESHOLD || "8000"),
   replyToMessage: (process.env.CODEX_FEISHU_REPLY_TO_MESSAGE || "0") === "1",
   useThreadReply: (process.env.CODEX_FEISHU_REPLY_IN_THREAD || "0") === "1",
   logDir: process.env.CODEX_FEISHU_LOG_DIR || path.join(DEFAULT_DATA_ROOT, "logs"),
@@ -115,6 +117,7 @@ const activeRunsPath = path.join(CONFIG.stateDir, "active-runs.json");
 const pidPath = path.join(CONFIG.stateDir, "bridge.pid");
 const lockPath = path.join(CONFIG.stateDir, "bridge.lock.json");
 const stopPath = path.join(CONFIG.stateDir, "bridge.stop");
+const larkDataTempDir = path.join(CONFIG.stateDir, "tmp");
 const eventLockScope = resolveLarkEventLockScope(CONFIG.larkProfile);
 const eventLocksDir = path.join(DEFAULT_DATA_ROOT, "event-locks", eventLockScope);
 const runtimeDir = path.join(CONFIG.workspace, ".codex-feishu-runtime");
@@ -133,6 +136,7 @@ const shouldMirrorDesktopCodexHome = Boolean(CONFIG.desktopCodexHome)
   && !sameResolvedPath(CONFIG.desktopCodexHome, CONFIG.codexHome);
 fs.mkdirSync(CONFIG.logDir, { recursive: true });
 fs.mkdirSync(CONFIG.stateDir, { recursive: true });
+fs.mkdirSync(larkDataTempDir, { recursive: true });
 fs.mkdirSync(eventLocksDir, { recursive: true });
 fs.mkdirSync(outputDir, { recursive: true });
 fs.mkdirSync(promptDir, { recursive: true });
@@ -1882,6 +1886,38 @@ async function larkJson(args, options = {}) {
   return parseJsonLoose(result.stdout) || {};
 }
 
+async function larkJsonWithData(args, data, options = {}) {
+  const payload = JSON.stringify(data);
+  if (!shouldUseLarkDataFile(payload)) {
+    return larkJson([...args, "--data", payload], options);
+  }
+
+  const dataFile = await writeLarkDataFile(payload);
+  try {
+    return await larkJson([...args, "--data", `@${dataFile}`], options);
+  } finally {
+    await fs.promises.rm(dataFile, { force: true }).catch((error) => {
+      log("WARN", "failed to remove temporary lark data file", {
+        path: dataFile,
+        error: String(error.message || error).slice(0, 500),
+      });
+    });
+  }
+}
+
+function shouldUseLarkDataFile(payload) {
+  const threshold = Math.max(0, Number(CONFIG.larkDataFileThreshold || 0));
+  return threshold === 0 || Buffer.byteLength(String(payload || ""), "utf8") > threshold;
+}
+
+async function writeLarkDataFile(payload) {
+  await fs.promises.mkdir(larkDataTempDir, { recursive: true });
+  const fileName = `lark-data-${process.pid}-${Date.now()}-${crypto.randomUUID()}.json`;
+  const dataFile = path.join(larkDataTempDir, fileName);
+  await fs.promises.writeFile(dataFile, payload, { encoding: "utf8", flag: "wx" });
+  return dataFile;
+}
+
 class ManagedCard {
   constructor(cardId, messageId) {
     this.cardId = cardId;
@@ -1895,15 +1931,13 @@ class ManagedCard {
   }
 
   static async open(chatId, replyToMessageId, initialCard, idempotencyBase) {
-    const created = await larkJson([
+    const created = await larkJsonWithData([
       "api",
       "POST",
       "/open-apis/cardkit/v1/cards",
       "--as",
       "bot",
-      "--data",
-      JSON.stringify({ type: "card_json", data: JSON.stringify(initialCard) }),
-    ], { timeoutMs: 60_000, attempts: 2 });
+    ], { type: "card_json", data: JSON.stringify(initialCard) }, { timeoutMs: 60_000, attempts: 2 });
 
     const cardId = findDeepKey(created, "card_id");
     if (!cardId) {
@@ -1983,18 +2017,16 @@ class ManagedCard {
     const sequence = ++this.sequence;
     this.inFlight = (async () => {
       try {
-        await larkJson([
+        await larkJsonWithData([
           "api",
           "PUT",
           `/open-apis/cardkit/v1/cards/${this.cardId}`,
           "--as",
           "bot",
-          "--data",
-          JSON.stringify({
-            card: { type: "card_json", data: JSON.stringify(next) },
-            sequence,
-          }),
-        ], { timeoutMs: 60_000, attempts: 2 });
+        ], {
+          card: { type: "card_json", data: JSON.stringify(next) },
+          sequence,
+        }, { timeoutMs: 60_000, attempts: 2 });
         this.lastFlushOk = true;
         return true;
       } catch (error) {
@@ -2565,15 +2597,13 @@ function renderStaleRunCard(record) {
 async function updateCardById(cardId, card, { sequence } = {}) {
   if (!cardId) return false;
   const nextSequence = Math.max(1, Math.floor(Number(sequence || 0)));
-  await larkJson([
+  await larkJsonWithData([
     "api",
     "PUT",
     `/open-apis/cardkit/v1/cards/${cardId}`,
     "--as",
     "bot",
-    "--data",
-    JSON.stringify({ card: { type: "card_json", data: JSON.stringify(card) }, sequence: nextSequence }),
-  ], { timeoutMs: 60_000, attempts: 2 });
+  ], { card: { type: "card_json", data: JSON.stringify(card) }, sequence: nextSequence }, { timeoutMs: 60_000, attempts: 2 });
   return true;
 }
 
@@ -2669,25 +2699,53 @@ function renderToolGroup(tools, finalized) {
   const prior = visibleTools.slice(0, -1);
   const latest = visibleTools[visibleTools.length - 1];
   const elements = [];
-  if (prior.length > 0) elements.push(toolSummaryPanel(prior, false));
+  if (prior.length > 0) elements.push(toolSummaryPanel(prior, false, {
+    total: visibleTools.length,
+    followedByLatest: Boolean(latest),
+  }));
   if (latest) elements.push(toolCardPanel(latest, true));
   return elements;
 }
 
-function toolSummaryPanel(tools, finalized) {
+function toolSummaryPanel(tools, finalized, options = {}) {
   const counts = toolStatusCounts(tools);
+  const total = Number.isFinite(Number(options.total)) ? Number(options.total) : tools.length;
+  const visibleRunningTools = finalized ? tools : limitRunningToolDetails(tools);
   const body = finalized
     ? toolSummaryFinalBody(tools, counts)
-    : tools.map((tool) => `- ${toolHeaderText(tool, false)}`).join("\n");
+    : toolSummaryRunningBody(visibleRunningTools, {
+        omitted: Math.max(0, tools.length - visibleRunningTools.length),
+        followedByLatest: Boolean(options.followedByLatest),
+      });
   return {
     tag: "collapsible_panel",
     expanded: !finalized,
-    header: panelHeader(`**${toolSummaryTitle(tools.length, counts, finalized)}**`),
+    header: panelHeader(`**${toolSummaryTitle(total, counts, finalized)}**`),
     border: { color: counts.error ? "red" : "blue", corner_radius: "5px" },
     vertical_spacing: "8px",
     padding: "8px 8px 8px 8px",
     elements: [{ tag: "markdown", content: cardMarkdownContent(body || "_暂无步骤_"), text_size: "notation" }],
   };
+}
+
+function limitRunningToolDetails(tools) {
+  const limit = Math.max(1, Math.floor(Number(CONFIG.maxRunningToolDetails || 20)));
+  if (tools.length <= limit) return tools;
+  return tools.slice(-limit);
+}
+
+function toolSummaryRunningBody(tools, { omitted = 0, followedByLatest = false } = {}) {
+  const lines = [];
+  if (omitted > 0) {
+    lines.push(`只显示最近 ${tools.length} 个历史步骤；更早 ${omitted} 个已折叠，完整过程仍在本机日志中。`);
+    lines.push("");
+  }
+  if (followedByLatest) {
+    lines.push("当前步骤在下方展开。");
+    lines.push("");
+  }
+  lines.push(...tools.map((tool) => `- ${toolHeaderText(tool, false)}`));
+  return lines.join("\n");
 }
 
 function toolStatusCounts(tools) {
@@ -2700,7 +2758,7 @@ function toolStatusCounts(tools) {
 }
 
 function toolSummaryTitle(total, counts, finalized) {
-  if (!finalized) return `${total} 个步骤已执行`;
+  if (!finalized) return `${total} 个步骤已记录`;
   const parts = [`${total} 个步骤已完成`];
   if (counts.error) parts.push(`${counts.error} 个需查看`);
   return parts.join(" · ");
@@ -8775,6 +8833,8 @@ function startConsumer() {
     cardThrottleMs: CONFIG.cardThrottleMs,
     debugCards: CONFIG.debugCards,
     showFinalSteps: CONFIG.showFinalSteps,
+    maxRunningToolDetails: CONFIG.maxRunningToolDetails,
+    larkDataFileThreshold: CONFIG.larkDataFileThreshold,
     replyToMessage: CONFIG.replyToMessage,
     replyInThread: CONFIG.useThreadReply,
     sidebarReconcileIntervalMs: CONFIG.sidebarReconcileIntervalMs,
