@@ -7,6 +7,15 @@ export function createManagedCardClass({
   cardThrottleMs = 400,
   log = () => {},
 } = {}) {
+  function sequenceFloor() {
+    return Math.floor(Date.now() / 1000);
+  }
+
+  function isSequenceCompareError(error) {
+    const text = String(error?.message || error || "");
+    return text.includes("300317") || /sequence\s+number\s+compare\s+failed/i.test(text);
+  }
+
   return class ManagedCard {
     constructor(cardId, messageId) {
       this.cardId = cardId;
@@ -17,6 +26,11 @@ export function createManagedCardClass({
       this.inFlight = null;
       this.closed = false;
       this.lastFlushOk = true;
+    }
+
+    nextSequence(minimum = sequenceFloor()) {
+      this.sequence = Math.max(this.sequence + 1, Math.floor(Number(minimum) || 0));
+      return this.sequence;
     }
 
     static async open(chatId, replyToMessageId, initialCard, idempotencyBase) {
@@ -103,27 +117,36 @@ export function createManagedCardClass({
 
       const next = this.pendingCard;
       this.pendingCard = null;
-      const sequence = ++this.sequence;
       this.inFlight = (async () => {
+        let sequence = this.nextSequence();
         try {
-          await larkJsonWithData([
-            "api",
-            "PUT",
-            `/open-apis/cardkit/v1/cards/${this.cardId}`,
-            "--as",
-            "bot",
-          ], {
-            card: { type: "card_json", data: JSON.stringify(next) },
-            sequence,
-          }, { timeoutMs: 60_000, attempts: 2 });
+          await this.putCard(next, sequence);
           this.lastFlushOk = true;
           return true;
         } catch (error) {
+          let finalError = error;
+          if (isSequenceCompareError(error)) {
+            const retrySequence = this.nextSequence(sequence + 1000);
+            log("WARN", "card update sequence conflict; retrying", {
+              cardId: this.cardId,
+              sequence,
+              retrySequence,
+              error: String(error.message || error).slice(0, 1000),
+            });
+            try {
+              await this.putCard(next, retrySequence);
+              this.lastFlushOk = true;
+              return true;
+            } catch (retryError) {
+              sequence = retrySequence;
+              finalError = retryError;
+            }
+          }
           this.lastFlushOk = false;
           log("WARN", "card update failed", {
             cardId: this.cardId,
             sequence,
-            error: String(error.message || error).slice(0, 1000),
+            error: String(finalError.message || finalError).slice(0, 1000),
           });
           return false;
         }
@@ -132,6 +155,19 @@ export function createManagedCardClass({
       this.inFlight = null;
       if (this.pendingCard && !this.closed) this.update(this.pendingCard);
       return ok;
+    }
+
+    async putCard(card, sequence) {
+      await larkJsonWithData([
+        "api",
+        "PUT",
+        `/open-apis/cardkit/v1/cards/${this.cardId}`,
+        "--as",
+        "bot",
+      ], {
+        card: { type: "card_json", data: JSON.stringify(card) },
+        sequence,
+      }, { timeoutMs: 60_000, attempts: 2 });
     }
 
     close() {

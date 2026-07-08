@@ -20,7 +20,7 @@ export function createLarkClient({
     const attempts = options.attempts ?? 3;
     let last;
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
-      last = await runTool(larkCli, args, { timeoutMs: options.timeoutMs || 60_000 });
+      last = await runTool(larkCli, args, { ...options, timeoutMs: options.timeoutMs || 60_000 });
       if (last.code === 0) return last;
       if (attempt < attempts && isTransientLarkError(last)) {
         await delay(1500 * attempt);
@@ -106,7 +106,10 @@ export function createLarkClient({
 
     const dataFile = await writeLarkDataFile(payload);
     try {
-      return await larkJson([...args, "--data", `@${dataFile}`], options);
+      return await larkJson([...args, "--data", `@${path.basename(dataFile)}`], {
+        ...options,
+        cwd: path.dirname(dataFile),
+      });
     } finally {
       await fs.promises.rm(dataFile, { force: true }).catch((error) => {
         log("WARN", "failed to remove temporary lark data file", {
