@@ -17,13 +17,17 @@ export function createProcessRunner({
 
     const stdoutChunks = [];
     const stderrChunks = [];
+    let stdinError = null;
     child.stdout.on("data", (chunk) => stdoutChunks.push(chunk));
     child.stderr.on("data", (chunk) => stderrChunks.push(chunk));
+    child.stdin.on("error", (error) => {
+      stdinError = error;
+    });
 
-    if (options.stdin) {
-      child.stdin.end(options.stdin);
-    } else {
-      child.stdin.end();
+    try {
+      child.stdin.end(options.stdin || "");
+    } catch (error) {
+      stdinError = error;
     }
 
     return new Promise((resolve, reject) => {
@@ -41,7 +45,10 @@ export function createProcessRunner({
         if (timer) clearTimeout(timer);
         activeChildren.delete(child.pid);
         const stdout = Buffer.concat(stdoutChunks).toString("utf8");
-        const stderr = Buffer.concat(stderrChunks).toString("utf8");
+        const stderr = [
+          Buffer.concat(stderrChunks).toString("utf8"),
+          stdinError ? `stdin error: ${stdinError.message}` : "",
+        ].filter(Boolean).join("\n");
         resolve({ code, stdout, stderr, timedOut, pid: child.pid });
       });
     });
