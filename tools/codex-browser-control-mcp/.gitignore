@@ -1,0 +1,11 @@
+node_modules/
+
+# Local extension secrets and runtime output
+extension/codex_browser_bridge/bridge-token.local.js
+screenshots/
+traces/
+*.log
+
+# Python/runtime caches
+__pycache__/
+*.pyc

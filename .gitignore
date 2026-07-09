@@ -12,6 +12,9 @@ config.toml
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+**/bridge-token.local.js
+**/*key-pool*.json
+**/*router-state*.json
 
 # Bridge runtime state and logs
 state/
@@ -29,6 +32,12 @@ watchdog-last-restart.txt
 codex-output/
 codex-prompts/
 .codex-feishu-attachments/
+**/__pycache__/
+**/*.pyc
+**/.context/
+**/screenshots/
+**/traces/
+**/node_modules/
 
 # Local workspace contents are intentionally not versioned.
 workspace/*

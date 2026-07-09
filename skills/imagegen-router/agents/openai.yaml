@@ -1,0 +1,7 @@
+interface:
+  display_name: "Imagegen Router"
+  short_description: "Route GPT Image 2 across custom endpoints."
+  default_prompt: "Use $imagegen-router to generate an image with the best available third-party GPT Image 2 endpoint."
+
+policy:
+  allow_implicit_invocation: true

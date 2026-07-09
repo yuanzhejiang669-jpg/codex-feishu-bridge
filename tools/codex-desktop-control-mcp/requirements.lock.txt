@@ -1,0 +1,8 @@
+mcp==1.26.0
+pillow==12.1.1
+pywin32==311
+rapidocr-onnxruntime==1.4.4
+numpy==2.4.3
+ultralytics==8.4.41
+comtypes==1.4.16
+uiautomation==2.0.29

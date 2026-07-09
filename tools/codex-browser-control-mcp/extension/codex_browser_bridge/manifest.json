@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "Codex Browser Control Bridge (18795)",
+  "version": "1.0.0",
+  "description": "Codex-only MCP browser bridge on 127.0.0.1:18795 for cookies, tabs, CDP, batch commands, and logged-in browser control",
+  "permissions": [
+    "cookies",
+    "tabs",
+    "activeTab",
+    "debugger",
+    "scripting",
+    "alarms"
+  ],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["config.js", "content.js"],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Codex Browser Control Bridge (18795)"
+  }
+}

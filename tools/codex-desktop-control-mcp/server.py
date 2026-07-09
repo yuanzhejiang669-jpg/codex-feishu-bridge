@@ -1,0 +1,1659 @@
+﻿from __future__ import annotations
+
+import base64
+import importlib.util
+import io
+import math
+import os
+import re
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+from mcp.server.fastmcp import FastMCP
+
+from diagnostics import fail as _fail
+from diagnostics import ui_model_install_payload as _build_ui_model_install_payload
+
+mcp = FastMCP('codex-desktop-control')
+
+try:
+    import numpy as _NUMPY
+except Exception as _numpy_exc:
+    _NUMPY = None
+    _NUMPY_IMPORT_ERROR = _numpy_exc
+else:
+    _NUMPY_IMPORT_ERROR = None
+
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+
+
+def _module_available(module: str) -> bool:
+    return importlib.util.find_spec(module) is not None
+
+
+def _get_numpy():
+    if _NUMPY is None:
+        raise ImportError(f'numpy is not available: {_NUMPY_IMPORT_ERROR}')
+    return _NUMPY
+
+
+def _set_process_dpi_awareness() -> bool:
+    try:
+        from ctypes import windll
+
+        try:
+            return windll.shcore.SetProcessDpiAwareness(2) == 0
+        except Exception:
+            return bool(windll.user32.SetProcessDPIAware())
+    except Exception:
+        return False
+
+
+DPI_AWARE = _set_process_dpi_awareness()
+DEFAULT_OUTPUT_DIR = Path(os.environ.get('CODEX_DESKTOP_CONTROL_OUTPUT_DIR', Path.cwd() / '.context' / 'desktop-control')).expanduser().resolve()
+DEFAULT_UI_MODEL_PATH = Path(os.environ.get('CODEX_DESKTOP_CONTROL_UI_MODEL_PATH', DEFAULT_OUTPUT_DIR / 'weights' / 'icon_detect' / 'model.pt')).expanduser().resolve()
+_RAPID_ENGINE = None
+_YOLO_MODELS: dict[str, Any] = {}
+MAX_OCR_PIXELS = 12_000_000
+UIA_OPTIONAL_MODULES = ('uiautomation', 'pywinauto', 'comtypes')
+
+
+def _ui_model_install_payload() -> dict[str, Any]:
+    script = Path(__file__).resolve().parent / 'scripts' / 'install_ui_model.py'
+    return _build_ui_model_install_payload(DEFAULT_UI_MODEL_PATH, script)
+
+
+def _import_pil():
+    from PIL import Image, ImageGrab
+
+    return Image, ImageGrab
+
+
+def _import_win32():
+    import win32api
+    import win32con
+    import win32gui
+    import win32ui
+    import win32clipboard
+    from ctypes import windll
+
+    return win32api, win32con, win32gui, win32ui, win32clipboard, windll
+
+
+def _get_screen_info() -> dict[str, Any]:
+    win32api, win32con, _win32gui, _win32ui, _clip, windll = _import_win32()
+    hdc = windll.user32.GetDC(0)
+    primary_physical_width = windll.gdi32.GetDeviceCaps(hdc, 118)
+    primary_physical_height = windll.gdi32.GetDeviceCaps(hdc, 117)
+    windll.user32.ReleaseDC(0, hdc)
+    primary_width = win32api.GetSystemMetrics(win32con.SM_CXSCREEN)
+    primary_height = win32api.GetSystemMetrics(win32con.SM_CYSCREEN)
+    virtual_left = win32api.GetSystemMetrics(getattr(win32con, 'SM_XVIRTUALSCREEN', 76))
+    virtual_top = win32api.GetSystemMetrics(getattr(win32con, 'SM_YVIRTUALSCREEN', 77))
+    virtual_width = win32api.GetSystemMetrics(getattr(win32con, 'SM_CXVIRTUALSCREEN', 78))
+    virtual_height = win32api.GetSystemMetrics(getattr(win32con, 'SM_CYVIRTUALSCREEN', 79))
+    return {
+        'primary_width': primary_width,
+        'primary_height': primary_height,
+        'primary_physical_width': primary_physical_width,
+        'primary_physical_height': primary_physical_height,
+        'physical_width': virtual_width,
+        'physical_height': virtual_height,
+        'virtual_left': virtual_left,
+        'virtual_top': virtual_top,
+        'virtual_right': virtual_left + virtual_width,
+        'virtual_bottom': virtual_top + virtual_height,
+        'virtual_width': virtual_width,
+        'virtual_height': virtual_height,
+        'dpi_aware': DPI_AWARE,
+        'coordinate_system': 'virtual_screen_physical_pixels',
+    }
+
+
+def _is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def _resolve_output_path(path: str | None, default_name: str, suffix: str) -> Path:
+    DEFAULT_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    if path:
+        candidate = Path(path).expanduser()
+        if not candidate.is_absolute():
+            candidate = DEFAULT_OUTPUT_DIR / candidate
+        resolved = candidate.resolve()
+    else:
+        safe = re.sub(r'[^A-Za-z0-9_.-]+', '_', default_name).strip('_') or 'capture'
+        resolved = (DEFAULT_OUTPUT_DIR / f'{safe}{suffix}').resolve()
+    if not resolved.suffix:
+        resolved = resolved.with_suffix(suffix)
+    if not _is_relative_to(resolved, DEFAULT_OUTPUT_DIR):
+        raise ValueError(f'path must be inside output_dir: {DEFAULT_OUTPUT_DIR}')
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    return resolved
+
+
+def _resolve_input_path(path: str) -> Path:
+    candidate = Path(path).expanduser()
+    if not candidate.is_absolute():
+        candidate = DEFAULT_OUTPUT_DIR / candidate
+    resolved = candidate.resolve()
+    if not _is_relative_to(resolved, DEFAULT_OUTPUT_DIR):
+        raise ValueError(f'image_path must be inside output_dir: {DEFAULT_OUTPUT_DIR}')
+    if not resolved.is_file():
+        raise ValueError(f'image_path does not exist: {resolved}')
+    return resolved
+
+
+def _resolve_model_path() -> Path:
+    resolved = DEFAULT_UI_MODEL_PATH
+    if not _is_relative_to(resolved, DEFAULT_OUTPUT_DIR / 'weights'):
+        raise ValueError(f'UI detection model must be inside weights dir: {DEFAULT_OUTPUT_DIR / "weights"}')
+    if not resolved.is_file():
+        raise ValueError(f'UI detection model not found: {resolved}')
+    return resolved
+
+
+def _image_to_payload(img, *, include_data: bool, path: str | None, format: str, default_name: str = 'capture') -> dict[str, Any]:
+    fmt = 'PNG' if format.lower() == 'png' else 'JPEG'
+    suffix = '.png' if fmt == 'PNG' else '.jpg'
+    out = _resolve_output_path(path, default_name, suffix)
+    img.save(out, format=fmt)
+    data = None
+    if include_data:
+        buffer = io.BytesIO()
+        img.save(buffer, format=fmt)
+        data = base64.b64encode(buffer.getvalue()).decode('ascii')
+    return {
+        'ok': True,
+        'width': img.width,
+        'height': img.height,
+        'path': str(out),
+        'format': format.lower(),
+        'data_base64': data,
+        'coordinate_system': 'virtual_screen_physical_pixels',
+    }
+
+
+def _normalize_bbox(bbox: list[int] | tuple[int, int, int, int] | None):
+    if bbox is None:
+        return None
+    if len(bbox) != 4:
+        raise ValueError('bbox must contain [left, top, right, bottom]')
+    left, top, right, bottom = tuple(int(v) for v in bbox)
+    if right <= left or bottom <= top:
+        raise ValueError('bbox right/bottom must be greater than left/top')
+    return left, top, right, bottom
+
+
+def _is_probably_blank_image(img) -> bool:
+    try:
+        from PIL import ImageStat
+
+        sample = img.convert('L')
+        sample.thumbnail((96, 96))
+        stat = ImageStat.Stat(sample)
+        extrema = stat.extrema[0]
+        return (extrema[1] - extrema[0]) <= 2 and stat.stddev[0] <= 1.0
+    except Exception:
+        return False
+
+
+def _image_diagnostics(img) -> dict[str, Any]:
+    try:
+        from PIL import ImageStat
+
+        sample = img.convert('L')
+        sample.thumbnail((96, 96))
+        stat = ImageStat.Stat(sample)
+        extrema = stat.extrema[0]
+        return {
+            'probably_blank': (extrema[1] - extrema[0]) <= 2 and stat.stddev[0] <= 1.0,
+            'luma_extrema': [float(extrema[0]), float(extrema[1])],
+            'luma_stddev': float(stat.stddev[0]),
+        }
+    except Exception as exc:
+        return {'error': str(exc)}
+
+
+def _trace_self_check(label: str) -> None:
+    if not os.environ.get('CODEX_DESKTOP_CONTROL_TRACE_SELF_CHECK'):
+        return
+    try:
+        DEFAULT_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        with (DEFAULT_OUTPUT_DIR / 'self_check_trace.log').open('a', encoding='utf-8') as handle:
+            handle.write(f'{time.time():.3f} {label}\n')
+    except Exception:
+        pass
+
+
+def _client_rect_on_screen(hwnd: int) -> tuple[int, int, int, int]:
+    _api, _con, win32gui, _ui, _clip, _windll = _import_win32()
+    left, top = win32gui.ClientToScreen(hwnd, (0, 0))
+    _client_left, _client_top, width, height = win32gui.GetClientRect(hwnd)
+    return left, top, left + width, top + height
+
+
+def _capture_window(hwnd: int, client_area: bool = False):
+    Image, ImageGrab = _import_pil()
+    _win32api, _win32con, win32gui, win32ui, _clip, windll = _import_win32()
+    window_left, window_top, window_right, window_bottom = win32gui.GetWindowRect(hwnd)
+    left, top, right, bottom = _client_rect_on_screen(hwnd) if client_area else (window_left, window_top, window_right, window_bottom)
+    width, height = window_right - window_left, window_bottom - window_top
+    if width <= 0 or height <= 0:
+        raise ValueError('window has empty bounds')
+    hwnd_dc = win32gui.GetWindowDC(hwnd)
+    mfc_dc = win32ui.CreateDCFromHandle(hwnd_dc)
+    save_dc = mfc_dc.CreateCompatibleDC()
+    bitmap = win32ui.CreateBitmap()
+    try:
+        bitmap.CreateCompatibleBitmap(mfc_dc, width, height)
+        save_dc.SelectObject(bitmap)
+        ok = windll.user32.PrintWindow(hwnd, save_dc.GetSafeHdc(), 3)
+        if not ok:
+            return ImageGrab.grab(bbox=(left, top, right, bottom))
+        bmpinfo = bitmap.GetInfo()
+        bmpstr = bitmap.GetBitmapBits(True)
+        img = Image.frombuffer('RGB', (bmpinfo['bmWidth'], bmpinfo['bmHeight']), bmpstr, 'raw', 'BGRX', 0, 1)
+        if client_area:
+            crop_box = (
+                max(0, left - window_left),
+                max(0, top - window_top),
+                min(img.width, right - window_left),
+                min(img.height, bottom - window_top),
+            )
+            img = img.crop(crop_box)
+        if _is_probably_blank_image(img):
+            return ImageGrab.grab(bbox=(left, top, right, bottom))
+        return img
+    finally:
+        win32gui.DeleteObject(bitmap.GetHandle())
+        save_dc.DeleteDC()
+        mfc_dc.DeleteDC()
+        win32gui.ReleaseDC(hwnd, hwnd_dc)
+
+
+def _capture_screen(bbox=None):
+    _Image, ImageGrab = _import_pil()
+    if bbox is not None:
+        return ImageGrab.grab(bbox=bbox, all_screens=True)
+    screen = _get_screen_info()
+    return ImageGrab.grab(
+        bbox=(screen['virtual_left'], screen['virtual_top'], screen['virtual_right'], screen['virtual_bottom']),
+        all_screens=True,
+    )
+
+
+def _window_matches(title: str, title_contains: str | None) -> bool:
+    if not title_contains:
+        return True
+    return title_contains.lower() in title.lower()
+
+
+def _list_windows(title_contains: str | None = None, visible_only: bool = True) -> list[dict[str, Any]]:
+    _api, _con, win32gui, _ui, _clip, _windll = _import_win32()
+    windows: list[dict[str, Any]] = []
+
+    def callback(hwnd, _extra):
+        if visible_only and not win32gui.IsWindowVisible(hwnd):
+            return
+        title = win32gui.GetWindowText(hwnd)
+        if not title or not _window_matches(title, title_contains):
+            return
+        left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+        windows.append({
+            'hwnd': int(hwnd),
+            'title': title,
+            'rect': [left, top, right, bottom],
+            'width': right - left,
+            'height': bottom - top,
+            'coordinate_system': 'virtual_screen_physical_pixels',
+        })
+
+    win32gui.EnumWindows(callback, None)
+    return windows
+
+
+def _resolve_hwnd(hwnd: int | None = None, title_contains: str | None = None) -> int:
+    if hwnd:
+        return int(hwnd)
+    matches = _list_windows(title_contains=title_contains, visible_only=True)
+    if not matches:
+        raise ValueError('no matching window found')
+    return int(matches[0]['hwnd'])
+
+
+def _activate(hwnd: int) -> dict[str, Any]:
+    win32api, _con, win32gui, _ui, _clip, windll = _import_win32()
+    if win32gui.IsIconic(hwnd):
+        win32gui.ShowWindow(hwnd, 9)
+    else:
+        win32gui.ShowWindow(hwnd, 5)
+    time.sleep(0.1)
+    last_error = None
+    try:
+        win32gui.SetForegroundWindow(hwnd)
+    except Exception as exc:
+        last_error = exc
+        try:
+            foreground = win32gui.GetForegroundWindow()
+            current_thread = win32api.GetCurrentThreadId()
+            target_thread = windll.user32.GetWindowThreadProcessId(hwnd, None)
+            foreground_thread = windll.user32.GetWindowThreadProcessId(foreground, None) if foreground else 0
+            if target_thread:
+                windll.user32.AttachThreadInput(current_thread, target_thread, True)
+            if foreground_thread:
+                windll.user32.AttachThreadInput(current_thread, foreground_thread, True)
+            try:
+                win32gui.BringWindowToTop(hwnd)
+                win32gui.SetForegroundWindow(hwnd)
+            finally:
+                if foreground_thread:
+                    windll.user32.AttachThreadInput(current_thread, foreground_thread, False)
+                if target_thread:
+                    windll.user32.AttachThreadInput(current_thread, target_thread, False)
+        except Exception as fallback_exc:
+            raise RuntimeError(f'failed to activate window: {fallback_exc}; initial error: {last_error}') from fallback_exc
+    time.sleep(0.2)
+    title = win32gui.GetWindowText(hwnd)
+    rect = list(win32gui.GetWindowRect(hwnd))
+    return {'ok': True, 'hwnd': int(hwnd), 'title': title, 'rect': rect, 'coordinate_system': 'virtual_screen_physical_pixels'}
+
+
+def _foreground_window_info() -> dict[str, Any]:
+    _api, _con, win32gui, _ui, _clip, _windll = _import_win32()
+    hwnd = win32gui.GetForegroundWindow()
+    if not hwnd:
+        return {'hwnd': None, 'title': '', 'rect': None}
+    return {
+        'hwnd': int(hwnd),
+        'title': win32gui.GetWindowText(hwnd),
+        'rect': list(win32gui.GetWindowRect(hwnd)),
+    }
+
+
+def _get_rapid_ocr():
+    global _RAPID_ENGINE
+    if _RAPID_ENGINE is None:
+        from rapidocr_onnxruntime import RapidOCR
+
+        _RAPID_ENGINE = RapidOCR()
+    return _RAPID_ENGINE
+
+
+def _get_yolo_model():
+    resolved = str(_resolve_model_path())
+    from ultralytics import YOLO
+
+    if resolved not in _YOLO_MODELS:
+        _YOLO_MODELS[resolved] = YOLO(resolved)
+    return _YOLO_MODELS[resolved], resolved
+
+
+def _ocr_image(img, enhance: bool = False) -> dict[str, Any]:
+    from PIL import ImageEnhance
+    np = _get_numpy()
+
+    scale = 1.0
+    if enhance:
+        target_scale = 3.0
+        if img.width * img.height * target_scale * target_scale > MAX_OCR_PIXELS:
+            target_scale = max(1.0, math.sqrt(MAX_OCR_PIXELS / max(1, img.width * img.height)))
+        scale = target_scale
+        img = ImageEnhance.Contrast(img).enhance(3.0)
+        if scale > 1.0:
+            img = img.resize((int(img.width * scale), int(img.height * scale)))
+    result, _elapsed = _get_rapid_ocr()(np.array(img))
+    if not result:
+        return {'text': '', 'lines': [], 'details': []}
+    details = []
+    lines = []
+    for item in result:
+        bbox, text, conf = item
+        text = re.sub(r'(?<=[一-鿿])\s+(?=[一-鿿])', '', str(text))
+        points = [[float(point[0]) / scale, float(point[1]) / scale] for point in bbox]
+        lines.append(text)
+        details.append({'bbox': points, 'text': text, 'confidence': float(conf)})
+    return {'text': '\n'.join(lines), 'lines': lines, 'details': details}
+
+
+def _get_bbox_geometry(points: list[list[float]]) -> dict[str, Any]:
+    xs = [float(point[0]) for point in points]
+    ys = [float(point[1]) for point in points]
+    return {
+        'bbox': [[min(xs), min(ys)], [max(xs), min(ys)], [max(xs), max(ys)], [min(xs), max(ys)]],
+        'rect': [min(xs), min(ys), max(xs), max(ys)],
+        'center': [sum(xs) / len(xs), sum(ys) / len(ys)],
+    }
+
+
+def _to_screen_geometry(geometry: dict[str, Any], origin: list[float], coordinate_space: str) -> dict[str, Any]:
+    if coordinate_space != 'virtual_screen_physical_pixels':
+        return {'screen_center': None, 'screen_bbox': None, 'screen_rect': None}
+    screen_bbox = [[origin[0] + float(point[0]), origin[1] + float(point[1])] for point in geometry['bbox']]
+    screen_rect = [
+        origin[0] + float(geometry['rect'][0]),
+        origin[1] + float(geometry['rect'][1]),
+        origin[0] + float(geometry['rect'][2]),
+        origin[1] + float(geometry['rect'][3]),
+    ]
+    screen_center = [origin[0] + float(geometry['center'][0]), origin[1] + float(geometry['center'][1])]
+    return {'screen_center': screen_center, 'screen_bbox': screen_bbox, 'screen_rect': screen_rect}
+
+
+def _dilate_mask(mask, iterations: int = 2):
+    np = _get_numpy()
+
+    result = mask
+    for _ in range(max(0, iterations)):
+        padded = np.pad(result, 1, mode='constant', constant_values=False)
+        result = (
+            padded[1:-1, 1:-1]
+            | padded[:-2, 1:-1]
+            | padded[2:, 1:-1]
+            | padded[1:-1, :-2]
+            | padded[1:-1, 2:]
+            | padded[:-2, :-2]
+            | padded[:-2, 2:]
+            | padded[2:, :-2]
+            | padded[2:, 2:]
+        )
+    return result
+
+
+def _detect_visual_ui_candidates(img, conf_threshold: float = 0.25, max_candidates: int = 80) -> list[dict[str, Any]]:
+    np = _get_numpy()
+
+    if img.width <= 0 or img.height <= 0:
+        return []
+    max_dim = max(img.width, img.height)
+    scale = min(1.0, 900.0 / float(max_dim))
+    work = img.convert('L')
+    if scale < 1.0:
+        work = work.resize((max(1, int(img.width * scale)), max(1, int(img.height * scale))))
+
+    arr = np.asarray(work, dtype=np.int16)
+    gx = np.abs(arr[:, 1:] - arr[:, :-1])
+    gy = np.abs(arr[1:, :] - arr[:-1, :])
+    edge = np.zeros_like(arr, dtype=np.int16)
+    edge[:, 1:] = np.maximum(edge[:, 1:], gx)
+    edge[1:, :] = np.maximum(edge[1:, :], gy)
+
+    mask = None
+    for percentile in (88, 92, 96):
+        threshold = max(12, float(np.percentile(edge, percentile)))
+        candidate = edge >= threshold
+        density = float(candidate.mean()) if candidate.size else 0.0
+        mask = candidate
+        if density <= 0.18:
+            break
+    if mask is None or not mask.any():
+        return []
+
+    mask = _dilate_mask(mask, iterations=2)
+    height, width = mask.shape
+    visited = np.zeros_like(mask, dtype=bool)
+    detections: list[dict[str, Any]] = []
+    min_area = max(24, int(width * height * 0.00012))
+    max_area = max(min_area + 1, int(width * height * 0.25))
+
+    for y in range(height):
+        xs = np.flatnonzero(mask[y] & ~visited[y])
+        for start_x in xs:
+            if visited[y, start_x] or not mask[y, start_x]:
+                continue
+            stack = [(int(start_x), int(y))]
+            visited[y, start_x] = True
+            min_x = max_x = int(start_x)
+            min_y = max_y = int(y)
+            area = 0
+            while stack:
+                x, yy = stack.pop()
+                area += 1
+                if x < min_x:
+                    min_x = x
+                elif x > max_x:
+                    max_x = x
+                if yy < min_y:
+                    min_y = yy
+                elif yy > max_y:
+                    max_y = yy
+                for nx, ny in ((x - 1, yy), (x + 1, yy), (x, yy - 1), (x, yy + 1)):
+                    if nx < 0 or ny < 0 or nx >= width or ny >= height:
+                        continue
+                    if visited[ny, nx] or not mask[ny, nx]:
+                        continue
+                    visited[ny, nx] = True
+                    stack.append((nx, ny))
+
+            box_w = max_x - min_x + 1
+            box_h = max_y - min_y + 1
+            if area < min_area or area > max_area or box_w < 8 or box_h < 6:
+                continue
+            aspect = box_w / max(1, box_h)
+            if aspect > 25 or aspect < 0.04:
+                continue
+            fill_ratio = area / max(1, box_w * box_h)
+            confidence = max(0.25, min(0.95, 0.25 + fill_ratio))
+            if confidence < conf_threshold:
+                continue
+            inv_scale = 1.0 / scale
+            x1 = float(min_x) * inv_scale
+            y1 = float(min_y) * inv_scale
+            x2 = float(max_x + 1) * inv_scale
+            y2 = float(max_y + 1) * inv_scale
+            geometry = _get_bbox_geometry([[x1, y1], [x2, y1], [x2, y2], [x1, y2]])
+            detections.append({
+                **geometry,
+                'confidence': float(confidence),
+                'class': 'visual_region',
+                'detector': 'visual_fallback',
+                'area': int(area),
+            })
+
+    detections.sort(key=lambda item: (item['confidence'], (item['rect'][2] - item['rect'][0]) * (item['rect'][3] - item['rect'][1])), reverse=True)
+    return detections[:max_candidates]
+
+
+def _capture_source(
+    *,
+    image_path: str | None = None,
+    hwnd: int | None = None,
+    title_contains: str | None = None,
+    bbox: list[int] | None = None,
+    client_area: bool = False,
+):
+    if image_path:
+        Image, _ImageGrab = _import_pil()
+        resolved = _resolve_input_path(image_path)
+        with Image.open(resolved) as opened:
+            img = opened.convert('RGB').copy()
+        return img, [0.0, 0.0], 'image_pixels', {'type': 'image_path', 'path': str(resolved)}
+    if hwnd or title_contains:
+        resolved = _resolve_hwnd(hwnd=hwnd, title_contains=title_contains)
+        _api, _con, win32gui, _ui, _clip, _windll = _import_win32()
+        left, top, right, bottom = _client_rect_on_screen(resolved) if client_area else win32gui.GetWindowRect(resolved)
+        return _capture_window(resolved, client_area=client_area), [float(left), float(top)], 'virtual_screen_physical_pixels', {
+            'type': 'window',
+            'hwnd': int(resolved),
+            'rect': [left, top, right, bottom],
+            'client_area': bool(client_area),
+        }
+    normalized = _normalize_bbox(bbox)
+    screen = _get_screen_info()
+    origin = [float(normalized[0]), float(normalized[1])] if normalized else [float(screen['virtual_left']), float(screen['virtual_top'])]
+    return _capture_screen(normalized), origin, 'virtual_screen_physical_pixels', {'type': 'screen', 'bbox': list(normalized) if normalized else None}
+
+
+def _send_hotkey(keys: list[str], delay_seconds: float = 0.02) -> None:
+    win32api, win32con, _gui, _ui, _clip, _windll = _import_win32()
+    key_map = {
+        'backspace': 0x08, 'tab': 0x09, 'enter': 0x0D, 'shift': 0x10, 'ctrl': 0x11,
+        'control': 0x11, 'alt': 0x12, 'esc': 0x1B, 'escape': 0x1B, 'space': 0x20,
+        'page_up': 0x21, 'page_down': 0x22, 'end': 0x23, 'home': 0x24,
+        'left': 0x25, 'up': 0x26, 'right': 0x27, 'down': 0x28, 'insert': 0x2D,
+        'ins': 0x2D, 'delete': 0x2E, 'del': 0x2E, 'win': 0x5B,
+    }
+    for i in range(1, 25):
+        key_map[f'f{i}'] = 0x6F + i
+    for char in '0123456789abcdefghijklmnopqrstuvwxyz':
+        key_map[char] = ord(char.upper())
+    codes = []
+    for key in keys:
+        normalized = key.strip().lower()
+        if not normalized:
+            continue
+        if normalized not in key_map:
+            raise ValueError(f'unsupported key: {key}')
+        codes.append(key_map[normalized])
+    pressed = []
+    try:
+        for code in codes:
+            win32api.keybd_event(code, 0, 0, 0)
+            pressed.append(code)
+            time.sleep(delay_seconds)
+    finally:
+        for code in reversed(pressed):
+            win32api.keybd_event(code, 0, win32con.KEYEVENTF_KEYUP, 0)
+            time.sleep(delay_seconds)
+
+
+def _open_clipboard_with_retry(retries: int = 10, delay_seconds: float = 0.05) -> None:
+    _api, _con, _gui, _ui, win32clipboard, _windll = _import_win32()
+    last_error = None
+    for _ in range(retries):
+        try:
+            win32clipboard.OpenClipboard()
+            return
+        except Exception as exc:
+            last_error = exc
+            time.sleep(delay_seconds)
+    raise RuntimeError(f'failed to open clipboard: {last_error}')
+
+
+
+def _clipboard_snapshot(win32clipboard, win32con) -> dict[str, Any]:
+    snapshot: dict[str, Any] = {'ok': True, 'formats': [], 'unsupported_formats': [], 'error': None}
+    try:
+        fmt = 0
+        while True:
+            fmt = win32clipboard.EnumClipboardFormats(fmt)
+            if not fmt:
+                break
+            if fmt in {win32con.CF_UNICODETEXT, win32con.CF_TEXT}:
+                try:
+                    snapshot['formats'].append({'format': int(fmt), 'data': win32clipboard.GetClipboardData(fmt)})
+                except Exception as exc:
+                    snapshot['unsupported_formats'].append({'format': int(fmt), 'error': str(exc)})
+            else:
+                snapshot['unsupported_formats'].append({'format': int(fmt)})
+    except Exception as exc:
+        snapshot['ok'] = False
+        snapshot['error'] = str(exc)
+    return snapshot
+
+
+def _restore_clipboard_snapshot(win32clipboard, snapshot: dict[str, Any] | None) -> dict[str, Any]:
+    if not snapshot:
+        return _fail('clipboard snapshot was not captured', 'CLIPBOARD_UNAVAILABLE')
+    if not snapshot.get('ok'):
+        return _fail(snapshot.get('error') or 'clipboard snapshot failed', 'CLIPBOARD_UNAVAILABLE')
+    formats = snapshot.get('formats') or []
+    unsupported = snapshot.get('unsupported_formats') or []
+    if not formats and unsupported:
+        return {
+            'ok': False,
+            'error': 'original clipboard contained unsupported non-text formats and cannot be restored safely',
+            'unsupported_format_count': len(unsupported),
+        }
+    _api, _con, _gui, _ui, win32clipboard_mod, _windll = _import_win32()
+    _open_clipboard_with_retry()
+    try:
+        win32clipboard_mod.EmptyClipboard()
+        for item in formats:
+            win32clipboard_mod.SetClipboardData(int(item['format']), item.get('data'))
+    finally:
+        win32clipboard_mod.CloseClipboard()
+    return {
+        'ok': True,
+        'restored_format_count': len(formats),
+        'unsupported_format_count': len(unsupported),
+    }
+
+
+def _uia_status_payload() -> dict[str, Any]:
+    modules = {name: _module_available(name) for name in UIA_OPTIONAL_MODULES}
+    if not modules.get('uiautomation'):
+        return {
+            'ok': True,
+            'available': False,
+            'backend': None,
+            'modules': modules,
+            'reason': 'uiautomation package is not installed',
+            'fallbacks': ['ocr', 'visual_fallback', 'coordinate_actions'],
+        }
+    try:
+        import uiautomation as auto
+
+        root = auto.GetRootControl()
+        return {
+            'ok': True,
+            'available': True,
+            'backend': 'uiautomation',
+            'modules': modules,
+            'root': _uia_control_payload(root, depth=0),
+        }
+    except Exception as exc:
+        return {
+            'ok': True,
+            'available': False,
+            'backend': 'uiautomation',
+            'modules': modules,
+            'reason': str(exc),
+            'fallbacks': ['ocr', 'visual_fallback', 'coordinate_actions'],
+        }
+
+
+def _get_uia_backend():
+    if not _module_available('uiautomation'):
+        raise RuntimeError('uiautomation package is not installed')
+    import uiautomation as auto
+
+    return auto
+
+
+def _uia_rect(rect) -> list[float] | None:
+    if not rect:
+        return None
+    try:
+        return [float(rect.left), float(rect.top), float(rect.right), float(rect.bottom)]
+    except Exception:
+        try:
+            values = list(rect)
+            if len(values) >= 4:
+                return [float(values[0]), float(values[1]), float(values[2]), float(values[3])]
+        except Exception:
+            return None
+    return None
+
+
+def _uia_control_payload(control, depth: int) -> dict[str, Any]:
+    def safe_attr(name: str, default=None):
+        try:
+            return getattr(control, name)
+        except Exception:
+            return default
+
+    rect = _uia_rect(safe_attr('BoundingRectangle'))
+    center = None
+    if rect:
+        center = [(rect[0] + rect[2]) / 2.0, (rect[1] + rect[3]) / 2.0]
+    return {
+        'depth': depth,
+        'name': safe_attr('Name', '') or '',
+        'automation_id': safe_attr('AutomationId', '') or '',
+        'class_name': safe_attr('ClassName', '') or '',
+        'control_type': safe_attr('ControlTypeName', '') or '',
+        'native_window_handle': int(safe_attr('NativeWindowHandle', 0) or 0),
+        'rect': rect,
+        'center': center,
+        'coordinate_system': 'virtual_screen_physical_pixels' if center else None,
+    }
+
+
+def _uia_control_children(control) -> list[Any]:
+    try:
+        return list(control.GetChildren())
+    except Exception:
+        return []
+
+
+def _uia_root(hwnd: int | None = None, title_contains: str | None = None):
+    auto = _get_uia_backend()
+    if hwnd:
+        return auto.ControlFromHandle(int(hwnd))
+    if title_contains:
+        return auto.ControlFromHandle(_resolve_hwnd(title_contains=title_contains))
+    return auto.GetRootControl()
+
+
+def _matches_uia_payload(
+    payload: dict[str, Any],
+    *,
+    query: str | None = None,
+    name_contains: str | None = None,
+    automation_id: str | None = None,
+    class_name: str | None = None,
+    control_type: str | None = None,
+    exact: bool = False,
+) -> bool:
+    def match_field(value: str, expected: str | None) -> bool:
+        if not expected:
+            return True
+        hay = str(value or '')
+        return hay == expected if exact else expected.lower() in hay.lower()
+
+    if query:
+        haystack = ' '.join(str(payload.get(key, '')) for key in ('name', 'automation_id', 'class_name', 'control_type'))
+        if exact:
+            if haystack != query:
+                return False
+        elif query.lower() not in haystack.lower():
+            return False
+    return (
+        match_field(payload.get('name', ''), name_contains)
+        and match_field(payload.get('automation_id', ''), automation_id)
+        and match_field(payload.get('class_name', ''), class_name)
+        and match_field(payload.get('control_type', ''), control_type)
+    )
+
+
+def _uia_find_controls(
+    *,
+    query: str | None = None,
+    name_contains: str | None = None,
+    automation_id: str | None = None,
+    class_name: str | None = None,
+    control_type: str | None = None,
+    hwnd: int | None = None,
+    title_contains: str | None = None,
+    exact: bool = False,
+    max_depth: int = 4,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    root = _uia_root(hwnd=hwnd, title_contains=title_contains)
+    limit = max(1, min(int(limit), 200))
+    max_depth = max(0, min(int(max_depth), 12))
+    found: list[dict[str, Any]] = []
+    queue: list[tuple[Any, int]] = [(root, 0)]
+    while queue and len(found) < limit:
+        control, depth = queue.pop(0)
+        payload = _uia_control_payload(control, depth=depth)
+        if _matches_uia_payload(
+            payload,
+            query=query,
+            name_contains=name_contains,
+            automation_id=automation_id,
+            class_name=class_name,
+            control_type=control_type,
+            exact=exact,
+        ):
+            found.append({'control': control, 'payload': payload})
+        if depth < max_depth:
+            for child in _uia_control_children(control):
+                queue.append((child, depth + 1))
+    return found
+
+
+def _uia_tree_payload(control, depth: int, max_depth: int, limit_state: dict[str, int]) -> dict[str, Any]:
+    payload = _uia_control_payload(control, depth=depth)
+    if depth >= max_depth or limit_state['remaining'] <= 0:
+        payload['children'] = []
+        return payload
+    children = []
+    for child in _uia_control_children(control):
+        if limit_state['remaining'] <= 0:
+            break
+        limit_state['remaining'] -= 1
+        children.append(_uia_tree_payload(child, depth + 1, max_depth, limit_state))
+    payload['children'] = children
+    return payload
+
+
+def _uia_click_control(control) -> dict[str, Any]:
+    try:
+        control.Click()
+        return {'ok': True, 'method': 'uia_click'}
+    except Exception as exc:
+        payload = _uia_control_payload(control, depth=0)
+        center = payload.get('center')
+        if not center:
+            return _fail(f'UIA click failed and no center is available: {exc}', 'UIA_UNAVAILABLE')
+        fallback = _click_payload(center[0], center[1])
+        return {'ok': bool(fallback.get('ok')), 'method': 'coordinate_fallback', 'uia_error': str(exc), 'fallback': fallback}
+
+
+def _post_action_verification(
+    *,
+    bbox: list[int] | None = None,
+    query: str | None = None,
+    delay_seconds: float = 0.2,
+    enhance: bool = False,
+) -> dict[str, Any]:
+    time.sleep(max(0.0, float(delay_seconds)))
+    normalized = _normalize_bbox(bbox)
+    img = _capture_screen(normalized)
+    result: dict[str, Any] = {
+        'ok': True,
+        'source': {'type': 'screen', 'bbox': list(normalized) if normalized else None},
+        'width': img.width,
+        'height': img.height,
+        'image': _image_diagnostics(img),
+    }
+    try:
+        result['foreground'] = _foreground_window_info()
+    except Exception as exc:
+        result['foreground'] = {'error': str(exc)}
+    if query:
+        ocr = _ocr_image(img, enhance=enhance)
+        result['ocr_text'] = ocr.get('text', '')
+        result['query'] = query
+        result['query_found'] = query.lower() in result['ocr_text'].lower()
+    return result
+
+
+def _status_payload() -> dict[str, Any]:
+    dependencies: dict[str, bool] = {}
+    for name, module in [
+        ('pillow', 'PIL'),
+        ('pywin32', 'win32gui'),
+        ('rapidocr_onnxruntime', 'rapidocr_onnxruntime'),
+        ('ultralytics', 'ultralytics'),
+        ('torch', 'torch'),
+    ]:
+        dependencies[name] = _module_available(module)
+    dependencies['numpy'] = _NUMPY is not None
+    for module in UIA_OPTIONAL_MODULES:
+        dependencies[module] = _module_available(module)
+    try:
+        screen = _get_screen_info()
+    except Exception as exc:
+        screen = {'error': str(exc)}
+    return {
+        'ok': True,
+        'platform': os.name,
+        'dependencies': dependencies,
+        'screen': screen,
+        'output_dir': str(DEFAULT_OUTPUT_DIR),
+        'ui_detection': {
+            'model_path': str(DEFAULT_UI_MODEL_PATH),
+            'model_exists': DEFAULT_UI_MODEL_PATH.is_file(),
+            'enabled': dependencies.get('ultralytics', False) and DEFAULT_UI_MODEL_PATH.is_file(),
+            'install': _ui_model_install_payload(),
+        },
+        'clipboard': {
+            'restore_text_formats_supported': True,
+            'restore_non_text_formats_supported': False,
+        },
+        'uia': _uia_status_payload(),
+        'error_codes': [
+            'VALIDATION_ERROR',
+            'WINDOW_NOT_FOUND',
+            'COORD_OUT_OF_BOUNDS',
+            'FILE_ERROR',
+            'UIA_UNAVAILABLE',
+            'OCR_UNAVAILABLE',
+            'UI_MODEL_MISSING',
+            'CLIPBOARD_UNAVAILABLE',
+            'TIMEOUT',
+            'TOOL_ERROR',
+        ],
+    }
+
+
+@mcp.tool()
+def codex_desktop_control_status() -> dict[str, Any]:
+    return _status_payload()
+
+
+@mcp.tool()
+def codex_desktop_control_ui_status() -> dict[str, Any]:
+    try:
+        has_ultralytics = _module_available('ultralytics')
+        return {
+            'ok': True,
+            'ultralytics': has_ultralytics,
+            'model_path': str(DEFAULT_UI_MODEL_PATH),
+            'model_exists': DEFAULT_UI_MODEL_PATH.is_file(),
+            'enabled': has_ultralytics and DEFAULT_UI_MODEL_PATH.is_file(),
+            'loaded_models': list(_YOLO_MODELS.keys()),
+        }
+    except Exception as exc:
+        return _fail(exc)
+
+
+@mcp.tool()
+def codex_desktop_control_uia_status() -> dict[str, Any]:
+    return _uia_status_payload()
+
+
+@mcp.tool()
+def codex_desktop_control_uia_find(
+    query: str | None = None,
+    name_contains: str | None = None,
+    automation_id: str | None = None,
+    class_name: str | None = None,
+    control_type: str | None = None,
+    hwnd: int | None = None,
+    title_contains: str | None = None,
+    exact: bool = False,
+    max_depth: int = 4,
+    limit: int = 50,
+) -> dict[str, Any]:
+    if not any([query, name_contains, automation_id, class_name, control_type]):
+        return _fail('provide query, name_contains, automation_id, class_name, or control_type', 'VALIDATION_ERROR')
+    try:
+        found = _uia_find_controls(
+            query=query,
+            name_contains=name_contains,
+            automation_id=automation_id,
+            class_name=class_name,
+            control_type=control_type,
+            hwnd=hwnd,
+            title_contains=title_contains,
+            exact=exact,
+            max_depth=max_depth,
+            limit=limit,
+        )
+        return {
+            'ok': True,
+            'backend': 'uiautomation',
+            'count': len(found),
+            'matches': [item['payload'] for item in found],
+        }
+    except Exception as exc:
+        status = _uia_status_payload()
+        return _fail(exc, uia=status)
+
+
+@mcp.tool()
+def codex_desktop_control_uia_tree(
+    hwnd: int | None = None,
+    title_contains: str | None = None,
+    max_depth: int = 2,
+    limit: int = 80,
+) -> dict[str, Any]:
+    try:
+        root = _uia_root(hwnd=hwnd, title_contains=title_contains)
+        max_depth = max(0, min(int(max_depth), 8))
+        limit_state = {'remaining': max(0, min(int(limit), 500))}
+        return {
+            'ok': True,
+            'backend': 'uiautomation',
+            'tree': _uia_tree_payload(root, 0, max_depth, limit_state),
+            'truncated': limit_state['remaining'] <= 0,
+        }
+    except Exception as exc:
+        status = _uia_status_payload()
+        return _fail(exc, uia=status)
+
+
+@mcp.tool()
+def codex_desktop_control_uia_click(
+    query: str | None = None,
+    name_contains: str | None = None,
+    automation_id: str | None = None,
+    class_name: str | None = None,
+    control_type: str | None = None,
+    hwnd: int | None = None,
+    title_contains: str | None = None,
+    exact: bool = False,
+    index: int = 0,
+    max_depth: int = 4,
+    verify_after: bool = False,
+    verify_bbox: list[int] | None = None,
+    verify_delay_ms: int = 200,
+) -> dict[str, Any]:
+    if not any([query, name_contains, automation_id, class_name, control_type]):
+        return _fail('provide query, name_contains, automation_id, class_name, or control_type', 'VALIDATION_ERROR')
+    try:
+        found = _uia_find_controls(
+            query=query,
+            name_contains=name_contains,
+            automation_id=automation_id,
+            class_name=class_name,
+            control_type=control_type,
+            hwnd=hwnd,
+            title_contains=title_contains,
+            exact=exact,
+            max_depth=max_depth,
+            limit=max(1, int(index) + 1),
+        )
+        if not found:
+            return _fail('no matching UIA control found', 'UIA_UNAVAILABLE')
+        selected = found[max(0, min(int(index), len(found) - 1))]
+        clicked = _uia_click_control(selected['control'])
+        result: dict[str, Any] = {'ok': bool(clicked.get('ok')), 'selected': selected['payload'], 'click': clicked}
+        if verify_after:
+            result['verification'] = _post_action_verification(
+                bbox=verify_bbox,
+                delay_seconds=float(verify_delay_ms) / 1000.0,
+            )
+        return result
+    except Exception as exc:
+        status = _uia_status_payload()
+        return _fail(exc, uia=status)
+
+
+@mcp.tool()
+def codex_desktop_control_self_check() -> dict[str, Any]:
+    _trace_self_check('start')
+    checks: dict[str, Any] = {}
+    warnings: list[str] = []
+    try:
+        checks['status'] = _status_payload()
+        if not checks['status'].get('ui_detection', {}).get('enabled'):
+            install = checks['status'].get('ui_detection', {}).get('install', {})
+            warnings.append(f'UI detection model is not installed; visual fallback, OCR, and coordinates remain available. Install command: {install.get("install_command")}')
+        checks['uia'] = checks['status'].get('uia') or _uia_status_payload()
+        if not checks['uia'].get('available'):
+            warnings.append('UI Automation semantic controls are not available; install the optional uiautomation package to enable name/AutomationId/control-type actions.')
+    except Exception as exc:
+        checks['status'] = _fail(exc)
+    _trace_self_check('status')
+    try:
+        windows = _list_windows(visible_only=True)
+        checks['windows'] = {'ok': True, 'count': len(windows), 'foreground': _foreground_window_info()}
+    except Exception as exc:
+        checks['windows'] = _fail(exc)
+    _trace_self_check('windows')
+    try:
+        screen = _get_screen_info()
+        left = int(screen['virtual_left'])
+        top = int(screen['virtual_top'])
+        right = min(int(screen['virtual_right']), left + 320)
+        bottom = min(int(screen['virtual_bottom']), top + 200)
+        img = _capture_screen((left, top, right, bottom))
+        checks['screenshot'] = {'ok': True, 'width': img.width, 'height': img.height, **_image_diagnostics(img)}
+        if checks['screenshot'].get('probably_blank'):
+            warnings.append('Small screen sample appears blank; desktop may be locked, covered, or unavailable.')
+    except Exception as exc:
+        checks['screenshot'] = {'ok': False, 'error': str(exc)}
+    _trace_self_check('screenshot')
+    try:
+        Image, _ImageGrab = _import_pil()
+        from PIL import ImageDraw
+
+        sample = Image.new('RGB', (240, 140), 'white')
+        draw = ImageDraw.Draw(sample)
+        draw.rectangle([20, 20, 220, 58], outline='black', width=3)
+        draw.rectangle([150, 88, 220, 120], outline='black', fill='#eeeeee', width=3)
+        detections = _detect_visual_ui_candidates(sample, conf_threshold=0.25, max_candidates=10)
+        checks['visual_fallback'] = {
+            'ok': len(detections) > 0,
+            'count': len(detections),
+        }
+        if not detections:
+            warnings.append('Visual fallback UI detection returned no candidates on a synthetic sample.')
+    except Exception as exc:
+        checks['visual_fallback'] = {'ok': False, 'error': str(exc)}
+        warnings.append('Visual fallback UI detection is not currently available.')
+    _trace_self_check('visual_fallback')
+    try:
+        _api, _con, _gui, _ui, win32clipboard, _windll = _import_win32()
+        _open_clipboard_with_retry(retries=3, delay_seconds=0.03)
+        win32clipboard.CloseClipboard()
+        checks['clipboard'] = {'ok': True}
+    except Exception as exc:
+        checks['clipboard'] = {'ok': False, 'error': str(exc)}
+        warnings.append('Clipboard is not currently available.')
+    _trace_self_check('clipboard')
+    desktop_available = bool(checks.get('windows', {}).get('ok') and checks.get('screenshot', {}).get('ok'))
+    if not desktop_available:
+        warnings.append('Desktop capture is not currently available in this session; window, screenshot, and coordinate actions may fail until the interactive desktop is accessible.')
+    hard_checks = ['status', 'visual_fallback', 'clipboard']
+    ok = all(checks.get(name, {}).get('ok', False) for name in hard_checks)
+    _trace_self_check('return')
+    return {'ok': ok, 'desktop_available': desktop_available, 'warnings': warnings, 'checks': checks}
+
+
+@mcp.tool()
+def codex_desktop_control_list_windows(title_contains: str | None = None, visible_only: bool = True) -> dict[str, Any]:
+    try:
+        windows = _list_windows(title_contains=title_contains, visible_only=visible_only)
+        return {'ok': True, 'count': len(windows), 'windows': windows[:200]}
+    except Exception as exc:
+        return _fail(exc)
+
+
+@mcp.tool()
+def codex_desktop_control_activate_window(hwnd: int | None = None, title_contains: str | None = None) -> dict[str, Any]:
+    try:
+        return _activate(_resolve_hwnd(hwnd=hwnd, title_contains=title_contains))
+    except Exception as exc:
+        return _fail(exc)
+
+
+@mcp.tool()
+def codex_desktop_control_screenshot(
+    path: str | None = None,
+    hwnd: int | None = None,
+    title_contains: str | None = None,
+    bbox: list[int] | None = None,
+    include_data: bool = False,
+    format: str = 'png',
+    client_area: bool = False,
+) -> dict[str, Any]:
+    if format.lower() not in {'png', 'jpeg', 'jpg'}:
+        return _fail('format must be png or jpeg', 'VALIDATION_ERROR')
+    fmt = 'jpeg' if format.lower() == 'jpg' else format.lower()
+    try:
+        if hwnd or title_contains:
+            resolved = _resolve_hwnd(hwnd=hwnd, title_contains=title_contains)
+            img = _capture_window(resolved, client_area=client_area)
+            default_name = f'window_{resolved}'
+        else:
+            img = _capture_screen(_normalize_bbox(bbox))
+            default_name = 'screen'
+        return _image_to_payload(img, include_data=include_data, path=path, format=fmt, default_name=default_name)
+    except Exception as exc:
+        return _fail(exc)
+
+
+def _ocr_payload(
+    image_path: str | None = None,
+    hwnd: int | None = None,
+    title_contains: str | None = None,
+    bbox: list[int] | None = None,
+    enhance: bool = False,
+    client_area: bool = False,
+) -> dict[str, Any]:
+    try:
+        img, origin, coordinate_space, source = _capture_source(
+            image_path=image_path,
+            hwnd=hwnd,
+            title_contains=title_contains,
+            bbox=bbox,
+            client_area=client_area,
+        )
+        return {'ok': True, 'origin': origin, 'coordinate_space': coordinate_space, 'source': source, **_ocr_image(img, enhance=enhance)}
+    except Exception as exc:
+        return _fail(exc)
+
+
+@mcp.tool()
+def codex_desktop_control_ocr(
+    image_path: str | None = None,
+    hwnd: int | None = None,
+    title_contains: str | None = None,
+    bbox: list[int] | None = None,
+    enhance: bool = False,
+    client_area: bool = False,
+) -> dict[str, Any]:
+    return _ocr_payload(image_path=image_path, hwnd=hwnd, title_contains=title_contains, bbox=bbox, enhance=enhance, client_area=client_area)
+
+
+def _find_text_payload(
+    query: str,
+    image_path: str | None = None,
+    hwnd: int | None = None,
+    title_contains: str | None = None,
+    bbox: list[int] | None = None,
+    exact: bool = False,
+    enhance: bool = False,
+    client_area: bool = False,
+) -> dict[str, Any]:
+    if not query.strip():
+        return _fail('query must be non-empty', 'VALIDATION_ERROR')
+    try:
+        ocr = _ocr_payload(
+            image_path=image_path,
+            hwnd=hwnd,
+            title_contains=title_contains,
+            bbox=bbox,
+            enhance=enhance,
+            client_area=client_area,
+        )
+        if not ocr.get('ok'):
+            return ocr
+        needle = query if exact else query.lower()
+        origin = ocr.get('origin') or [0.0, 0.0]
+        coordinate_space = ocr.get('coordinate_space')
+        matches = []
+        for detail in ocr.get('details', []):
+            text = detail.get('text', '')
+            haystack = text if exact else text.lower()
+            if needle in haystack:
+                points = detail.get('bbox') or []
+                xs = [float(point[0]) for point in points] if points else []
+                ys = [float(point[1]) for point in points] if points else []
+                center = [sum(xs) / len(xs), sum(ys) / len(ys)] if xs and ys else None
+                screen_center = None
+                screen_bbox = None
+                if coordinate_space == 'virtual_screen_physical_pixels' and center:
+                    screen_center = [origin[0] + center[0], origin[1] + center[1]]
+                    screen_bbox = [[origin[0] + float(point[0]), origin[1] + float(point[1])] for point in points]
+                matches.append({**detail, 'center': center, 'screen_center': screen_center, 'screen_bbox': screen_bbox})
+        return {
+            'ok': True,
+            'query': query,
+            'count': len(matches),
+            'matches': matches,
+            'text': ocr.get('text', ''),
+            'origin': origin,
+            'coordinate_space': coordinate_space,
+            'source': ocr.get('source'),
+        }
+    except Exception as exc:
+        return _fail(exc)
+
+
+@mcp.tool()
+def codex_desktop_control_find_text(
+    query: str,
+    image_path: str | None = None,
+    hwnd: int | None = None,
+    title_contains: str | None = None,
+    bbox: list[int] | None = None,
+    exact: bool = False,
+    enhance: bool = False,
+    client_area: bool = False,
+) -> dict[str, Any]:
+    return _find_text_payload(
+        query=query,
+        image_path=image_path,
+        hwnd=hwnd,
+        title_contains=title_contains,
+        bbox=bbox,
+        exact=exact,
+        enhance=enhance,
+        client_area=client_area,
+    )
+
+
+def _wait_for_text(
+    query: str,
+    *,
+    image_path: str | None = None,
+    hwnd: int | None = None,
+    title_contains: str | None = None,
+    bbox: list[int] | None = None,
+    exact: bool = False,
+    enhance: bool = False,
+    client_area: bool = False,
+    timeout_ms: int = 3000,
+    interval_ms: int = 250,
+) -> dict[str, Any]:
+    started = time.time()
+    last = None
+    while (time.time() - started) * 1000 <= max(0, timeout_ms):
+        last = _find_text_payload(
+            query=query,
+            image_path=image_path,
+            hwnd=hwnd,
+            title_contains=title_contains,
+            bbox=bbox,
+            exact=exact,
+            enhance=enhance,
+            client_area=client_area,
+        )
+        if last.get('ok') and last.get('count', 0) > 0:
+            return {'ok': True, 'elapsed_ms': int((time.time() - started) * 1000), 'result': last}
+        time.sleep(max(50, interval_ms) / 1000)
+    return _fail(f'text not found before timeout: {query}', 'TIMEOUT', elapsed_ms=int((time.time() - started) * 1000), last_result=last)
+
+
+@mcp.tool()
+def codex_desktop_control_wait_for_text(
+    query: str,
+    image_path: str | None = None,
+    hwnd: int | None = None,
+    title_contains: str | None = None,
+    bbox: list[int] | None = None,
+    exact: bool = False,
+    enhance: bool = False,
+    client_area: bool = False,
+    timeout_ms: int = 3000,
+    interval_ms: int = 250,
+) -> dict[str, Any]:
+    if not query.strip():
+        return _fail('query must be non-empty', 'VALIDATION_ERROR')
+    try:
+        return _wait_for_text(
+            query,
+            image_path=image_path,
+            hwnd=hwnd,
+            title_contains=title_contains,
+            bbox=bbox,
+            exact=exact,
+            enhance=enhance,
+            client_area=client_area,
+            timeout_ms=timeout_ms,
+            interval_ms=interval_ms,
+        )
+    except Exception as exc:
+        return _fail(exc)
+
+
+@mcp.tool()
+def codex_desktop_control_detect_ui_elements(
+    image_path: str | None = None,
+    hwnd: int | None = None,
+    title_contains: str | None = None,
+    bbox: list[int] | None = None,
+    conf_threshold: float = 0.25,
+    include_ocr: bool = True,
+    annotate_path: str | None = None,
+    client_area: bool = False,
+) -> dict[str, Any]:
+    try:
+        if conf_threshold < 0 or conf_threshold > 1:
+            return _fail('conf_threshold must be between 0 and 1', 'VALIDATION_ERROR')
+        model = None
+        resolved_model = str(DEFAULT_UI_MODEL_PATH)
+        model_error = None
+        try:
+            model, resolved_model = _get_yolo_model()
+        except Exception as exc:
+            model_error = str(exc)
+        img, origin, coordinate_space, source = _capture_source(
+            image_path=image_path,
+            hwnd=hwnd,
+            title_contains=title_contains,
+            bbox=bbox,
+            client_area=client_area,
+        )
+        detections = []
+        detector = 'yolo'
+        if model is not None:
+            results = model(img, conf=conf_threshold, verbose=False)
+            for result in results:
+                boxes = getattr(result, 'boxes', None)
+                if boxes is None:
+                    continue
+                for box in boxes:
+                    x1, y1, x2, y2 = [float(v) for v in box.xyxy[0].cpu().tolist()]
+                    geometry = _get_bbox_geometry([[x1, y1], [x2, y1], [x2, y2], [x1, y2]])
+                    detections.append({
+                        **geometry,
+                        **_to_screen_geometry(geometry, origin, coordinate_space),
+                        'confidence': float(box.conf[0]),
+                        'class': int(box.cls[0]),
+                        'detector': 'yolo',
+                    })
+        else:
+            detector = 'visual_fallback'
+            for det in _detect_visual_ui_candidates(img, conf_threshold=conf_threshold):
+                det.update(_to_screen_geometry(det, origin, coordinate_space))
+                detections.append(det)
+        ocr = None
+        if include_ocr:
+            ocr = {'ok': True, **_ocr_image(img)}
+            for detail in ocr.get('details', []):
+                geometry = _get_bbox_geometry(detail['bbox'])
+                detail.update(geometry)
+                detail.update(_to_screen_geometry(geometry, origin, coordinate_space))
+        annotation = None
+        if annotate_path:
+            Image, _ImageGrab = _import_pil()
+            from PIL import ImageDraw
+
+            annotated = img.copy()
+            draw = ImageDraw.Draw(annotated)
+            for det in detections:
+                left, top, right, bottom = det['rect']
+                draw.rectangle([left, top, right, bottom], outline='red', width=2)
+                draw.text((left, max(0, top - 12)), f"{det['confidence']:.2f}", fill='red')
+            if ocr:
+                for detail in ocr.get('details', []):
+                    geometry = _get_bbox_geometry(detail['bbox'])
+                    points = [(point[0], point[1]) for point in geometry['bbox']]
+                    draw.line(points + [points[0]], fill='blue', width=1)
+            annotation = _image_to_payload(annotated, include_data=False, path=annotate_path, format='png', default_name='ui_detect')
+        return {
+            'ok': True,
+            'model_path': resolved_model,
+            'model_available': model is not None,
+            'detector': detector,
+            'warning': f'UI detection model unavailable; returned visual fallback plus OCR result: {model_error}' if model_error else None,
+            'source': source,
+            'origin': origin,
+            'coordinate_space': coordinate_space,
+            'count': len(detections),
+            'detections': detections,
+            'ocr': ocr,
+            'annotation': annotation,
+        }
+    except Exception as exc:
+        return _fail(exc, model_path=str(DEFAULT_UI_MODEL_PATH), model_install=_ui_model_install_payload())
+
+
+def _click_payload(
+    x: float,
+    y: float,
+    activate_title_contains: str | None = None,
+    verify_after: bool = False,
+    verify_bbox: list[int] | None = None,
+    verify_delay_ms: int = 200,
+) -> dict[str, Any]:
+    try:
+        if activate_title_contains:
+            _activate(_resolve_hwnd(title_contains=activate_title_contains))
+        screen = _get_screen_info()
+        ix = int(round(x))
+        iy = int(round(y))
+        if ix < screen['virtual_left'] or iy < screen['virtual_top'] or ix >= screen['virtual_right'] or iy >= screen['virtual_bottom']:
+            return _fail('coordinates outside virtual screen bounds', 'COORD_OUT_OF_BOUNDS', screen=screen, x=ix, y=iy)
+        win32api, win32con, _gui, _ui, _clip, _windll = _import_win32()
+        win32api.SetCursorPos((ix, iy))
+        time.sleep(0.05)
+        win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0)
+        time.sleep(0.05)
+        win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0)
+        result: dict[str, Any] = {'ok': True, 'x': x, 'y': y, 'coordinate_system': 'virtual_screen_physical_pixels'}
+        if verify_after:
+            result['verification'] = _post_action_verification(
+                bbox=verify_bbox,
+                delay_seconds=float(verify_delay_ms) / 1000.0,
+            )
+        return result
+    except Exception as exc:
+        return _fail(exc)
+
+
+@mcp.tool()
+def codex_desktop_control_click(
+    x: float,
+    y: float,
+    activate_title_contains: str | None = None,
+    verify_after: bool = False,
+    verify_bbox: list[int] | None = None,
+    verify_delay_ms: int = 200,
+) -> dict[str, Any]:
+    return _click_payload(
+        x=x,
+        y=y,
+        activate_title_contains=activate_title_contains,
+        verify_after=verify_after,
+        verify_bbox=verify_bbox,
+        verify_delay_ms=verify_delay_ms,
+    )
+
+
+@mcp.tool()
+def codex_desktop_control_click_and_wait_text(
+    x: float,
+    y: float,
+    expected_text: str,
+    activate_title_contains: str | None = None,
+    hwnd: int | None = None,
+    title_contains: str | None = None,
+    bbox: list[int] | None = None,
+    exact: bool = False,
+    enhance: bool = False,
+    timeout_ms: int = 3000,
+    interval_ms: int = 250,
+) -> dict[str, Any]:
+    clicked = _click_payload(x=x, y=y, activate_title_contains=activate_title_contains)
+    if not clicked.get('ok'):
+        return _fail(clicked.get('error') or 'click failed', clicked.get('code'), click=clicked)
+    verified = _wait_for_text(
+        expected_text,
+        hwnd=hwnd,
+        title_contains=title_contains,
+        bbox=bbox,
+        exact=exact,
+        enhance=enhance,
+        timeout_ms=timeout_ms,
+        interval_ms=interval_ms,
+    )
+    return {'ok': bool(verified.get('ok')), 'click': clicked, 'verification': verified}
+
+
+@mcp.tool()
+def codex_desktop_control_double_click(
+    x: float,
+    y: float,
+    activate_title_contains: str | None = None,
+    verify_after: bool = False,
+    verify_bbox: list[int] | None = None,
+    verify_delay_ms: int = 200,
+) -> dict[str, Any]:
+    first = _click_payload(x=x, y=y, activate_title_contains=activate_title_contains)
+    if not first.get('ok'):
+        return first
+    time.sleep(0.05)
+    second = _click_payload(x=x, y=y)
+    result: dict[str, Any] = {'ok': bool(second.get('ok')), 'x': x, 'y': y, 'coordinate_system': 'virtual_screen_physical_pixels', 'second': second}
+    if verify_after:
+        result['verification'] = _post_action_verification(
+            bbox=verify_bbox,
+            delay_seconds=float(verify_delay_ms) / 1000.0,
+        )
+    return result
+
+
+@mcp.tool()
+def codex_desktop_control_hotkey(
+    keys: list[str],
+    activate_title_contains: str | None = None,
+    verify_after: bool = False,
+    verify_bbox: list[int] | None = None,
+    verify_delay_ms: int = 200,
+) -> dict[str, Any]:
+    try:
+        if activate_title_contains:
+            _activate(_resolve_hwnd(title_contains=activate_title_contains))
+        _send_hotkey(keys)
+        result: dict[str, Any] = {'ok': True, 'keys': keys}
+        if verify_after:
+            result['verification'] = _post_action_verification(
+                bbox=verify_bbox,
+                delay_seconds=float(verify_delay_ms) / 1000.0,
+            )
+        return result
+    except Exception as exc:
+        return _fail(exc)
+
+
+@mcp.tool()
+def codex_desktop_control_paste_text(
+    text: str,
+    activate_title_contains: str | None = None,
+    verify_text: str | None = None,
+    verify_title_contains: str | None = None,
+    verify_bbox: list[int] | None = None,
+    verify_timeout_ms: int = 3000,
+    verify_after: bool = False,
+    verify_delay_ms: int = 200,
+    restore_clipboard: bool = True,
+    restore_delay_ms: int = 200,
+) -> dict[str, Any]:
+    clipboard_snapshot = None
+    try:
+        if activate_title_contains:
+            _activate(_resolve_hwnd(title_contains=activate_title_contains))
+        _api, win32con, _gui, _ui, win32clipboard, _windll = _import_win32()
+        _open_clipboard_with_retry()
+        try:
+            if restore_clipboard:
+                clipboard_snapshot = _clipboard_snapshot(win32clipboard, win32con)
+            win32clipboard.EmptyClipboard()
+            win32clipboard.SetClipboardText(text, win32con.CF_UNICODETEXT)
+        finally:
+            win32clipboard.CloseClipboard()
+        _send_hotkey(['ctrl', 'v'])
+        result: dict[str, Any] = {'ok': True, 'length': len(text), 'clipboard_restore_requested': bool(restore_clipboard)}
+        if restore_clipboard:
+            time.sleep(max(0, int(restore_delay_ms)) / 1000.0)
+            result['clipboard_restore'] = _restore_clipboard_snapshot(win32clipboard, clipboard_snapshot)
+        if verify_after:
+            result['post_action'] = _post_action_verification(
+                bbox=verify_bbox,
+                query=verify_text,
+                delay_seconds=float(verify_delay_ms) / 1000.0,
+            )
+        if verify_text:
+            result['verification'] = _wait_for_text(
+                verify_text,
+                title_contains=verify_title_contains or activate_title_contains,
+                bbox=verify_bbox,
+                timeout_ms=verify_timeout_ms,
+            )
+            result['ok'] = bool(result['verification'].get('ok'))
+        return result
+    except Exception as exc:
+        return _fail(exc)
+
+
+if __name__ == '__main__':
+    mcp.run()

@@ -1,0 +1,5 @@
+[mcp_servers.codex_browser_control]
+type = "stdio"
+command = "D:/Node.js/node.exe"
+args = ["C:/Users/12644/Documents/Codex/tools/browser-control-mcp/src/server.mjs"]
+env = { BROWSER_CONTROL_EXTENSION_PORT = "18795", BROWSER_CONTROL_EXTENSION_TOKEN = "replace-with-local-token" }

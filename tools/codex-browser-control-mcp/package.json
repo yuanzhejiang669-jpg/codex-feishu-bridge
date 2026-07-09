@@ -1,0 +1,23 @@
+{
+  "name": "codex-browser-control-mcp",
+  "version": "0.6.0",
+  "description": "Independent MCP server for controlling local Chrome/Edge through Chrome DevTools Protocol.",
+  "type": "module",
+  "bin": {
+    "codex-browser-control-mcp": "./src/server.mjs"
+  },
+  "scripts": {
+    "start": "node ./src/server.mjs",
+    "smoke": "node ./scripts/protocol-smoke-test.mjs && node ./scripts/security-check.mjs",
+    "e2e": "node ./scripts/e2e-browser-test.mjs",
+    "benchmark": "node ./scripts/benchmark-browser-control.mjs",
+    "verify": "npm run smoke && npm run e2e",
+    "security": "node ./scripts/security-check.mjs",
+    "restart:extension-bridge": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/restart-extension-bridge.ps1",
+    "repair:extension-bridge": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/restart-extension-bridge.ps1"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "MIT"
+}
