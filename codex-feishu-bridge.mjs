@@ -91,7 +91,7 @@ const CONFIG = {
   runMode: normalizeRunMode(process.env.CODEX_FEISHU_RUN_MODE || "app-server"),
   codexSandbox: process.env.CODEX_FEISHU_SANDBOX || "danger-full-access",
   codexModel: process.env.CODEX_FEISHU_MODEL || "",
-  codexReasoning: process.env.CODEX_FEISHU_REASONING || "xhigh",
+  codexReasoning: process.env.CODEX_FEISHU_REASONING || "max",
   codexTimeoutMs: parseDurationMs(process.env.CODEX_FEISHU_CODEX_TIMEOUT_MS, 0),
   codexIdleTimeoutMs: parseDurationMs(process.env.CODEX_FEISHU_CODEX_IDLE_TIMEOUT_MS, 60 * 60_000),
   disableMcp: (process.env.CODEX_FEISHU_DISABLE_MCP || "0") !== "0",
@@ -247,7 +247,7 @@ const ManagedCard = createManagedCardClass({
   cardThrottleMs: CONFIG.cardThrottleMs,
   log,
 });
-const REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh"]);
+const REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh", "max"]);
 const MIN_SIDEBAR_RECONCILE_INTERVAL_MS = 5_000;
 const PROVIDER_MODEL_LIST_TIMEOUT_MS = 30_000;
 const PROVIDER_MODEL_TEST_TIMEOUT_MS = 60_000;
@@ -258,42 +258,42 @@ const PROVIDER_BUNDLES = [
     name: "mimo2codex / DeepSeek V4 Pro",
     provider: "mimo2codex",
     model: "deepseek-v4-pro",
-    reasoning: "xhigh",
+    reasoning: "max",
   },
   {
     id: "m2c-deepseek-flash",
     name: "mimo2codex / DeepSeek V4 Flash",
     provider: "mimo2codex",
     model: "deepseek-v4-flash",
-    reasoning: "xhigh",
+    reasoning: "max",
   },
   {
     id: "m2c-apideepseek",
     name: "mimo2codex / API DeepSeek V4 Pro",
     provider: "mimo2codex-apideepseek",
     model: "deepseek-v4-pro",
-    reasoning: "xhigh",
+    reasoning: "max",
   },
   {
     id: "m2c-apideepseek-flash",
     name: "mimo2codex / API DeepSeek V4 Flash",
     provider: "mimo2codex-apideepseek",
     model: "deepseek-v4-flash",
-    reasoning: "xhigh",
+    reasoning: "max",
   },
   {
     id: "m2c-kimi",
     name: "mimo2codex / Kimi",
     provider: "mimo2codex",
     model: "kimi-k2.6",
-    reasoning: "xhigh",
+    reasoning: "max",
   },
   {
     id: "m2c-glm",
     name: "mimo2codex / GLM",
     provider: "mimo2codex",
     model: "glm-5.2",
-    reasoning: "xhigh",
+    reasoning: "max",
   },
 ];
 const codexProviderConfig = createCodexProviderConfig({
@@ -7583,7 +7583,7 @@ async function handleModelCommand(chatId, rest, messageId) {
     if (first === "effort" || first === "reasoning") {
       const effort = normalizeReasoningEffort(args[1]);
       if (!effort) {
-        await sendText(chatId, "用法：`/model effort <none|minimal|low|medium|high|xhigh>`", "model-effort-usage", messageId);
+        await sendText(chatId, "用法：`/model effort <none|minimal|low|medium|high|xhigh|max>`", "model-effort-usage", messageId);
         return;
       }
       if (persist) await writeCodexConfigValue("model_reasoning_effort", effort);
@@ -7595,11 +7595,11 @@ async function handleModelCommand(chatId, rest, messageId) {
     const model = cleanOverride(args[0]);
     const effort = normalizeReasoningEffort(args[1]);
     if (!model) {
-      await sendText(chatId, "用法：`/model <模型ID> [推理强度]`，例如 `/model gpt-5.5 xhigh`。", "model-usage", messageId);
+      await sendText(chatId, "用法：`/model <模型ID> [推理强度]`，例如 `/model gpt-5.6-sol max`。", "model-usage", messageId);
       return;
     }
     if (args[1] && !effort) {
-      await sendText(chatId, "推理强度只能是：`none`、`minimal`、`low`、`medium`、`high`、`xhigh`。", "model-effort-invalid", messageId);
+      await sendText(chatId, "推理强度只能是：`none`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`。", "model-effort-invalid", messageId);
       return;
     }
 
@@ -7703,7 +7703,7 @@ async function modelListMarkdown(session) {
   if (result.source === "provider") {
     lines.push("`/model list` 和 `/model refresh` 都会实时查询当前 provider 的 `/models`；这个列表只是发现工具，不是白名单。");
   }
-  lines.push("切当前会话：`/model <模型ID> [推理强度]`，例如 `/model gpt-5.5 xhigh`");
+  lines.push("切当前会话：`/model <模型ID> [推理强度]`，例如 `/model gpt-5.6-sol max`");
   lines.push("保存为全局默认：`/model save <模型ID> [推理强度]`");
   return lines.join("\n");
 }

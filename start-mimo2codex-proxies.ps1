@@ -67,6 +67,78 @@ function Get-Mimo2CodexLaunch {
   throw "mimo2codex was not found. Install it with: npm install -g mimo2codex"
 }
 
+function Update-Mimo2CodexFileIfNeeded {
+  param(
+    [string]$Path,
+    [scriptblock]$Patch
+  )
+
+  if (-not (Test-Path -LiteralPath $Path)) {
+    Write-ProxyLog "mimo2codex patch skipped missing file: $Path"
+    return
+  }
+
+  $utf8NoBom = New-Object System.Text.UTF8Encoding -ArgumentList $false
+  $original = [System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::UTF8)
+  $normalized = $original -replace "`r`n", "`n"
+  $updated = & $Patch $normalized
+  if ($updated -eq $normalized) {
+    return
+  }
+
+  [System.IO.File]::WriteAllText($Path, $updated, $utf8NoBom)
+  Write-ProxyLog "mimo2codex patched: $Path"
+}
+
+function Ensure-Mimo2CodexDeepSeekMaxPolicy {
+  $moduleRoot = Join-Path $env:APPDATA "npm\node_modules\mimo2codex"
+  $deepseekProvider = Join-Path $moduleRoot "dist\providers\deepseek.js"
+  $genericProvider = Join-Path $moduleRoot "dist\providers\generic.js"
+
+  Update-Mimo2CodexFileIfNeeded -Path $deepseekProvider -Patch {
+    param([string]$text)
+    $text = $text.Replace(@'
+    if (chat.reasoning_effort === "xhigh") {
+        chat.reasoning_effort = "max";
+    }
+'@, "")
+    $text = $text.Replace(@'
+    if (chat.thinking?.type === "disabled") {
+        if (chat.reasoning_effort === "none") {
+            delete chat.reasoning_effort;
+        }
+    }
+    else if (chat.reasoning_effort === undefined) {
+        chat.reasoning_effort = "high";
+    }
+'@, @'
+    if (chat.thinking?.type === "disabled") {
+        delete chat.reasoning_effort;
+    }
+    else {
+        chat.reasoning_effort = "max";
+    }
+'@)
+    return $text
+  }
+
+  Update-Mimo2CodexFileIfNeeded -Path $genericProvider -Patch {
+    param([string]$text)
+    $text = $text.Replace(@'
+    if (chat.reasoning_effort === "xhigh") {
+        chat.reasoning_effort = "max";
+    }
+'@, @'
+    if (chat.thinking?.type === "disabled") {
+        delete chat.reasoning_effort;
+        return chat;
+    }
+    chat.reasoning_effort = "max";
+'@)
+    return $text
+  }
+}
+
 function Test-TcpPort {
   param(
     [string]$HostValue,
@@ -188,6 +260,8 @@ Import-UserEnvIfMissing @(
   "GLM_API_KEY",
   "XAI_API_KEY"
 )
+
+Ensure-Mimo2CodexDeepSeekMaxPolicy
 
 Start-Mimo2CodexProxy `
   -Name "mimo2codex-8788" `
