@@ -159,16 +159,20 @@ function Resolve-OfficialCodexCliBin {
     if (-not $package.InstallLocation) {
       continue
     }
-    $candidate = Join-Path $package.InstallLocation "app\resources\codex.exe"
+    $resourcesDir = Join-Path $package.InstallLocation "app\resources"
+    $candidate = Join-Path $resourcesDir "codex.exe"
     if (Test-Path -LiteralPath $candidate) {
       $cacheRoot = Join-Path $env:LOCALAPPDATA "CodexFeishuBridge\official-codex-cli"
       $cacheDir = Join-Path $cacheRoot $package.PackageFullName
       $cacheCandidate = Join-Path $cacheDir "codex.exe"
       New-Item -ItemType Directory -Force -Path $cacheDir | Out-Null
-      $sourceItem = Get-Item -LiteralPath $candidate
-      $cacheItem = Get-Item -LiteralPath $cacheCandidate -ErrorAction SilentlyContinue
-      if (-not $cacheItem -or $cacheItem.Length -ne $sourceItem.Length -or $cacheItem.LastWriteTimeUtc -lt $sourceItem.LastWriteTimeUtc) {
-        Copy-Item -LiteralPath $candidate -Destination $cacheCandidate -Force
+      $resourceExecutables = @(Get-ChildItem -LiteralPath $resourcesDir -File -Filter "*.exe" -ErrorAction SilentlyContinue)
+      foreach ($sourceItem in $resourceExecutables) {
+        $cachedFile = Join-Path $cacheDir $sourceItem.Name
+        $cacheItem = Get-Item -LiteralPath $cachedFile -ErrorAction SilentlyContinue
+        if (-not $cacheItem -or $cacheItem.Length -ne $sourceItem.Length -or $cacheItem.LastWriteTimeUtc -lt $sourceItem.LastWriteTimeUtc) {
+          Copy-Item -LiteralPath $sourceItem.FullName -Destination $cachedFile -Force
+        }
       }
       return (Resolve-Path -LiteralPath $cacheCandidate).Path
     }
