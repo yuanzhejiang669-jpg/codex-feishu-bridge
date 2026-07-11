@@ -33,12 +33,13 @@ This file defines global defaults for Codex sessions.
 
 ## Delegated Execution
 
-- For non-trivial execution tasks, read and follow the `delegated-execution-workflow` Skill.
-- Use only the runtime-native `spawn_agent`; never simulate delegation through a shell or background process.
-- An Agent already running as the delegated worker executes its bounded task directly and does not delegate again.
-- Define a concrete plan and verifiable acceptance criteria before delegation.
-- Use `gpt-5.6-sol` with `medium` reasoning effort and the active provider.
-- Allow one focused correction at `medium`; request approval before using higher effort.
+- For non-trivial execution, the main Agent performs only essential clarification, a concise plan and acceptance criteria, minimum read-only preflight, coordination, targeted read-only acceptance review, and final reporting. Read and follow the `delegated-execution-workflow` Skill.
+- Delegate all substantive execution to one runtime-native `spawn_agent` Worker using the active provider, `gpt-5.6-sol`, and `medium` reasoning effort. Never simulate delegation through Shell, PowerShell, CLI subprocesses, or background processes.
+- The main Agent must not perform implementation edits, side-effect commands, broad exploration, tests, browser/cloud/API writes, commit, or push by default. The Worker owns those actions and evidence collection, and must not recursively delegate.
+- Keep planning packets concise but complete. Do not duplicate Worker exploration; require a structured return covering changed resources, tests/evidence, and remaining risks.
+- Direct questions, explanations, and simple read-only inspection remain direct and do not spawn.
+- If delegation is unavailable or the Worker cannot access a required authenticated/live tool, report the blocker and request explicit user approval for a narrowly scoped main-Agent execution exception.
+- Allow one focused correction to the same Medium Worker when supported. If it still fails, stop and request explicit approval before any higher-effort Worker. Never call the main Agent "High"; its model and effort come from the active Codex Home.
 
 ## Authenticated Browser Work
 
