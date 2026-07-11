@@ -1056,6 +1056,13 @@ async function prepareFactoryLocalSpace(payload) {
         "",
         "This workspace was prepared by the Codex Feishu Bridge workspace factory.",
         "",
+        "## Delegated Execution",
+        "",
+        "- The main Agent handles directly only explanations from visible context, trivial fact lookup or a narrow read-only check normally needing at most one or two tool calls, and the smallest one or two read-only acceptance checks after a Worker.",
+        "- Delegate every non-trivial task, read-only or mutating, to one runtime-native `spawn_agent` Worker using the active provider, `gpt-5.6-sol`, and `medium` reasoning effort. This includes remote inspection, long-log or session analysis, broad or iterative investigation, multi-source synthesis, authenticated browser inspection, work expected to need more than two tool calls or substantial output analysis, and all substantive execution.",
+        "- The main Agent only clarifies, plans concisely, coordinates, performs targeted acceptance review, and reports. The Medium Worker owns exploration, analysis, edits, commands, tests, browser/cloud/API operations, commit/push, and evidence, and must not recursively delegate.",
+        "- If native delegation or required Worker access is unavailable, report the blocker and request explicit approval for a narrowly scoped main-Agent exception. Allow one focused Medium correction, then require approval before higher effort. Never call the main Agent High or duplicate Worker investigation.",
+        "",
       ].join("\n");
       await writeFile(workspaceAgents, text, "utf8");
       operations.push({ action: "write", path: workspaceAgents });

@@ -1,16 +1,16 @@
 ---
 name: delegated-execution-workflow
-description: Coordinate non-trivial execution through a GPT-5.6 Sol Medium Worker while the main Agent performs only minimal planning and targeted read-only acceptance review.
+description: Delegate all non-trivial work, including multi-step read-only investigation, to a GPT-5.6 Sol Medium Worker while the main Agent only plans, coordinates, and performs targeted acceptance review.
 ---
 
 # Delegated Execution Workflow
 
 ## Purpose
 
-For non-trivial execution, the main Agent owns request understanding, essential
+For all non-trivial work, read-only or mutating, the main Agent owns request understanding, essential
 clarification, concise planning, coordination, targeted read-only acceptance
 review, and final reporting. One `gpt-5.6-sol` Worker at `medium` reasoning
-effort owns all substantive execution while inheriting the active Codex Home's
+effort owns broad investigation and all substantive execution while inheriting the active Codex Home's
 configured provider.
 
 Do not call the main Agent "High" or assume its model or effort. The active
@@ -22,32 +22,43 @@ workflow.
 The main Agent may:
 
 - understand the request and ask only essential clarification questions;
-- perform the minimum read-only preflight needed for a safe planning packet;
+- perform only a trivial fact lookup or narrow read-only preflight that normally
+  needs at most one or two tool calls and no remote host, broad search,
+  iterative parsing, or substantial output synthesis;
 - define a concise plan, write scope, constraints, and acceptance criteria;
 - spawn, coordinate, and wait for the Worker;
-- perform targeted read-only acceptance review after the Worker returns;
+- perform the smallest one or two targeted read-only acceptance checks after
+  the Worker returns;
 - send one focused correction to the same Medium Worker when supported; and
 - report the final result, evidence, risks, and blockers.
 
-The main Agent must not perform substantive execution by default. This includes
-implementation edits, side-effect commands, broad repository exploration,
-tests, browser or cloud actions, API writes, commit, and push. It must not
-repeat the Worker's broad exploration during acceptance review.
+The main Agent must not perform non-trivial work by default. This includes
+remote inspection, broad or multi-file exploration, iterative search or
+parsing, long-output analysis, multi-source synthesis, implementation edits,
+commands, tests, browser or cloud actions, API operations, commit, and push. It
+must not repeat the Worker's investigation during acceptance review.
 
-The Medium Worker owns broad exploration, file and configuration changes,
-commands, tests, browser or cloud actions, API writes, commit and push when
-requested, and evidence collection. A Worker must execute its bounded task
-directly and must not recursively delegate or require another Agent.
+The Medium Worker owns broad exploration, SSH and remote inspection, read-only
+analysis, file and configuration changes, commands, tests, authenticated
+browser or cloud actions, API operations, commit and push when requested, and
+evidence collection. A Worker must execute its bounded task directly and must
+not recursively delegate or require another Agent.
 
 ## Trigger And Direct Handling
 
-Use this workflow for non-trivial work involving code, files, configuration,
-commands with side effects, browser actions, cloud operations, API writes,
-multi-step verification, or requested commit and push.
+Use this workflow for every non-trivial task, read-only or mutating. This
+includes SSH or remote inspection; Thread, rollout, session, or long-log
+analysis; multi-file or repository-wide investigation; iterative searching,
+filtering, or parsing; multi-source research requiring synthesis;
+authenticated browser inspection; tasks expected to need more than two tool
+calls or substantial output analysis; code, file, or configuration changes;
+commands and tests; browser, cloud, or API operations; and commit or push.
 
-Handle direct questions, explanations, and simple read-only inspection or fact
-lookup directly. Do not spawn a Worker for trivial or read-only work that the
-main Agent can complete with a narrow inspection.
+Handle directly only explanations from visible context and trivial fact lookup
+or a narrow read-only check that normally needs at most one or two tool calls,
+no remote host, broad search, iterative parsing, or substantial output
+synthesis. For example, one weather search remains direct; SSH Thread analysis
+unambiguously requires `spawn_agent`.
 
 ## Native Delegation Contract
 
@@ -84,8 +95,9 @@ Keep the packet concise but complete. Include:
 5. verifiable acceptance criteria; and
 6. strongest practical verification.
 
-Do not perform broad exploration to build the packet. Context inheritance is
-off by default, so include facts the Worker cannot safely infer.
+Do not perform broad or iterative exploration to build the packet. Context
+inheritance is off by default, so include only visible facts and facts available
+through a trivial narrow preflight; let the Worker discover the rest.
 
 ## Worker Execution And Return
 
@@ -101,10 +113,10 @@ The main Agent coordinates but does not duplicate execution.
 
 ## Targeted Acceptance Review
 
-After the Worker returns, inspect only the outputs and evidence needed to check
-the stated acceptance criteria. Read specific changed files, diffs, test
-results, process state, logs, screenshots, API read-backs, or remote hashes as
-appropriate. Avoid a second full repository or environment exploration.
+After the Worker returns, perform only the smallest one or two read-only checks
+needed to validate the stated acceptance criteria. If acceptance requires
+broader investigation or substantial output analysis, send that work to the
+Worker. Avoid a second full repository or environment exploration.
 
 ## One Focused Correction
 

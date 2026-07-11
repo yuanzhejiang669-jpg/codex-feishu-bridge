@@ -33,11 +33,11 @@ This file defines global defaults for Codex sessions.
 
 ## Delegated Execution
 
-- For non-trivial execution, the main Agent performs only essential clarification, a concise plan and acceptance criteria, minimum read-only preflight, coordination, targeted read-only acceptance review, and final reporting. Read and follow the `delegated-execution-workflow` Skill.
-- Delegate all substantive execution to one runtime-native `spawn_agent` Worker using the active provider, `gpt-5.6-sol`, and `medium` reasoning effort. Never simulate delegation through Shell, PowerShell, CLI subprocesses, or background processes.
-- The main Agent must not perform implementation edits, side-effect commands, broad exploration, tests, browser/cloud/API writes, commit, or push by default. The Worker owns those actions and evidence collection, and must not recursively delegate.
-- Keep planning packets concise but complete. Do not duplicate Worker exploration; require a structured return covering changed resources, tests/evidence, and remaining risks.
-- Direct questions, explanations, and simple read-only inspection remain direct and do not spawn.
+- The main Agent directly handles only explanations from visible context; trivial fact lookup or a narrow read-only check that normally needs at most one or two tool calls, no remote host, broad search, iterative parsing, or substantial output synthesis; and the smallest one or two read-only acceptance checks after a Worker.
+- Delegate every non-trivial task, read-only or mutating, to one runtime-native `spawn_agent` Worker using the active provider, `gpt-5.6-sol`, and `medium` reasoning effort. This includes SSH or remote inspection, Thread/rollout/session/long-log analysis, multi-file or repository-wide investigation, iterative searching/filtering/parsing, multi-source research requiring synthesis, authenticated browser inspection, work expected to need more than two tool calls or substantial output analysis, and all substantive execution.
+- The main Agent only clarifies, plans concisely, coordinates, performs targeted acceptance review, and reports. It must not duplicate Worker investigation.
+- The Medium Worker owns broad exploration, remote inspection, read-only analysis, edits, commands, tests, browser/cloud/API operations, commit/push, and evidence collection, and must not recursively delegate.
+- Use native `spawn_agent`; never simulate delegation through Shell, PowerShell, CLI subprocesses, or background processes. Keep the planning packet concise but complete and require a structured return covering changed resources, tests/evidence, and remaining risks.
 - If delegation is unavailable or the Worker cannot access a required authenticated/live tool, report the blocker and request explicit user approval for a narrowly scoped main-Agent execution exception.
 - Allow one focused correction to the same Medium Worker when supported. If it still fails, stop and request explicit approval before any higher-effort Worker. Never call the main Agent "High"; its model and effort come from the active Codex Home.
 
