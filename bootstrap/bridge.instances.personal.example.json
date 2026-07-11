@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "device": {
+    "id": "personal-device",
+    "name": "Personal device",
+    "description": "Public-safe 15-profile Codex Feishu Bridge topology"
+  },
+  "paths": {
+    "sourceRoot": "{{REPO_ROOT}}",
+    "runtimeRoot": "{{RUNTIME_ROOT}}",
+    "workspaceRoot": "{{WORKSPACE_ROOT}}",
+    "codexHome": "{{CODEX_HOME}}",
+    "codexConfig": "{{CODEX_HOME}}/config.toml"
+  },
+  "controlPanel": {
+    "title": "Codex Feishu Bridge Control Panel",
+    "host": "127.0.0.1",
+    "port": 8320,
+    "url": "http://127.0.0.1:8320/",
+    "taskName": "CodexFeishuBridgeControlPanel",
+    "startScript": "{{REPO_ROOT}}/start-control-panel.ps1",
+    "stopScript": "{{REPO_ROOT}}/stop-control-panel.ps1",
+    "pidFile": "{{RUNTIME_ROOT}}/control-panel/state/control-panel.pid",
+    "logDir": "{{RUNTIME_ROOT}}/control-panel/logs"
+  },
+  "proxies": [
+    { "id": "mimo2codex", "label": "mimo2codex official route", "port": 8788, "url": "http://127.0.0.1:8788/v1" },
+    { "id": "mimo2codex-apideepseek", "label": "mimo2codex alternate route", "port": 8789, "url": "http://127.0.0.1:8789/v1" }
+  ],
+  "instances": [
+    { "id": "default", "name": "default", "label": "Default Bot", "larkProfile": "default", "runtimeRoot": "{{RUNTIME_ROOT}}", "workspace": "{{WORKSPACE_ROOT}}/feishu-bridge", "codexHome": "{{CODEX_HOME}}", "desktopCodexHome": "", "taskName": "CodexFeishuBridgeWatchdog" },
+    { "id": "codex-assistant-1", "name": "codex-assistant-1", "label": "Codex Assistant 1", "larkProfile": "codex-assistant-1", "runtimeRoot": "{{RUNTIME_ROOT}}/instances/codex-assistant-1", "workspace": "{{WORKSPACE_ROOT}}/feishu-bridge-codex-assistant-1", "codexHome": "{{CODEX_HOME}}", "desktopCodexHome": "", "taskName": "CodexFeishuBridgeWatchdog-codex-assistant-1" },
+    { "id": "codex-assistant-2", "name": "codex-assistant-2", "label": "Codex Assistant 2", "larkProfile": "codex-assistant-2", "runtimeRoot": "{{RUNTIME_ROOT}}/instances/codex-assistant-2", "workspace": "{{WORKSPACE_ROOT}}/feishu-bridge-codex-assistant-2", "codexHome": "{{CODEX_HOME}}", "desktopCodexHome": "", "taskName": "CodexFeishuBridgeWatchdog-codex-assistant-2" },
+    { "id": "codex-assistant-3", "name": "codex-assistant-3", "label": "Codex Assistant 3", "larkProfile": "codex-assistant-3", "runtimeRoot": "{{RUNTIME_ROOT}}/instances/codex-assistant-3", "workspace": "{{WORKSPACE_ROOT}}/feishu-bridge-codex-assistant-3", "codexHome": "{{CODEX_HOME}}", "desktopCodexHome": "", "taskName": "CodexFeishuBridgeWatchdog-codex-assistant-3" },
+    { "id": "codex-assistant-4", "name": "codex-assistant-4", "label": "Codex Assistant 4", "larkProfile": "codex-assistant-4", "runtimeRoot": "{{RUNTIME_ROOT}}/instances/codex-assistant-4", "workspace": "{{WORKSPACE_ROOT}}/feishu-bridge-codex-assistant-4", "codexHome": "{{CODEX_HOME}}", "desktopCodexHome": "", "taskName": "CodexFeishuBridgeWatchdog-codex-assistant-4" },
+    { "id": "codex-assistant-5", "name": "codex-assistant-5", "label": "Codex Assistant 5", "larkProfile": "codex-assistant-5", "runtimeRoot": "{{RUNTIME_ROOT}}/instances/codex-assistant-5", "workspace": "{{WORKSPACE_ROOT}}/feishu-bridge-codex-assistant-5", "codexHome": "{{CODEX_HOME}}", "desktopCodexHome": "", "taskName": "CodexFeishuBridgeWatchdog-codex-assistant-5" },
+    { "id": "codex-assistant-6", "name": "codex-assistant-6", "label": "Codex Assistant 6", "larkProfile": "codex-assistant-6", "runtimeRoot": "{{RUNTIME_ROOT}}/instances/codex-assistant-6", "workspace": "{{WORKSPACE_ROOT}}/feishu-bridge-codex-assistant-6", "codexHome": "{{CODEX_HOME}}", "desktopCodexHome": "", "taskName": "CodexFeishuBridgeWatchdog-codex-assistant-6" },
+    { "id": "codex-assistant-7", "name": "codex-assistant-7", "label": "Codex Assistant 7", "larkProfile": "codex-assistant-7", "runtimeRoot": "{{RUNTIME_ROOT}}/instances/codex-assistant-7", "workspace": "{{WORKSPACE_ROOT}}/feishu-bridge-codex-assistant-7", "codexHome": "{{CODEX_HOME}}", "desktopCodexHome": "", "taskName": "CodexFeishuBridgeWatchdog-codex-assistant-7" },
+    { "id": "codex-assistant-8", "name": "codex-assistant-8", "label": "Codex Assistant 8", "larkProfile": "codex-assistant-8", "runtimeRoot": "{{RUNTIME_ROOT}}/instances/codex-assistant-8", "workspace": "{{WORKSPACE_ROOT}}/feishu-bridge-codex-assistant-8", "codexHome": "{{CODEX_HOME}}", "desktopCodexHome": "", "taskName": "CodexFeishuBridgeWatchdog-codex-assistant-8" },
+    { "id": "codex-assistant-9", "name": "codex-assistant-9", "label": "Codex Assistant 9", "larkProfile": "codex-assistant-9", "runtimeRoot": "{{RUNTIME_ROOT}}/instances/codex-assistant-9", "workspace": "{{WORKSPACE_ROOT}}/feishu-bridge-codex-assistant-9", "codexHome": "{{CODEX_HOME}}", "desktopCodexHome": "", "taskName": "CodexFeishuBridgeWatchdog-codex-assistant-9" },
+    { "id": "codex-assistant-1-writing", "name": "codex-assistant-1-writing", "label": "Codex Assistant 1 - Writing", "group": "writing", "larkProfile": "codex-assistant-1-writing", "runtimeRoot": "{{RUNTIME_ROOT}}/instances/codex-assistant-1-writing", "workspace": "{{WORKSPACE_ROOT}}/feishu-bridge-codex-assistant-1-writing", "codexHome": "{{CODEX_HOMES_ROOT}}/codex-assistant-writing", "desktopCodexHome": "{{CODEX_HOME}}", "taskName": "CodexFeishuBridgeWatchdog-codex-assistant-1-writing" },
+    { "id": "codex-assistant-2-writing", "name": "codex-assistant-2-writing", "label": "Codex Assistant 2 - Writing", "group": "writing", "larkProfile": "codex-assistant-2-writing", "runtimeRoot": "{{RUNTIME_ROOT}}/instances/codex-assistant-2-writing", "workspace": "{{WORKSPACE_ROOT}}/feishu-bridge-codex-assistant-2-writing", "codexHome": "{{CODEX_HOMES_ROOT}}/codex-assistant-writing", "desktopCodexHome": "{{CODEX_HOME}}", "taskName": "CodexFeishuBridgeWatchdog-codex-assistant-2-writing" },
+    { "id": "codex-assistant-3-writing", "name": "codex-assistant-3-writing", "label": "Codex Assistant 3 - Writing", "group": "writing", "larkProfile": "codex-assistant-3-writing", "runtimeRoot": "{{RUNTIME_ROOT}}/instances/codex-assistant-3-writing", "workspace": "{{WORKSPACE_ROOT}}/feishu-bridge-codex-assistant-3-writing", "codexHome": "{{CODEX_HOMES_ROOT}}/codex-assistant-writing", "desktopCodexHome": "{{CODEX_HOME}}", "taskName": "CodexFeishuBridgeWatchdog-codex-assistant-3-writing" },
+    { "id": "codex-assistant-11-writing", "name": "codex-assistant-11-writing", "label": "Codex Assistant 11 - Writing", "group": "writing", "larkProfile": "codex-assistant-11-writing", "runtimeRoot": "{{RUNTIME_ROOT}}/instances/codex-assistant-11-writing", "workspace": "{{WORKSPACE_ROOT}}/feishu-bridge-codex-assistant-11-writing", "codexHome": "{{CODEX_HOMES_ROOT}}/codex-assistant-writing", "desktopCodexHome": "{{CODEX_HOME}}", "taskName": "CodexFeishuBridgeWatchdog-codex-assistant-11-writing" },
+    { "id": "180bot", "name": "180bot", "label": "180bot", "larkProfile": "180bot", "runtimeRoot": "{{RUNTIME_ROOT}}/instances/180bot", "workspace": "{{WORKSPACE_ROOT}}/feishu-bridge-180bot", "codexHome": "{{CODEX_HOME}}", "desktopCodexHome": "{{CODEX_HOME}}", "taskName": "CodexFeishuBridgeWatchdog-180bot" }
+  ]
+}

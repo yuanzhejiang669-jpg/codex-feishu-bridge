@@ -156,6 +156,7 @@ http://127.0.0.1:8320/
 
 ## 文档
 
+- [个人环境迁移](docs/personal-environment-migration.md)
 - [架构说明](docs/architecture.md)
 - [控制面板](docs/control-panel.md)
 - [工作空间工厂](docs/workspace-factory.md)

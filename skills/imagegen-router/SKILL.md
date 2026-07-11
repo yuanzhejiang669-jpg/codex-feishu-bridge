@@ -10,7 +10,7 @@ Use this skill for image generation or editing through the user's personal OpenA
 Bundled CLI:
 
 ```powershell
-python C:\Users\yzjiang\.codex\skills\imagegen-router\scripts\imagegen_router.py --help
+python "$env:USERPROFILE\.codex\skills\imagegen-router\scripts\imagegen_router.py" --help
 ```
 
 ## Providers
@@ -51,19 +51,19 @@ Never print API keys. Report only which environment variable was used.
 List configured providers:
 
 ```powershell
-python C:\Users\yzjiang\.codex\skills\imagegen-router\scripts\imagegen_router.py providers
+python "$env:USERPROFILE\.codex\skills\imagegen-router\scripts\imagegen_router.py" providers
 ```
 
 Check one provider:
 
 ```powershell
-python C:\Users\yzjiang\.codex\skills\imagegen-router\scripts\imagegen_router.py check --provider auto
+python "$env:USERPROFILE\.codex\skills\imagegen-router\scripts\imagegen_router.py" check --provider auto
 ```
 
 Generate through the first available provider:
 
 ```powershell
-python C:\Users\yzjiang\.codex\skills\imagegen-router\scripts\imagegen_router.py generate `
+python "$env:USERPROFILE\.codex\skills\imagegen-router\scripts\imagegen_router.py" generate `
   "A clean product mockup on a white studio background, no text." `
   --provider auto `
   --output-dir .\generated-images `
@@ -73,7 +73,7 @@ python C:\Users\yzjiang\.codex\skills\imagegen-router\scripts\imagegen_router.py
 Generate with round-robin provider selection:
 
 ```powershell
-python C:\Users\yzjiang\.codex\skills\imagegen-router\scripts\imagegen_router.py generate `
+python "$env:USERPROFILE\.codex\skills\imagegen-router\scripts\imagegen_router.py" generate `
   "A simple clean product icon on a white background, no text." `
   --provider round-robin `
   --output-dir .\generated-images `
@@ -83,7 +83,7 @@ python C:\Users\yzjiang\.codex\skills\imagegen-router\scripts\imagegen_router.py
 Edit one or more images:
 
 ```powershell
-python C:\Users\yzjiang\.codex\skills\imagegen-router\scripts\imagegen_router.py edit `
+python "$env:USERPROFILE\.codex\skills\imagegen-router\scripts\imagegen_router.py" edit `
   "Replace the background with a soft gray studio backdrop; preserve the subject." `
   --image .\input.png `
   --provider auto `
@@ -102,7 +102,7 @@ python C:\Users\yzjiang\.codex\skills\imagegen-router\scripts\imagegen_router.py
 - `--output-format`: `png`, `jpeg`, or `webp`.
 - `--response-format`: Prefer `b64_json` when the provider supports it because URL download behavior can vary.
 - `--n`: Number of images, default `1`.
-- `--state-file`: Override the round-robin state file. Default is `C:\Users\yzjiang\.codex\state\imagegen-router.json`.
+- `--state-file`: Override the round-robin state file. Default is `$env:USERPROFILE\.codex\state\imagegen-router.json` on Windows.
 
 ## Notes
 

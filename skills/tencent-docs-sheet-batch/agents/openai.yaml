@@ -1,0 +1,4 @@
+interface:
+  display_name: "Tencent Docs Sheet Batch"
+  short_description: "Precise Tencent Docs sheet filling and row marking"
+  default_prompt: "Use $tencent-docs-sheet-batch to fill a Tencent Docs sheet range and verify every changed cell."

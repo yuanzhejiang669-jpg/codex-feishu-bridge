@@ -1,0 +1,106 @@
+# Public-safe personal Codex configuration template.
+# The installer replaces double-braced path placeholders. Provider secrets must
+# be supplied through the named environment variables.
+
+model = "gpt-5.6-sol"
+model_provider = "lthome"
+model_reasoning_effort = "high"
+web_search = "live"
+service_tier = "fast"
+personality = "pragmatic"
+suppress_unstable_features_warning = true
+
+[model_providers.sub2api]
+name = "https://sub2api.douxuenong.xyz"
+base_url = "https://sub2api.douxuenong.xyz/v1"
+wire_api = "responses"
+env_key = "SUB2API_API_KEY"
+
+[model_providers.lthome]
+name = "https://sub.lthome.tk"
+base_url = "https://sub.lthome.tk/v1"
+wire_api = "responses"
+env_key = "LTHOME_API_KEY"
+
+[model_providers.muyuan]
+name = "https://muyuan.do"
+base_url = "https://muyuan.do/v1"
+wire_api = "responses"
+env_key = "MUYUAN_API_KEY"
+
+[model_providers.anyrouter]
+name = "https://anyrouter.top"
+base_url = "https://anyrouter.top/v1"
+wire_api = "responses"
+env_key = "ANYROUTER_API_KEY"
+
+[model_providers.icoe]
+name = "https://icoe.pp.ua"
+base_url = "https://icoe.pp.ua/v1"
+wire_api = "responses"
+env_key = "ICOE_API_KEY"
+
+[model_providers.jianzhile]
+name = "https://jianzhile.vip"
+base_url = "https://jianzhile.vip/v1"
+wire_api = "responses"
+env_key = "JIANZHILE_API_KEY"
+
+[model_providers.cliproxy]
+name = "Cliproxy"
+base_url = "http://127.0.0.1:8317/v1"
+wire_api = "responses"
+env_key = "CLIPROXY_API_KEY"
+
+[model_providers.mimo2codex]
+name = "mimo2codex"
+base_url = "http://127.0.0.1:8788/v1"
+wire_api = "responses"
+env_key = "MIMO2CODEX_KEY"
+
+[model_providers.mimo2codex-apideepseek]
+name = "mimo2codex-apideepseek"
+base_url = "http://127.0.0.1:8789/v1"
+wire_api = "responses"
+env_key = "MIMO2CODEX_KEY"
+
+[mcp_servers.tavily]
+type = "stdio"
+command = "{{PYTHON_EXE}}"
+args = ["{{REPO_ROOT}}/tools/tavily-router/server.py"]
+env = { TAVILY_KEY_POOL_PATH = "{{USER_HOME}}/.config/codex-feishu-bridge/tavily-key-pool.json", TAVILY_ROUTER_STATE_PATH = "{{USER_HOME}}/.local/state/codex-feishu-bridge/tavily-router-state.json" }
+
+[mcp_servers.codex_browser_control]
+type = "stdio"
+command = "{{NODE_EXE}}"
+args = ["{{REPO_ROOT}}/tools/codex-browser-control-mcp/src/server.mjs"]
+env = { BROWSER_CONTROL_EXTENSION_PORT = "18795", BROWSER_CONTROL_EXTENSION_TOKEN = "SET_IN_LOCAL_CONFIG" }
+
+[mcp_servers.codex_desktop_control]
+type = "stdio"
+command = "{{PYTHON_EXE}}"
+args = ["{{REPO_ROOT}}/tools/codex-desktop-control-mcp/server.py"]
+env = { CODEX_DESKTOP_CONTROL_OUTPUT_DIR = "{{CODEX_HOME}}/tmp/desktop-control" }
+
+[mcp_servers.firecrawl]
+type = "stdio"
+command = "{{PYTHON_EXE}}"
+args = ["{{REPO_ROOT}}/tools/firecrawl-router/server.py"]
+env = { FIRECRAWL_KEY_POOL_PATH = "{{USER_HOME}}/.config/codex-feishu-bridge/firecrawl-key-pool.json", FIRECRAWL_ROUTER_STATE_PATH = "{{USER_HOME}}/.local/state/codex-feishu-bridge/firecrawl-router-state.json" }
+
+[windows]
+sandbox = "elevated"
+
+[desktop]
+ambient-suggestions-enabled = false
+followUpQueueMode = "steer"
+conversationDetailMode = "STEPS_COMMANDS"
+default-service-tier = "fast"
+
+[features]
+js_repl = false
+
+[features.multi_agent_v2]
+enabled = true
+hide_spawn_agent_metadata = false
+tool_namespace = "agents"
