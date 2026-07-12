@@ -2915,10 +2915,14 @@ function scriptArgsForInstance(instanceName) {
 }
 
 function runScript(filePath, args = [], timeoutMs = 60_000) {
+  return runExecutable("powershell.exe", ["-NoProfile", "-NonInteractive", "-File", filePath, ...args], timeoutMs);
+}
+
+function runExecutable(filePath, args = [], timeoutMs = 60_000) {
   return new Promise((resolve) => {
     execFile(
-      "powershell.exe",
-      ["-NoProfile", "-NonInteractive", "-File", filePath, ...args],
+      filePath,
+      args,
       {
         encoding: "utf8",
         windowsHide: true,
@@ -3441,6 +3445,113 @@ async function restartIdleInstances(names) {
     summary: {
       restarted: results.filter((item) => item.action === "restarted").length,
       skipped: results.filter((item) => item.action === "skipped").length,
+      failed: results.filter((item) => item.action === "failed").length,
+      total: results.length,
+    },
+  };
+}
+
+function isProcessAlive(pid) {
+  if (!pid) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function assertBridgePidOwnership(descriptor, pid) {
+  const lockFile = path.join(descriptor.runtimeRoot, "state", "bridge.lock.json");
+  const lock = await readJsonFile(lockFile);
+  const lockPid = Number(lock?.pid || 0);
+  const lockInstance = String(lock?.instance || "");
+  if (lockPid !== pid || lockInstance !== descriptor.name) {
+    throw new Error(`拒绝终止 PID ${pid}：Bridge 锁文件与所选 Bot 不匹配`);
+  }
+}
+
+async function clearForcedRestartState(descriptor) {
+  const stateDir = path.join(descriptor.runtimeRoot, "state");
+  await Promise.all([
+    unlink(path.join(stateDir, "bridge.pid")).catch(() => {}),
+    unlink(path.join(stateDir, "bridge.stop")).catch(() => {}),
+    unlink(path.join(stateDir, "bridge.lock.json")).catch(() => {}),
+    writeFile(path.join(stateDir, "active-runs.json"), `${JSON.stringify({ runs: {} }, null, 2)}\n`, "utf8"),
+  ]);
+}
+
+async function forceRestartInstance(name) {
+  const descriptor = await getInstanceDescriptorByName(name);
+  const active = await hasActiveRun(descriptor);
+  const beforePid = await readPidForDescriptor(descriptor);
+  let stopResult = {
+    ok: true,
+    exitCode: 0,
+    error: "",
+    stdout: beforePid ? "" : "Bridge 未运行；清理旧状态后直接启动。",
+    stderr: "",
+  };
+
+  if (beforePid && isProcessAlive(beforePid)) {
+    await assertBridgePidOwnership(descriptor, beforePid);
+    stopResult = await runExecutable("taskkill.exe", ["/PID", String(beforePid), "/T", "/F"], 20_000);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    if (isProcessAlive(beforePid)) {
+      return {
+        name: descriptor.name,
+        action: "failed",
+        reason: "强制终止 Bridge 进程树失败",
+        beforePid,
+        afterPid: beforePid,
+        activeRuns: active.count,
+        stopResult,
+      };
+    }
+  }
+
+  await clearForcedRestartState(descriptor);
+  const startResult = await runScript(startBridgeScript, scriptArgsForInstance(descriptor.name), 60_000);
+  await new Promise((resolve) => setTimeout(resolve, 1200));
+  const afterPid = await readPidForDescriptor(descriptor);
+  const restarted = Boolean(startResult.ok && afterPid && isProcessAlive(afterPid));
+  return {
+    name: descriptor.name,
+    action: restarted ? "restarted" : "failed",
+    reason: restarted ? `已强制重启；清理活动任务 ${active.count} 个` : "启动后未确认到新 Bridge 进程",
+    beforePid,
+    afterPid,
+    pidChanged: Boolean(beforePid && afterPid && beforePid !== afterPid),
+    activeRuns: active.count,
+    stopResult,
+    startResult,
+  };
+}
+
+async function forceRestartInstances(names) {
+  if (!Array.isArray(names) || names.length === 0) {
+    throw new Error("请至少选择一个 Bot");
+  }
+  const results = [];
+  for (const name of [...new Set(names)]) {
+    try {
+      results.push(await forceRestartInstance(name));
+    } catch (error) {
+      results.push({
+        name,
+        action: "failed",
+        reason: errorMessage(error),
+        beforePid: null,
+        afterPid: null,
+        activeRuns: 0,
+      });
+    }
+  }
+  return {
+    results,
+    summary: {
+      restarted: results.filter((item) => item.action === "restarted").length,
+      skipped: 0,
       failed: results.filter((item) => item.action === "failed").length,
       total: results.length,
     },
@@ -4033,6 +4144,26 @@ async function requestHandler(req, res) {
       jsonResponse(res, 200, {
         ok: true,
         ...(await restartIdleInstances(names)),
+      });
+    } catch (error) {
+      jsonResponse(res, 400, {
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/restart/force") {
+    try {
+      const body = await readRequestJson(req);
+      if (body.confirm !== "强制重启所选Bot") {
+        throw new Error("确认文本不匹配");
+      }
+      const names = Array.isArray(body.names) ? body.names.map((item) => String(item)) : [];
+      jsonResponse(res, 200, {
+        ok: true,
+        ...(await forceRestartInstances(names)),
       });
     } catch (error) {
       jsonResponse(res, 400, {

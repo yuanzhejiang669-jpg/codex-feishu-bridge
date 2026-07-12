@@ -294,22 +294,20 @@ function renderRestartList(data) {
 
   $("restartBotList").innerHTML = rows
     .map((item) => {
-      const disabled = item.activeRunCount > 0;
-      if (disabled) state.selectedRestartBots.delete(item.name);
-      const checked = state.selectedRestartBots.has(item.name) && !disabled ? "checked" : "";
-      const disabledAttr = disabled ? "disabled" : "";
+      const activeRun = item.activeRunCount > 0;
+      const checked = state.selectedRestartBots.has(item.name) ? "checked" : "";
       const online = item.online ? "在线" : "离线";
-      const active = item.activeRunCount > 0 ? `${item.activeRunCount} 个任务，跳过` : "空闲";
+      const active = activeRun ? `${item.activeRunCount} 个任务` : "空闲";
       return `
-        <label class="restart-row ${disabled ? "is-disabled" : ""}">
-          <input type="checkbox" value="${escapeHtml(item.name)}" ${checked} ${disabledAttr} />
+        <label class="restart-row ${activeRun ? "is-active" : ""}">
+          <input type="checkbox" value="${escapeHtml(item.name)}" ${checked} />
           <span class="restart-main">
             <strong>${escapeHtml(item.label)}</strong>
             <span>${mono(item.name)}</span>
           </span>
           <span class="restart-meta">
             ${statusBadge(item.online ? "good" : "warn", online)}
-            ${statusBadge(disabled ? "warn" : "good", active)}
+            ${statusBadge(activeRun ? "warn" : "good", active)}
             <span class="mono">PID ${escapeHtml(item.pid || "-")}</span>
           </span>
         </label>
@@ -2182,6 +2180,52 @@ async function restartSelectedIdleBots() {
   }
 }
 
+async function forceRestartSelectedBots() {
+  const names = selectedRestartNames();
+  if (names.length === 0) {
+    setActionResult("restartActionResult", "warn", "请先选择至少一个 Bot。");
+    return;
+  }
+  const accepted = window.confirm(
+    `将强制终止并重启 ${names.length} 个所选 Bot。当前任务和内存等待队列会被丢弃，历史会话与工作区文件会保留。是否继续？`,
+  );
+  if (!accepted) return;
+
+  const buttonIds = ["restartIdleButton", "forceRestartButton", "selectAllIdleButton", "clearRestartSelectionButton"];
+  setButtonsDisabled(buttonIds, true);
+  setActionResult("restartActionResult", "info", `正在强制重启 ${escapeHtml(names.length)} 个所选 Bot。`);
+  try {
+    const data = await postJson("/api/restart/force", {
+      names,
+      confirm: "强制重启所选Bot",
+    });
+    const rows = (data.results || [])
+      .map((item) => {
+        const kind = item.action === "restarted" ? "good" : "bad";
+        return `
+          <div class="result-row">
+            ${statusBadge(kind, item.action)}
+            <strong>${escapeHtml(item.name)}</strong>
+            <span>${escapeHtml(item.reason || "")}</span>
+            <span class="mono">PID ${escapeHtml(item.beforePid || "-")} -> ${escapeHtml(item.afterPid || "-")}</span>
+          </div>
+        `;
+      })
+      .join("");
+    setActionResult(
+      "restartActionResult",
+      data.summary?.failed ? "warn" : "good",
+      `<strong>强制重启完成：成功 ${escapeHtml(data.summary?.restarted || 0)}，失败 ${escapeHtml(data.summary?.failed || 0)}。</strong><div class="result-list">${rows}</div>`,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    await refresh();
+  } catch (error) {
+    setActionResult("restartActionResult", "bad", `<strong>强制重启失败</strong><pre class="mono">${escapeHtml(error.message)}</pre>`);
+  } finally {
+    setButtonsDisabled(buttonIds, false);
+  }
+}
+
 async function refresh() {
   $("refreshButton").disabled = true;
   $("refreshButton").textContent = "刷新中";
@@ -2330,6 +2374,7 @@ $("cleanupRefreshButton").addEventListener("click", () => refreshCleanupPlan(tru
 $("cleanupResidualList").addEventListener("click", handleCleanupClick);
 $("cleanupFormalList").addEventListener("click", handleCleanupClick);
 $("restartIdleButton").addEventListener("click", restartSelectedIdleBots);
+$("forceRestartButton").addEventListener("click", forceRestartSelectedBots);
 $("selectAllIdleButton").addEventListener("click", selectAllIdleBots);
 $("clearRestartSelectionButton").addEventListener("click", clearRestartSelection);
 $("doctorRefreshButton").addEventListener("click", () => refreshDoctor(true));
