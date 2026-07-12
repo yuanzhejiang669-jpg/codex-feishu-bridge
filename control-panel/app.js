@@ -2143,7 +2143,7 @@ async function restartSelectedIdleBots() {
     return;
   }
 
-  setButtonsDisabled(["restartIdleButton", "selectAllIdleButton", "clearRestartSelectionButton"], true);
+  setButtonsDisabled(["restartIdleButton", "forceRestartButton", "selectAllIdleButton", "clearRestartSelectionButton"], true);
   setActionResult("restartActionResult", "info", `正在重启 ${escapeHtml(names.length)} 个已选 Bot 的 Bridge 进程。`);
   try {
     const data = await postJson("/api/restart/idle", {
@@ -2176,7 +2176,7 @@ async function restartSelectedIdleBots() {
   } catch (error) {
     setActionResult("restartActionResult", "bad", `<strong>重启失败</strong><pre class="mono">${escapeHtml(error.message)}</pre>`);
   } finally {
-    setButtonsDisabled(["restartIdleButton", "selectAllIdleButton", "clearRestartSelectionButton"], false);
+    setButtonsDisabled(["restartIdleButton", "forceRestartButton", "selectAllIdleButton", "clearRestartSelectionButton"], false);
   }
 }
 

@@ -3473,6 +3473,7 @@ async function assertBridgePidOwnership(descriptor, pid) {
 
 async function clearForcedRestartState(descriptor) {
   const stateDir = path.join(descriptor.runtimeRoot, "state");
+  await mkdir(stateDir, { recursive: true });
   await Promise.all([
     unlink(path.join(stateDir, "bridge.pid")).catch(() => {}),
     unlink(path.join(stateDir, "bridge.stop")).catch(() => {}),
@@ -3497,11 +3498,11 @@ async function forceRestartInstance(name) {
     await assertBridgePidOwnership(descriptor, beforePid);
     stopResult = await runExecutable("taskkill.exe", ["/PID", String(beforePid), "/T", "/F"], 20_000);
     await new Promise((resolve) => setTimeout(resolve, 500));
-    if (isProcessAlive(beforePid)) {
+    if (!stopResult.ok || isProcessAlive(beforePid)) {
       return {
         name: descriptor.name,
         action: "failed",
-        reason: "强制终止 Bridge 进程树失败",
+        reason: stopResult.ok ? "强制终止 Bridge 进程树后父进程仍存活" : "taskkill 未确认完整进程树已终止",
         beforePid,
         afterPid: beforePid,
         activeRuns: active.count,
@@ -3514,11 +3515,18 @@ async function forceRestartInstance(name) {
   const startResult = await runScript(startBridgeScript, scriptArgsForInstance(descriptor.name), 60_000);
   await new Promise((resolve) => setTimeout(resolve, 1200));
   const afterPid = await readPidForDescriptor(descriptor);
-  const restarted = Boolean(startResult.ok && afterPid && isProcessAlive(afterPid));
+  let lockVerified = false;
+  if (startResult.ok && afterPid && isProcessAlive(afterPid)) {
+    try {
+      await assertBridgePidOwnership(descriptor, afterPid);
+      lockVerified = true;
+    } catch {}
+  }
+  const restarted = Boolean(startResult.ok && afterPid && isProcessAlive(afterPid) && lockVerified);
   return {
     name: descriptor.name,
     action: restarted ? "restarted" : "failed",
-    reason: restarted ? `已强制重启；清理活动任务 ${active.count} 个` : "启动后未确认到新 Bridge 进程",
+    reason: restarted ? `已强制重启；清理活动任务 ${active.count} 个` : "启动后未确认到匹配的新 Bridge 进程与锁文件",
     beforePid,
     afterPid,
     pidChanged: Boolean(beforePid && afterPid && beforePid !== afterPid),
