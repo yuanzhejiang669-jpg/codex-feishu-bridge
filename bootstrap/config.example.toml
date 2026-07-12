@@ -86,7 +86,7 @@ env = { CODEX_DESKTOP_CONTROL_OUTPUT_DIR = "{{CODEX_HOME}}/tmp/desktop-control" 
 type = "stdio"
 command = "{{PYTHON_EXE}}"
 args = ["{{REPO_ROOT}}/tools/firecrawl-router/server.py"]
-env = { FIRECRAWL_KEY_POOL_PATH = "{{USER_HOME}}/.config/codex-feishu-bridge/firecrawl-key-pool.json", FIRECRAWL_ROUTER_STATE_PATH = "{{USER_HOME}}/.local/state/codex-feishu-bridge/firecrawl-router-state.json" }
+env = { FIRECRAWL_KEY_POOL_PATH = "{{USER_HOME}}/.config/codex-feishu-bridge/firecrawl-key-pool.json", FIRECRAWL_ROUTER_STATE_PATH = "{{USER_HOME}}/.local/state/codex-feishu-bridge/firecrawl-router-state.json", FIRECRAWL_RATE_LIMIT_COOLDOWN_SECONDS = "180", FIRECRAWL_TRANSIENT_ERROR_COOLDOWN_SECONDS = "30", FIRECRAWL_CREDITS_FALLBACK_COOLDOWN_SECONDS = "21600" }
 
 [windows]
 sandbox = "elevated"

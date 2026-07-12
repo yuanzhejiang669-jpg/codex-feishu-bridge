@@ -54,6 +54,13 @@ The generated topology preserves `default`, `codex-assistant-1` through `codex-a
 5. Authenticate Codex and `lark-cli`, then create Feishu apps/profiles and grant required scopes outside this repository.
 6. Review the Windows sandbox setting before using the configuration on another machine.
 
+After pulling an updated repository on an existing device, MCP definitions that
+point directly at `tools/firecrawl-router/server.py` use the new router after the
+MCP process is restarted (normally by opening a new Codex session). If a local
+configuration points at a copied runtime file instead, copy the repository file
+to that configured path and verify the two files have the same hash. Key-pool and
+router-state files remain device-local and must never be committed.
+
 ## Validation
 
 ```powershell

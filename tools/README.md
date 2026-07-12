@@ -10,6 +10,19 @@ Included tools:
 - `tavily-router`: Tavily Advanced search router backed by a local key pool.
 - `firecrawl-router`: Firecrawl router backed by a local key pool.
 
+The Firecrawl pool may define `rotation_policy` values for
+`rate_limit_cooldown_seconds` (default 180), `transient_error_cooldown_seconds`
+(default 30), `credits_error_fallback_cooldown_seconds` (default 21600),
+`auth_error_cooldown_seconds`, and `payment_error_cooldown_seconds` (both default
+86400). Credit exhaustion uses the official billing-period end when available.
+`firecrawl_pool_status` queries official credit usage per key and degrades each
+failed status query independently without exposing key values.
+The first three defaults can also be set with the corresponding
+`FIRECRAWL_RATE_LIMIT_COOLDOWN_SECONDS`,
+`FIRECRAWL_TRANSIENT_ERROR_COOLDOWN_SECONDS`, and
+`FIRECRAWL_CREDITS_FALLBACK_COOLDOWN_SECONDS` environment variables; pool policy
+values take precedence.
+
 Local-only files are intentionally not committed:
 
 - API key pools and router state files under `.proma`.

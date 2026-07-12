@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -62,112 +64,174 @@ def save_state(state: dict[str, Any]) -> None:
 
 
 def key_records() -> list[dict[str, Any]]:
-    pool = load_pool()
     result: list[dict[str, Any]] = []
-    for index, item in enumerate(pool.get("keys", [])):
+    for index, item in enumerate(load_pool().get("keys", [])):
         if not isinstance(item, dict) or not item.get("enabled", True):
             continue
         api_key = str(item.get("api_key") or "").strip()
-        if not api_key:
-            continue
-        result.append(
-            {
-                "index": index,
-                "alias": str(item.get("alias") or f"key-{index + 1}"),
-                "api_key": api_key,
-            }
-        )
+        if api_key:
+            result.append({"index": index, "alias": str(item.get("alias") or f"key-{index + 1}"), "api_key": api_key})
     return result
 
 
-def cooldown_for_error(stderr: str, exit_code: int) -> tuple[str, int]:
+def sanitize(text: str) -> str:
+    clean = str(text or "")
+    for record in key_records():
+        clean = clean.replace(record["api_key"], "[REDACTED]")
+    clean = re.sub(r"(?i)(authorization\s*[:=]\s*bearer\s+)\S+", r"\1[REDACTED]", clean)
+    clean = re.sub(r"(?i)(api[_-]?key\s*[:=]\s*)\S+", r"\1[REDACTED]", clean)
+    clean = re.sub(r"\bfc-[A-Za-z0-9_-]{8,}\b", "[REDACTED]", clean)
+    return clean[-1200:]
+
+
+def classify_error(output: str, exit_code: int) -> str:
     if exit_code == 0:
-        return "ok", 0
-    text = stderr.lower()
-    policy = load_pool().get("rotation_policy", {})
-    quota_seconds = int(policy.get("quota_error_cooldown_seconds", 259200))
-    transient_seconds = int(policy.get("transient_error_cooldown_seconds", 60))
-    if "rate limit" in text or "quota" in text or "credit" in text or "payment" in text:
-        return "quota", quota_seconds
-    if "unauthorized" in text or "invalid api key" in text or "not authenticated" in text or "forbidden" in text:
-        return "auth", quota_seconds
-    if exit_code != 0:
-        return "transient", transient_seconds
-    return "ok", 0
+        return "ok"
+    text = output.lower()
+    if re.search(r"(?:http(?: status)?\s*)?429|rate[ -]?limit|too many requests", text):
+        return "rate_limit"
+    if re.search(r"(?:http(?: status)?\s*)?402|payment required|billing.*(?:failed|required)|past due", text):
+        return "payment"
+    if re.search(r"(?:http(?: status)?\s*)?(?:401|403)|unauthori[sz]ed|invalid api key|not authenticated|forbidden", text):
+        return "auth"
+    if re.search(r"insufficient (?:team )?credits?|credits? (?:exhausted|depleted)|quota (?:exceeded|exhausted)|out of credits?", text):
+        return "credits_exhausted"
+    if re.search(r"(?:http(?: status)?\s*)?5\d\d|timed? out|timeout|econnreset|econnrefused|temporary|network error|socket hang up", text):
+        return "transient"
+    return "transient"
 
 
-def eligible_keys(state: dict[str, Any]) -> list[dict[str, Any]]:
+def policy_seconds(name: str, default: int) -> int:
+    env_names = {
+        "rate_limit_cooldown_seconds": "FIRECRAWL_RATE_LIMIT_COOLDOWN_SECONDS",
+        "transient_error_cooldown_seconds": "FIRECRAWL_TRANSIENT_ERROR_COOLDOWN_SECONDS",
+        "credits_error_fallback_cooldown_seconds": "FIRECRAWL_CREDITS_FALLBACK_COOLDOWN_SECONDS",
+        "auth_error_cooldown_seconds": "FIRECRAWL_AUTH_ERROR_COOLDOWN_SECONDS",
+        "payment_error_cooldown_seconds": "FIRECRAWL_PAYMENT_ERROR_COOLDOWN_SECONDS",
+    }
+    value = load_pool().get("rotation_policy", {}).get(name, os.environ.get(env_names.get(name, ""), default))
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def parse_timestamp(value: Any) -> float | None:
+    if isinstance(value, (int, float)):
+        return float(value / 1000 if value > 10_000_000_000 else value)
+    if isinstance(value, str) and value.strip():
+        try:
+            return datetime.fromisoformat(value.strip().replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return None
+    return None
+
+
+def find_value(data: Any, names: set[str]) -> Any:
+    if isinstance(data, dict):
+        for key, value in data.items():
+            if key.lower() in names:
+                return value
+        for value in data.values():
+            found = find_value(value, names)
+            if found is not None:
+                return found
+    elif isinstance(data, list):
+        for value in data:
+            found = find_value(value, names)
+            if found is not None:
+                return found
+    return None
+
+
+def query_credit_usage(record: dict[str, Any], timeout: int = 20) -> dict[str, Any]:
+    executable = shutil.which("firecrawl")
+    if not executable:
+        return {"ok": False, "error": "firecrawl CLI not found"}
+    try:
+        completed = subprocess.run(
+            [executable, "credit-usage", "--json", "--api-key", record["api_key"]],
+            text=True, encoding="utf-8", errors="replace", stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, timeout=timeout, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"ok": False, "error": sanitize(str(exc))}
+    combined = (completed.stdout or "") + "\n" + (completed.stderr or "")
+    if completed.returncode != 0:
+        return {"ok": False, "exitCode": completed.returncode, "error": sanitize(completed.stderr or completed.stdout)}
+    try:
+        data = json.loads((completed.stdout or "").strip())
+    except (TypeError, json.JSONDecodeError):
+        return {"ok": False, "exitCode": completed.returncode, "error": sanitize(combined or "invalid credit-usage response")}
+    return {
+        "ok": True,
+        "remainingCredits": find_value(data, {"remainingcredits", "remaining_credits"}),
+        "planCredits": find_value(data, {"plancredits", "plan_credits"}),
+        "billingPeriodEnd": find_value(data, {"billingperiodend", "billing_period_end"}),
+    }
+
+
+def cooldown_until(category: str, record: dict[str, Any]) -> tuple[float, dict[str, Any] | None]:
+    current = now()
+    if category == "rate_limit":
+        return current + policy_seconds("rate_limit_cooldown_seconds", 180), None
+    if category == "transient":
+        return current + policy_seconds("transient_error_cooldown_seconds", 30), None
+    if category == "credits_exhausted":
+        usage = query_credit_usage(record)
+        period_end = parse_timestamp(usage.get("billingPeriodEnd")) if usage.get("ok") else None
+        if period_end and period_end > current:
+            return period_end + 60, usage
+        return current + policy_seconds("credits_error_fallback_cooldown_seconds", 21600), usage
+    if category in {"auth", "payment"}:
+        return current + policy_seconds(f"{category}_error_cooldown_seconds", 86400), None
+    return current, None
+
+
+def eligible_keys(state: dict[str, Any]) -> tuple[list[dict[str, Any]], float | None]:
     records = key_records()
     if not records:
         raise RuntimeError(f"No enabled Firecrawl keys in pool: {POOL_PATH}")
     current = now()
-    eligible: list[dict[str, Any]] = []
-    for record in records:
-        key_state = state.get("keys", {}).get(record["alias"], {})
-        if float(key_state.get("cooldown_until", 0) or 0) <= current:
-            eligible.append(record)
-    return eligible or records
+    eligible = [r for r in records if float(state.get("keys", {}).get(r["alias"], {}).get("cooldown_until", 0) or 0) <= current]
+    if eligible:
+        return eligible, None
+    return [], min(float(state.get("keys", {}).get(r["alias"], {}).get("cooldown_until", 0) or 0) for r in records)
 
 
 def run_firecrawl(args: list[str], timeout: int = 120) -> dict[str, Any]:
     executable = shutil.which("firecrawl")
     if not executable:
         raise RuntimeError("firecrawl CLI not found. Install with: npm install -g firecrawl-cli")
-
     state = load_state()
-    keys = eligible_keys(state)
+    keys, next_retry_at = eligible_keys(state)
+    if not keys:
+        return {"ok": False, "used_key_alias": "", "attempts": [], "stdout": "", "stderr": "All keys are cooling down", "next_retry_at": next_retry_at}
     start_index = int(state.get("cursor", 0) or 0) % len(keys)
     ordered = keys[start_index:] + keys[:start_index]
     attempts: list[dict[str, Any]] = []
-
     for offset, record in enumerate(ordered):
-        command = [executable, *args, "--api-key", record["api_key"]]
         completed = subprocess.run(
-            command,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=timeout,
-            check=False,
+            [executable, *args, "--api-key", record["api_key"]], text=True, encoding="utf-8",
+            errors="replace", stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, check=False,
         )
-        stdout = completed.stdout or ""
-        stderr = completed.stderr or ""
-        reason, cooldown_seconds = cooldown_for_error(stderr + "\n" + stdout, completed.returncode)
-        attempt = {
-            "alias": record["alias"],
-            "exitCode": completed.returncode,
-            "reason": reason,
-            "stderrTail": stderr[-1200:],
-        }
+        stdout, stderr = completed.stdout or "", completed.stderr or ""
+        category = classify_error(stderr + "\n" + stdout, completed.returncode)
+        attempt = {"alias": record["alias"], "exitCode": completed.returncode, "reason": category, "stderrTail": sanitize(stderr)}
         attempts.append(attempt)
         key_state = state.setdefault("keys", {}).setdefault(record["alias"], {})
-        key_state["last_used_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        key_state["last_exit_code"] = completed.returncode
-        key_state["last_reason"] = reason
+        key_state.update({"last_used_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "last_exit_code": completed.returncode, "last_reason": category, "last_error_tail": sanitize(stderr)})
         if completed.returncode == 0:
             key_state["cooldown_until"] = 0
+            key_state.pop("credit_status", None)
             state["cursor"] = (start_index + offset + 1) % max(1, len(keys))
             save_state(state)
-            return {
-                "ok": True,
-                "used_key_alias": record["alias"],
-                "attempts": attempts,
-                "stdout": stdout,
-                "stderr": stderr,
-            }
-        if cooldown_seconds:
-            key_state["cooldown_until"] = now() + cooldown_seconds
+            return {"ok": True, "used_key_alias": record["alias"], "attempts": attempts, "stdout": stdout, "stderr": sanitize(stderr), "next_retry_at": None}
+        key_state["cooldown_until"], usage = cooldown_until(category, record)
+        if usage is not None:
+            key_state["credit_status"] = usage
         save_state(state)
-
-    return {
-        "ok": False,
-        "used_key_alias": "",
-        "attempts": attempts,
-        "stdout": "",
-        "stderr": attempts[-1]["stderrTail"] if attempts else "",
-    }
+    return {"ok": False, "used_key_alias": "", "attempts": attempts, "stdout": "", "stderr": attempts[-1]["stderrTail"] if attempts else "", "next_retry_at": min(float(state["keys"][r["alias"]]["cooldown_until"]) for r in ordered)}
 
 
 def parse_output(text: str) -> Any:
@@ -180,14 +244,12 @@ def parse_output(text: str) -> Any:
         return stripped
 
 
+def tool_result(result: dict[str, Any]) -> dict[str, Any]:
+    return {"ok": result["ok"], "used_key_alias": result["used_key_alias"], "attempts": result["attempts"], "data": parse_output(result["stdout"]), "stderr": result["stderr"], "next_retry_at": result.get("next_retry_at")}
+
+
 @mcp.tool()
-def firecrawl_scrape(
-    url: str,
-    formats: str = "markdown",
-    only_main_content: bool = False,
-    wait_for_ms: int = 0,
-    max_age_ms: int = 0,
-) -> dict[str, Any]:
+def firecrawl_scrape(url: str, formats: str = "markdown", only_main_content: bool = False, wait_for_ms: int = 0, max_age_ms: int = 0) -> dict[str, Any]:
     args = ["scrape", url, "--format", formats, "--json"]
     if only_main_content:
         args.append("--only-main-content")
@@ -195,81 +257,46 @@ def firecrawl_scrape(
         args.extend(["--wait-for", str(wait_for_ms)])
     if max_age_ms > 0:
         args.extend(["--max-age", str(max_age_ms)])
-    result = run_firecrawl(args)
-    return {
-        "ok": result["ok"],
-        "used_key_alias": result["used_key_alias"],
-        "attempts": result["attempts"],
-        "data": parse_output(result["stdout"]),
-        "stderr": result["stderr"][-1200:],
-    }
+    return tool_result(run_firecrawl(args))
 
 
 @mcp.tool()
-def firecrawl_search(
-    query: str,
-    limit: int = 5,
-    sources: str = "web",
-    country: str = "US",
-    scrape: bool = False,
-) -> dict[str, Any]:
+def firecrawl_search(query: str, limit: int = 5, sources: str = "web", country: str = "US", scrape: bool = False) -> dict[str, Any]:
     args = ["search", query, "--limit", str(limit), "--sources", sources, "--country", country, "--json"]
     if scrape:
         args.append("--scrape")
-    result = run_firecrawl(args)
-    return {
-        "ok": result["ok"],
-        "used_key_alias": result["used_key_alias"],
-        "attempts": result["attempts"],
-        "data": parse_output(result["stdout"]),
-        "stderr": result["stderr"][-1200:],
-    }
+    return tool_result(run_firecrawl(args))
 
 
 @mcp.tool()
-def firecrawl_map(
-    url: str,
-    limit: int = 20,
-    search: str = "",
-    include_subdomains: bool = False,
-) -> dict[str, Any]:
+def firecrawl_map(url: str, limit: int = 20, search: str = "", include_subdomains: bool = False) -> dict[str, Any]:
     args = ["map", url, "--wait", "--limit", str(limit), "--json"]
     if search:
         args.extend(["--search", search])
     if include_subdomains:
         args.append("--include-subdomains")
-    result = run_firecrawl(args)
-    return {
-        "ok": result["ok"],
-        "used_key_alias": result["used_key_alias"],
-        "attempts": result["attempts"],
-        "data": parse_output(result["stdout"]),
-        "stderr": result["stderr"][-1200:],
-    }
+    return tool_result(run_firecrawl(args))
 
 
 @mcp.tool()
 def firecrawl_pool_status() -> dict[str, Any]:
-    state = load_state()
-    records = key_records()
-    current = now()
-    return {
-        "pool_path": str(POOL_PATH),
-        "state_path": str(STATE_PATH),
-        "enabled_key_count": len(records),
-        "keys": [
-            {
-                "alias": record["alias"],
-                "cooldown_seconds_remaining": max(
-                    0,
-                    int(float(state.get("keys", {}).get(record["alias"], {}).get("cooldown_until", 0) or 0) - current),
-                ),
-                "last_reason": state.get("keys", {}).get(record["alias"], {}).get("last_reason", ""),
-                "last_exit_code": state.get("keys", {}).get(record["alias"], {}).get("last_exit_code", None),
-            }
-            for record in records
-        ],
-    }
+    state, records, current = load_state(), key_records(), now()
+    keys = []
+    for record in records:
+        key_state = state.get("keys", {}).get(record["alias"], {})
+        usage = query_credit_usage(record)
+        item = {
+            "alias": record["alias"],
+            "cooldown_seconds_remaining": max(0, int(float(key_state.get("cooldown_until", 0) or 0) - current)),
+            "last_reason": key_state.get("last_reason", ""), "last_exit_code": key_state.get("last_exit_code"),
+            "credit_status_ok": usage.get("ok", False),
+        }
+        if usage.get("ok"):
+            item.update({key: usage.get(key) for key in ("remainingCredits", "planCredits", "billingPeriodEnd")})
+        else:
+            item["credit_status_error"] = usage.get("error", "status query failed")
+        keys.append(item)
+    return {"pool_path": str(POOL_PATH), "state_path": str(STATE_PATH), "enabled_key_count": len(records), "keys": keys}
 
 
 if __name__ == "__main__":
