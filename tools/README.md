@@ -25,7 +25,8 @@ values take precedence.
 
 Local-only files are intentionally not committed:
 
-- API key pools and router state files under `.proma`.
+- API key pools under `~/Documents/Codex/mcp-data/key-pools` and router state
+  under `~/Documents/Codex/mcp-data/state`.
 - Browser extension `bridge-token.local.js`.
 - `node_modules`, Python caches, traces, screenshots, logs, and generated runtime output.
 

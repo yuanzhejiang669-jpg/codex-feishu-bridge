@@ -49,7 +49,9 @@ The generated topology preserves `default`, `codex-assistant-1` through `codex-a
 
 1. Set provider environment variables named by each `env_key`; never put key values in the repository.
 2. Replace `SET_IN_LOCAL_CONFIG` in the installed browser MCP configuration with a locally generated bridge token, or remove that MCP until configured.
-3. Create local Tavily and Firecrawl key-pool files if those routers are used.
+3. Create local Tavily and Firecrawl key-pool files under
+   `~/Documents/Codex/mcp-data/key-pools`; router state is created under
+   `~/Documents/Codex/mcp-data/state` when first used.
 4. Install Python/Node dependencies for the selected repo-hosted MCP servers.
 5. Authenticate Codex and `lark-cli`, then create Feishu apps/profiles and grant required scopes outside this repository.
 6. Review the Windows sandbox setting before using the configuration on another machine.

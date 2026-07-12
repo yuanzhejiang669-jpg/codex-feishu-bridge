@@ -30,6 +30,11 @@ class FirecrawlRouterTests(unittest.TestCase):
             self.assertEqual(router.classify_error(output, 1), expected)
         self.assertEqual(router.classify_error("", 0), "ok")
 
+    def test_default_paths_use_codex_mcp_data(self):
+        root = Path.home() / "Documents" / "Codex" / "mcp-data"
+        self.assertEqual(router.DEFAULT_POOL_PATH, root / "key-pools" / "firecrawl-key-pool.json")
+        self.assertEqual(router.DEFAULT_STATE_PATH, root / "state" / "firecrawl-router-state.json")
+
     def test_all_cooling_does_not_run(self):
         router.save_state({"cursor": 0, "keys": {"one": {"cooldown_until": 2000}, "two": {"cooldown_until": 3000}}})
         with patch.object(router, "now", return_value=1000), patch.object(router.shutil, "which", return_value="firecrawl"), patch.object(router.subprocess, "run") as run:

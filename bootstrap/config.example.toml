@@ -68,7 +68,7 @@ env_key = "MIMO2CODEX_KEY"
 type = "stdio"
 command = "{{PYTHON_EXE}}"
 args = ["{{REPO_ROOT}}/tools/tavily-router/server.py"]
-env = { TAVILY_KEY_POOL_PATH = "{{USER_HOME}}/.config/codex-feishu-bridge/tavily-key-pool.json", TAVILY_ROUTER_STATE_PATH = "{{USER_HOME}}/.local/state/codex-feishu-bridge/tavily-router-state.json" }
+env = { TAVILY_KEY_POOL_PATH = "{{USER_HOME}}/Documents/Codex/mcp-data/key-pools/tavily-key-pool.json", TAVILY_ROUTER_STATE_PATH = "{{USER_HOME}}/Documents/Codex/mcp-data/state/tavily-router-state.json" }
 
 [mcp_servers.codex_browser_control]
 type = "stdio"
@@ -86,7 +86,7 @@ env = { CODEX_DESKTOP_CONTROL_OUTPUT_DIR = "{{CODEX_HOME}}/tmp/desktop-control" 
 type = "stdio"
 command = "{{PYTHON_EXE}}"
 args = ["{{REPO_ROOT}}/tools/firecrawl-router/server.py"]
-env = { FIRECRAWL_KEY_POOL_PATH = "{{USER_HOME}}/.config/codex-feishu-bridge/firecrawl-key-pool.json", FIRECRAWL_ROUTER_STATE_PATH = "{{USER_HOME}}/.local/state/codex-feishu-bridge/firecrawl-router-state.json", FIRECRAWL_RATE_LIMIT_COOLDOWN_SECONDS = "180", FIRECRAWL_TRANSIENT_ERROR_COOLDOWN_SECONDS = "30", FIRECRAWL_CREDITS_FALLBACK_COOLDOWN_SECONDS = "21600" }
+env = { FIRECRAWL_KEY_POOL_PATH = "{{USER_HOME}}/Documents/Codex/mcp-data/key-pools/firecrawl-key-pool.json", FIRECRAWL_ROUTER_STATE_PATH = "{{USER_HOME}}/Documents/Codex/mcp-data/state/firecrawl-router-state.json", FIRECRAWL_RATE_LIMIT_COOLDOWN_SECONDS = "180", FIRECRAWL_TRANSIENT_ERROR_COOLDOWN_SECONDS = "30", FIRECRAWL_CREDITS_FALLBACK_COOLDOWN_SECONDS = "21600" }
 
 [windows]
 sandbox = "elevated"

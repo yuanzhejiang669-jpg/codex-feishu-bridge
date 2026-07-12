@@ -1,16 +1,10 @@
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-PROMA_ROOT = Path.home() / '.proma'
-if str(PROMA_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROMA_ROOT))
-
-from tavily_router_core import TavilyRouter  # noqa: E402
+from tavily_router_core import TavilyRouter
 
 mcp = FastMCP('tavily')
 router = TavilyRouter()

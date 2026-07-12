@@ -13,8 +13,9 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 
-DEFAULT_POOL_PATH = Path.home() / ".proma" / "firecrawl-key-pool.json"
-DEFAULT_STATE_PATH = Path.home() / ".proma" / "firecrawl-router-state.json"
+MCP_DATA_ROOT = Path.home() / "Documents" / "Codex" / "mcp-data"
+DEFAULT_POOL_PATH = MCP_DATA_ROOT / "key-pools" / "firecrawl-key-pool.json"
+DEFAULT_STATE_PATH = MCP_DATA_ROOT / "state" / "firecrawl-router-state.json"
 
 POOL_PATH = Path(os.environ.get("FIRECRAWL_KEY_POOL_PATH", str(DEFAULT_POOL_PATH)))
 STATE_PATH = Path(os.environ.get("FIRECRAWL_ROUTER_STATE_PATH", str(DEFAULT_STATE_PATH)))
