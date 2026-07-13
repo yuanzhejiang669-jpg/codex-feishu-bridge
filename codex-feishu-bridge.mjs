@@ -52,6 +52,17 @@ import { createCodexProviderConfig } from "./src/providers/codex-config.mjs";
 import { createActiveRunStore } from "./src/runtime/active-runs.mjs";
 import { createProcessRunner, isProcessAlive as isProcessAlivePid } from "./src/runtime/process-runner.mjs";
 import { createRecalledMessageStore } from "./src/runtime/recalled-messages.mjs";
+import {
+  appServerToolStatus,
+  createRunActivity,
+  markCodexEvent,
+  markModelEvent,
+  markRunPhase,
+  markToolCompleted,
+  markToolProgress,
+  markToolStarted,
+  renderRunActivityMarkdown,
+} from "./src/runtime/run-activity.mjs";
 import { createSeenEventsStore } from "./src/runtime/seen-events.mjs";
 import {
   contextUsageFromTokenUsage,
@@ -1650,11 +1661,13 @@ function appendHistory(session, role, content) {
 
 function createRunState(session, event, userContent) {
   const settings = effectiveSessionSettings(session);
+  const startedAt = Date.now();
   return {
     blocks: [],
     footer: "thinking",
     terminal: "running",
-    startedAt: Date.now(),
+    startedAt,
+    activity: createRunActivity(startedAt),
     session,
     event,
     userContent,
@@ -1716,13 +1729,13 @@ function ensureToolBlock(state, item) {
   return block;
 }
 
-function updateToolFromAppServerItem(state, item) {
+function updateToolFromAppServerItem(state, item, { completed = false } = {}) {
   const block = ensureToolBlock(state, item);
   if (!block) return false;
   block.tool.source = toolSourceFromAppServerItem(item);
   block.tool.name = toolNameFromAppServerItem(item);
   block.tool.input = toolInputFromAppServerItem(item);
-  block.tool.status = toolStatusFromAppServerItem(item);
+  block.tool.status = appServerToolStatus(item, { completed });
   const output = toolOutputFromAppServerItem(item);
   if (output) block.tool.output = output;
   state.footer = block.tool.status === "running" ? "tool_running" : "thinking";
@@ -1735,20 +1748,24 @@ function appendToolOutputDelta(state, itemId, delta) {
   if (!block) return false;
   block.tool.output = `${block.tool.output || ""}${delta}`;
   state.footer = "tool_running";
+  markToolProgress(state, block.tool);
   return true;
 }
 
 function reduceCodexJsonEvent(state, raw) {
   if (!raw || typeof raw !== "object") return false;
   const type = raw.type;
+  markCodexEvent(state);
 
   if (type === "thread.started") {
     state.threadId = raw.thread_id || state.threadId;
+    markRunPhase(state, "initializing", { connection: "connected" });
     return true;
   }
 
   if (type === "turn.started") {
     state.footer = "thinking";
+    markModelEvent(state, "model_thinking");
     return true;
   }
 
@@ -1757,7 +1774,7 @@ function reduceCodexJsonEvent(state, raw) {
     const name = item.name || item.type || "tool";
     if (item.type && item.type !== "agent_message") {
       closeStreamingBlocks(state);
-      state.blocks.push({
+      const block = {
         kind: "tool",
         tool: {
           id: item.id || crypto.randomUUID(),
@@ -1766,8 +1783,10 @@ function reduceCodexJsonEvent(state, raw) {
           input: toolInputFromItem(item),
           status: "running",
         },
-      });
+      };
+      state.blocks.push(block);
       state.footer = "tool_running";
+      markToolStarted(state, block.tool);
       return true;
     }
   }
@@ -1775,6 +1794,7 @@ function reduceCodexJsonEvent(state, raw) {
   if (type === "item.completed") {
     const item = raw.item || {};
     if (item.type === "agent_message" && typeof item.text === "string") {
+      markModelEvent(state, "model_streaming");
       return appendRunText(state, item.text);
     }
     if (item.id) {
@@ -1783,13 +1803,14 @@ function reduceCodexJsonEvent(state, raw) {
           block.tool.status = toolStatusFromItem(item);
           block.tool.output = toolOutputFromItem(item);
           state.footer = "thinking";
+          markToolCompleted(state, block.tool);
           return true;
         }
       }
     }
     if (item.type && item.type !== "agent_message") {
       closeStreamingBlocks(state);
-      state.blocks.push({
+      const block = {
         kind: "tool",
         tool: {
           id: item.id || crypto.randomUUID(),
@@ -1799,8 +1820,10 @@ function reduceCodexJsonEvent(state, raw) {
           output: toolOutputFromItem(item),
           status: toolStatusFromItem(item),
         },
-      });
+      };
+      state.blocks.push(block);
       state.footer = "thinking";
+      markToolCompleted(state, block.tool);
       return true;
     }
   }
@@ -1811,6 +1834,7 @@ function reduceCodexJsonEvent(state, raw) {
     // emit turn.completed before the bridge has loaded the final answer file.
     state.footer = "streaming";
     state.meta.durationMs = Date.now() - state.startedAt;
+    markModelEvent(state, "finalizing");
     if (raw.usage) {
       state.meta.inputTokens = raw.usage.input_tokens;
       state.meta.outputTokens = raw.usage.output_tokens;
@@ -1824,6 +1848,7 @@ function reduceCodexJsonEvent(state, raw) {
     state.footer = null;
     state.errorMsg = raw.message || raw.error || "Codex 运行失败";
     state.meta.durationMs = Date.now() - state.startedAt;
+    markRunPhase(state, "error", { connection: "connected" });
     return true;
   }
 
@@ -1834,9 +1859,11 @@ function reduceAppServerEvent(state, raw) {
   if (!raw || typeof raw !== "object") return false;
   const method = raw.method;
   const params = raw.params || {};
+  markCodexEvent(state);
 
   if (method === "thread/started") {
     state.threadId = params.thread?.id || state.threadId;
+    markRunPhase(state, "initializing", { connection: "connected" });
     return true;
   }
 
@@ -1845,6 +1872,10 @@ function reduceAppServerEvent(state, raw) {
     const statusType = params.status?.type;
     updateSessionThreadStatus(state.session, statusType || "");
     if (statusType === "active") state.footer = state.footer || "thinking";
+    markRunPhase(state, state.activity?.phase || "initializing", {
+      connection: statusType === "active" ? "connected" : undefined,
+      progress: false,
+    });
     return true;
   }
 
@@ -1863,6 +1894,7 @@ function reduceAppServerEvent(state, raw) {
   if (method === "turn/started") {
     if (params.threadId) state.threadId = params.threadId;
     state.footer = "thinking";
+    markModelEvent(state, "model_thinking");
     return true;
   }
 
@@ -1870,17 +1902,23 @@ function reduceAppServerEvent(state, raw) {
     const item = params.item || {};
     if (item.type === "agentMessage") {
       state.footer = "streaming";
+      markModelEvent(state, "model_streaming");
       return true;
     }
     if (item.type === "contextCompaction") {
       state.footer = "compacting";
+      markModelEvent(state, "compacting");
       return true;
     }
     if (item.type === "userMessage" || item.type === "hookPrompt" || item.type === "reasoning") {
       state.footer = "thinking";
+      markModelEvent(state, "model_thinking");
       return true;
     }
-    return updateToolFromAppServerItem(state, item);
+    const changed = updateToolFromAppServerItem(state, item);
+    const block = state.blocks.find((entry) => entry.kind === "tool" && entry.tool.id === item.id);
+    if (block) markToolStarted(state, block.tool);
+    return changed;
   }
 
   if (method === "item/completed") {
@@ -1892,6 +1930,7 @@ function reduceAppServerEvent(state, raw) {
         ? [{ kind: "text", content: item.text, streaming: false }, ...tools]
         : tools;
       state.footer = "streaming";
+      markModelEvent(state, "model_streaming");
       return true;
     }
     if (item.type === "contextCompaction") {
@@ -1899,16 +1938,22 @@ function reduceAppServerEvent(state, raw) {
       state.meta.compactedAt = state.session.lastCompactedAt;
       state.meta.contextUsage = null;
       state.footer = "thinking";
+      markModelEvent(state, "model_thinking");
       return true;
     }
     if (item.type === "userMessage" || item.type === "hookPrompt" || item.type === "reasoning") {
       state.footer = "thinking";
+      markModelEvent(state, "model_thinking");
       return true;
     }
-    return updateToolFromAppServerItem(state, item);
+    const changed = updateToolFromAppServerItem(state, item, { completed: true });
+    const block = state.blocks.find((entry) => entry.kind === "tool" && entry.tool.id === item.id);
+    if (block) markToolCompleted(state, block.tool);
+    return changed;
   }
 
   if (method === "item/agentMessage/delta") {
+    markModelEvent(state, "model_streaming");
     return appendRunText(state, params.delta || "");
   }
 
@@ -1948,6 +1993,7 @@ function reduceAppServerEvent(state, raw) {
     state.meta.contextUsage = null;
     state.meta.contextPeakUsage = null;
     state.footer = "thinking";
+    markModelEvent(state, "model_thinking");
     return true;
   }
 
@@ -1955,6 +2001,7 @@ function reduceAppServerEvent(state, raw) {
     closeStreamingBlocks(state);
     state.footer = "streaming";
     state.meta.durationMs = params.turn?.durationMs ?? Date.now() - state.startedAt;
+    markModelEvent(state, "finalizing");
     return true;
   }
 
@@ -1966,6 +2013,10 @@ function reduceAppServerEvent(state, raw) {
       closeStreamingBlocks(state);
       state.footer = "reconnecting";
       state.meta.durationMs = Date.now() - state.startedAt;
+      markRunPhase(state, "reconnecting", {
+        connection: "recovering",
+        retryAttempt: Number(state.activity?.retryAttempt || 0) + 1,
+      });
       return true;
     }
     closeStreamingBlocks(state);
@@ -1973,6 +2024,7 @@ function reduceAppServerEvent(state, raw) {
     state.footer = null;
     updateSessionFailure(state.session, failure);
     state.meta.durationMs = Date.now() - state.startedAt;
+    markRunPhase(state, "error", { connection: "connected" });
     return true;
   }
 
@@ -1981,6 +2033,7 @@ function reduceAppServerEvent(state, raw) {
 
 function markRunError(state, error) {
   const failure = classifyCodexFailure(error);
+  const disconnected = /app-server\s+(?:exited|ended before)|broken pipe|write after end/i.test(errorText(error));
   closeStreamingBlocks(state);
   state.terminal = "error";
   state.footer = null;
@@ -1988,6 +2041,9 @@ function markRunError(state, error) {
   state.errorMsg = failureDetailText(failure).slice(0, 1500);
   state.meta.durationMs = Date.now() - state.startedAt;
   updateSessionFailure(state.session, failure);
+  markRunPhase(state, "error", {
+    connection: disconnected ? "disconnected" : (state.activity?.connection || "connected"),
+  });
   return state;
 }
 
@@ -1999,6 +2055,10 @@ function markRunRecovering(state, failure, attempt) {
   state.errorMsg = failureDetailText(failure).slice(0, 1500);
   state.meta.durationMs = Date.now() - state.startedAt;
   state.meta.recoveryAttempt = attempt;
+  markRunPhase(state, failure?.kind === "stream_disconnect" ? "recovering" : "reconnecting", {
+    connection: "recovering",
+    retryAttempt: attempt,
+  });
   return state;
 }
 
@@ -2016,6 +2076,7 @@ function markRunInterrupted(state) {
     detail: "",
     at: Date.now(),
   });
+  markRunPhase(state, "interrupted", { connection: "disconnected" });
   return state;
 }
 
@@ -2033,6 +2094,7 @@ function ensureRunDone(state, finalText = "") {
   state.footer = null;
   state.meta.durationMs = Date.now() - state.startedAt;
   clearSessionFailure(state.session);
+  markRunPhase(state, "done", { connection: "connected" });
   return state;
 }
 
@@ -2094,7 +2156,10 @@ function renderRunCard(state) {
       : "**正在处理**\n\n我已经收到消息，正在整理回复。"));
   }
 
-  elements.push(...renderRunBlocks(state.blocks, state.terminal !== "running"));
+  const liveStatusElements = state.terminal === "running"
+    ? [markdown(renderRunActivityMarkdown(state, Date.now(), displayToolName))]
+    : [];
+  elements.push(...renderRunBlocks(state.blocks, state.terminal !== "running", liveStatusElements));
 
   if (state.terminal === "running") {
     elements.push(noteMd(renderFooterText(state.footer, elapsed)));
@@ -2218,7 +2283,7 @@ async function repairStaleActiveRunsOnStartup() {
   log("INFO", "stale active runs repaired", { repaired, remaining: Object.keys(remaining).length });
 }
 
-function renderRunBlocks(blocks, finalized) {
+function renderRunBlocks(blocks, finalized, beforeFirstTool = []) {
   if (finalized && !CONFIG.debugCards) {
     const elements = [];
     const tools = [];
@@ -2237,8 +2302,13 @@ function renderRunBlocks(blocks, finalized) {
 
   const elements = [];
   let toolBuffer = [];
+  let statusInserted = false;
   const flushTools = () => {
     if (toolBuffer.length > 0) {
+      if (!statusInserted) {
+        elements.push(...beforeFirstTool);
+        statusInserted = true;
+      }
       elements.push(...renderToolGroup(toolBuffer, finalized));
       toolBuffer = [];
     }
@@ -2255,6 +2325,7 @@ function renderRunBlocks(blocks, finalized) {
     }
   }
   flushTools();
+  if (!statusInserted) elements.push(...beforeFirstTool);
   return elements;
 }
 
@@ -2662,15 +2733,6 @@ function toolInputFromAppServerItem(item) {
     default:
       return toolInputFromItem(item || {});
   }
-}
-
-function toolStatusFromAppServerItem(item) {
-  const status = String(item?.status || "").toLowerCase();
-  if (!status || status === "inprogress" || status === "pending") return "running";
-  if (["failed", "declined", "error", "cancelled", "canceled"].includes(status)) return "error";
-  if (item?.exitCode !== undefined && item.exitCode !== null && Number(item.exitCode) !== 0) return "error";
-  if (item?.success === false) return "error";
-  return "done";
 }
 
 function toolOutputFromAppServerItem(item) {
@@ -5854,6 +5916,7 @@ async function runCodexAppServer(event, session, state = null, onState = null, o
 
     const initialized = await initializeAppServerClient(client);
     watchdog.touch();
+    markRunPhase(liveState, "initializing", { connection: "connected" });
     liveState.meta.model = initialized.userAgent || liveState.meta.model;
 
     const threadId = await startOrResumeAppServerThread(client, session, options);
@@ -5866,18 +5929,18 @@ async function runCodexAppServer(event, session, state = null, onState = null, o
 
     const turn = await client.request("turn/start", appServerTurnParams(threadId, event, userContent, session, options), 60_000);
     watchdog.touch();
+    markModelEvent(liveState, "model_thinking");
     const turnId = turn?.turn?.id || "";
     activeJob.turnId = turnId;
 
     let completed = false;
-    let lastWaitingUpdateAt = 0;
+    let lastWaitingUpdateAt = Date.now();
     while (!completed && !watchdog.timedOut) {
       const message = await client.nextNotification(1000);
       if (!message) {
         if (client.closed) break;
         if (
           state
-          && Date.now() - startedAt > 120_000
           && Date.now() - lastWaitingUpdateAt > 60_000
         ) {
           liveState.footer = "waiting";
@@ -6139,6 +6202,11 @@ async function runCodex(event, session, state = null, onState = null) {
   const flushState = async () => {
     if (state && onState) await onState(state);
   };
+
+  if (state) {
+    markRunPhase(state, "model_thinking", { connection: "connected" });
+    await flushState();
+  }
 
   const rl = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
   const streamPromise = (async () => {
