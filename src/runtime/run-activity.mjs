@@ -102,14 +102,14 @@ export function renderRunActivityMarkdown(state, now = Date.now(), formatToolNam
   const view = runActivityView(state, now, formatToolName);
   const lines = [
     "**当前状态**",
-    `**运行状态：**${view.healthLabel}`,
-    `**当前阶段：**${view.phaseLabel}`,
+    `运行状态：${view.healthLabel}`,
+    `当前阶段：${view.phaseLabel}`,
   ];
-  if (view.currentTool) lines.push(`**当前工具：**${view.currentTool}`);
-  lines.push(`**最近进展：**${view.recentProgress}`);
-  lines.push(`**Codex 连接：**${view.connectionLabel}`);
-  lines.push(`**上游模型：**${view.upstreamLabel}`);
-  lines.push(`**本阶段：**${view.phaseElapsed} · **任务总时长：**${view.totalElapsed}`);
+  if (view.currentTool) lines.push(`当前工具：${view.currentTool}`);
+  lines.push(`最近进展：${view.recentProgress}`);
+  lines.push(`Codex 连接：${view.connectionLabel}`);
+  lines.push(`上游模型：${view.upstreamLabel}`);
+  lines.push(`本阶段：${view.phaseElapsed} · 任务总时长：${view.totalElapsed}`);
   return lines.join("\n");
 }
 

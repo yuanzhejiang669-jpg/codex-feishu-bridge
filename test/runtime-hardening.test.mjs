@@ -187,10 +187,11 @@ test("run activity card summary keeps the latest state visible and compact", () 
 
   const markdown = renderRunActivityMarkdown(state, startedAt + 22_000);
   assert.match(markdown, /^\*\*当前状态\*\*/);
-  assert.match(markdown, /运行状态：\*\*正常/);
-  assert.match(markdown, /当前阶段：\*\*等待模型响应/);
-  assert.match(markdown, /Codex 连接：\*\*正常/);
-  assert.match(markdown, /任务总时长：\*\*22秒/);
+  assert.match(markdown, /运行状态：正常/);
+  assert.match(markdown, /当前阶段：等待模型响应/);
+  assert.match(markdown, /Codex 连接：正常/);
+  assert.match(markdown, /任务总时长：22秒/);
+  assert.doesNotMatch(markdown.replace(/^\*\*当前状态\*\*\n/, ""), /\*\*/);
   assert.ok(markdown.length < 300);
 });
 
@@ -215,8 +216,9 @@ test("run activity accepts the card tool-name formatter", () => {
     startedAt + 2_000,
     () => "PowerShell · command_execution",
   );
-  assert.match(markdown, /当前工具：\*\*PowerShell · command_execution/);
-  assert.match(markdown, /最近进展：\*\*1秒前 · PowerShell · command_execution 开始执行/);
+  assert.match(markdown, /当前工具：PowerShell · command_execution/);
+  assert.match(markdown, /最近进展：1秒前 · PowerShell · command_execution 开始执行/);
+  assert.doesNotMatch(markdown.replace(/^\*\*当前状态\*\*\n/, ""), /\*\*/);
 });
 
 test("run activity keeps a parallel running tool visible when another tool completes", () => {
