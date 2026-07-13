@@ -181,3 +181,10 @@
 - `npm run check`：31/31 测试通过。
 - `npm run smoke:app-server`：Codex CLI 0.133.0 initialize 握手和正常关闭通过。
 - 卡片 Markdown 断言覆盖“等待其余工具结果”“状态提示”“最近进展”和“本阶段”的最终渲染文本。
+
+发布与设备同步：
+
+- 功能提交：`221a3e0d137ff7d051aa9be3348cddf549407aae`，已推送 GitHub `main`。
+- 新设备 14 个空闲 Bot 已重启并确认新 PID，15/15 在线；承载本次任务的 `codex-assistant-1` 按 active run 保护跳过，并安排任务结束后空闲重启。
+- 旧设备 17 个 Bot 均为空闲，已全部重启并确认新 PID，最终 17/17 在线。
+- 旧设备原有的 `tools/codex-browser-control-mcp/scripts/restart-extension-bridge.ps1` 本地修改保持不变。
