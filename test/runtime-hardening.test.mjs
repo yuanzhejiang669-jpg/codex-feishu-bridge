@@ -217,11 +217,11 @@ test("run activity accepts the card tool-name formatter", () => {
     () => "PowerShell · command_execution",
   );
   assert.match(markdown, /当前工具：PowerShell · command_execution/);
-  assert.match(markdown, /最近进展：1秒前 · PowerShell · command_execution 开始执行/);
+  assert.match(markdown, /最近进展：1秒前 · 第 1 步 · PowerShell · command_execution 开始执行/);
   assert.doesNotMatch(markdown.replace(/^\*\*当前状态\*\*\n/, ""), /\*\*/);
 });
 
-test("run activity keeps a parallel running tool visible when another tool completes", () => {
+test("run activity reports newer parallel completion without promoting an older running tool", () => {
   const startedAt = 4_000_000;
   const first = { id: "first", source: "Shell", name: "command_execution", status: "running" };
   const second = { id: "second", source: "Web", name: "web_search", status: "running" };
@@ -241,10 +241,112 @@ test("run activity keeps a parallel running tool visible when another tool compl
   markToolCompleted(state, second, startedAt + 10_000);
 
   const view = runActivityView(state, startedAt + 12_000);
-  assert.equal(view.phaseLabel, "工具执行中");
-  assert.equal(view.currentTool, "Shell · command_execution");
+  assert.equal(view.phaseLabel, "等待其余工具结果");
+  assert.equal(view.currentTool, "");
+  assert.equal(view.statusNote, "1 个较早工具尚未收到结束状态");
   assert.equal(view.upstreamLabel, "等待工具结果");
   assert.equal(view.healthLabel, "正常");
+  assert.equal(view.phaseElapsed, "2秒");
+  assert.match(view.recentProgress, /2秒前 · 第 2 步 · Web · web_search 执行完成/);
+});
+
+test("stale running tool cannot hide progress from later completed steps", () => {
+  const startedAt = 4_500_000;
+  const stale = { id: "stale", source: "Git", name: "command_execution", status: "running" };
+  const later = { id: "later", source: "Shell", name: "command_execution", status: "running" };
+  const state = {
+    startedAt,
+    activity: createRunActivity(startedAt),
+    blocks: [
+      { kind: "tool", tool: stale },
+      { kind: "tool", tool: later },
+    ],
+  };
+
+  markToolStarted(state, stale, startedAt + 1_000);
+  markToolProgress(state, stale, startedAt + 2_000);
+  markToolStarted(state, later, startedAt + 25 * 60_000);
+  later.status = "done";
+  markToolCompleted(state, later, startedAt + 25 * 60_000 + 10_000);
+
+  const view = runActivityView(state, startedAt + 25 * 60_000 + 30_000);
+  assert.equal(view.healthLabel, "正常");
+  assert.equal(view.phaseLabel, "等待其余工具结果");
+  assert.equal(view.currentTool, "");
+  assert.equal(view.statusNote, "1 个较早工具尚未收到结束状态");
+  assert.equal(view.phaseElapsed, "20秒");
+  assert.equal(view.silenceMs, 20_000);
+  assert.match(view.recentProgress, /20秒前 · 第 2 步 · Shell · command_execution 执行完成/);
+
+  const markdown = renderRunActivityMarkdown(state, startedAt + 25 * 60_000 + 30_000);
+  assert.match(markdown, /运行状态：正常/);
+  assert.match(markdown, /当前阶段：等待其余工具结果/);
+  assert.doesNotMatch(markdown, /当前工具：Git/);
+  assert.match(markdown, /状态提示：1 个较早工具尚未收到结束状态/);
+  assert.match(markdown, /最近进展：20秒前 · 第 2 步 · Shell · command_execution 执行完成/);
+  assert.match(markdown, /本阶段：20秒/);
+});
+
+test("newer running step becomes the current tool despite an older unresolved tool", () => {
+  const startedAt = 4_800_000;
+  const stale = { id: "stale", source: "Git", name: "command_execution", status: "running" };
+  const current = { id: "current", source: "Shell", name: "command_execution", status: "running" };
+  const state = {
+    startedAt,
+    activity: createRunActivity(startedAt),
+    blocks: [
+      { kind: "tool", tool: stale },
+      { kind: "tool", tool: current },
+    ],
+  };
+
+  markToolStarted(state, stale, startedAt + 1_000);
+  markToolProgress(state, stale, startedAt + 2_000);
+  markToolStarted(state, current, startedAt + 30_000);
+
+  const view = runActivityView(state, startedAt + 47_000);
+  assert.equal(view.phaseLabel, "工具执行中");
+  assert.equal(view.currentTool, "Shell · command_execution");
+  assert.equal(view.statusNote, "1 个较早工具尚未收到结束状态");
+  assert.equal(view.phaseElapsed, "17秒");
+  assert.match(view.recentProgress, /17秒前 · 第 2 步 · Shell · command_execution 开始执行/);
+});
+
+test("newer model progress outranks an older unresolved tool", () => {
+  const startedAt = 4_900_000;
+  const stale = { id: "stale", source: "Git", name: "command_execution", status: "running" };
+  const state = {
+    startedAt,
+    activity: createRunActivity(startedAt),
+    blocks: [{ kind: "tool", tool: stale }],
+  };
+  markToolStarted(state, stale, startedAt + 1_000);
+  markToolProgress(state, stale, startedAt + 2_000);
+  markModelEvent(state, "model_streaming", startedAt + 60_000);
+
+  const view = runActivityView(state, startedAt + 75_000);
+  assert.equal(view.phaseLabel, "正在接收模型响应");
+  assert.equal(view.currentTool, "");
+  assert.equal(view.statusNote, "1 个较早工具尚未收到结束状态");
+  assert.equal(view.phaseElapsed, "15秒");
+  assert.match(view.recentProgress, /15秒前 · 收到模型事件/);
+  assert.equal(view.upstreamLabel, "正在接收响应");
+});
+
+test("generic Codex events do not reset meaningful progress time", () => {
+  const startedAt = 4_950_000;
+  const state = {
+    startedAt,
+    activity: createRunActivity(startedAt),
+    blocks: [],
+  };
+  markModelEvent(state, "model_thinking", startedAt + 10_000);
+  markCodexEvent(state, startedAt + 5 * 60_000);
+
+  const view = runActivityView(state, startedAt + 6 * 60_000);
+  assert.equal(view.healthLabel, "响应较慢");
+  assert.equal(view.silenceMs, 5 * 60_000 + 50_000);
+  assert.match(view.recentProgress, /5分50秒前 · 收到模型事件/);
 });
 
 test("completed app-server tool events cannot remain visually running without a status", () => {

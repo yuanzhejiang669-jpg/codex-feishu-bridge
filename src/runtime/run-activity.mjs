@@ -3,6 +3,7 @@ const PHASE_LABELS = Object.freeze({
   model_thinking: "等待模型响应",
   model_streaming: "正在接收模型响应",
   tool_running: "工具执行中",
+  parallel_pending: "等待其余工具结果",
   waiting_model: "等待模型处理工具结果",
   compacting: "正在压缩上下文",
   recovering: "自动恢复中",
@@ -106,6 +107,7 @@ export function renderRunActivityMarkdown(state, now = Date.now(), formatToolNam
     `当前阶段：${view.phaseLabel}`,
   ];
   if (view.currentTool) lines.push(`当前工具：${view.currentTool}`);
+  if (view.statusNote) lines.push(`状态提示：${view.statusNote}`);
   lines.push(`最近进展：${view.recentProgress}`);
   lines.push(`Codex 连接：${view.connectionLabel}`);
   lines.push(`上游模型：${view.upstreamLabel}`);
@@ -120,27 +122,38 @@ export function runActivityView(state, now = Date.now(), formatToolName = toolDi
     ? state.blocks.filter((block) => block?.kind === "tool" && block.tool).map((block) => block.tool)
     : [];
   const runningTools = tools.filter((tool) => tool.status === "running");
-  const currentTool = latestTool(runningTools) || latestTool(tools);
-  const effectivePhase = runningTools.length ? "tool_running" : activity.phase;
-  const progressAt = Math.max(
-    finiteTimestamp(activity.lastProgressAt),
-    finiteTimestamp(currentTool?.updatedAt),
-    finiteTimestamp(currentTool?.completedAt),
-  );
+  const latestProgress = latestProgressEvent(tools, activity, formatToolName);
+  const currentTool = latestProgress.tool?.status === "running" ? latestProgress.tool : null;
+  const unresolvedTools = currentTool
+    ? runningTools.filter((tool) => tool !== currentTool)
+    : runningTools;
+  const effectivePhase = currentTool
+    ? "tool_running"
+    : unresolvedTools.length && latestProgress.kind === "tool_completed"
+      ? "parallel_pending"
+      : activity.phase;
+  const progressAt = finiteTimestamp(latestProgress.at)
+    || finiteTimestamp(activity.lastProgressAt)
+    || finiteTimestamp(state?.startedAt)
+    || timestamp;
   const silenceMs = Math.max(0, timestamp - (progressAt || finiteTimestamp(state?.startedAt) || timestamp));
+  const phaseStartedAt = currentTool
+    ? finiteTimestamp(currentTool.startedAt)
+    : effectivePhase === "parallel_pending"
+      ? progressAt
+      : finiteTimestamp(activity.phaseStartedAt);
 
   return {
     healthLabel: healthLabel(activity, silenceMs, effectivePhase),
     phaseLabel: PHASE_LABELS[effectivePhase] || "正在处理",
     currentTool: effectivePhase === "tool_running" ? formatToolName(currentTool) : "",
-    recentProgress: recentProgressText(activity, currentTool, effectivePhase, timestamp, formatToolName),
+    statusNote: unresolvedTools.length
+      ? `${unresolvedTools.length} 个较早工具尚未收到结束状态`
+      : "",
+    recentProgress: latestProgress.text(timestamp),
     connectionLabel: connectionLabel(activity.connection),
     upstreamLabel: upstreamLabel(effectivePhase, activity),
-    phaseElapsed: formatDurationShort(timestamp - (
-      effectivePhase === "tool_running" && currentTool
-        ? finiteTimestamp(currentTool.startedAt)
-        : finiteTimestamp(activity.phaseStartedAt)
-    )),
+    phaseElapsed: formatDurationShort(timestamp - phaseStartedAt),
     totalElapsed: formatDurationShort(timestamp - finiteTimestamp(state?.startedAt)),
     silenceMs,
     phase: effectivePhase,
@@ -164,18 +177,6 @@ function ensureRunActivity(state, now) {
   return state.activity;
 }
 
-function latestTool(tools) {
-  return [...tools].sort((left, right) => toolTimestamp(right) - toolTimestamp(left))[0] || null;
-}
-
-function toolTimestamp(tool) {
-  return Math.max(
-    finiteTimestamp(tool?.updatedAt),
-    finiteTimestamp(tool?.completedAt),
-    finiteTimestamp(tool?.startedAt),
-  );
-}
-
 function toolDisplayName(tool) {
   if (!tool) return "未知工具";
   const source = String(tool.source || "").trim();
@@ -184,23 +185,33 @@ function toolDisplayName(tool) {
   return source || name || "未知工具";
 }
 
-function recentProgressText(activity, tool, phase, now, formatToolName) {
-  if (phase === "tool_running" && tool) {
-    if (finiteTimestamp(tool.lastOutputAt)) {
-      return `${agoText(now, tool.lastOutputAt)} · ${formatToolName(tool)} 有新输出`;
-    }
-    return `${agoText(now, tool.startedAt || tool.updatedAt)} · ${formatToolName(tool)} 开始执行`;
+function latestProgressEvent(tools, activity, formatToolName) {
+  const candidates = [];
+  for (let index = 0; index < tools.length; index += 1) {
+    const tool = tools[index];
+    const step = index + 1;
+    addProgressCandidate(candidates, tool.completedAt, 4, "tool_completed", tool, (now) => (
+      `${agoText(now, tool.completedAt)} · 第 ${step} 步 · ${formatToolName(tool)} ${toolCompletionLabel(tool)}`
+    ));
+    addProgressCandidate(candidates, tool.lastOutputAt, 3, "tool_output", tool, (now) => (
+      `${agoText(now, tool.lastOutputAt)} · 第 ${step} 步 · ${formatToolName(tool)} 有新输出`
+    ));
+    addProgressCandidate(candidates, tool.startedAt, 2, "tool_started", tool, (now) => (
+      `${agoText(now, tool.startedAt)} · 第 ${step} 步 · ${formatToolName(tool)} 开始执行`
+    ));
   }
-  if (tool && finiteTimestamp(tool.completedAt) >= finiteTimestamp(activity.lastModelEventAt)) {
-    return `${agoText(now, tool.completedAt)} · ${formatToolName(tool)} ${toolCompletionLabel(tool)}`;
-  }
-  if (finiteTimestamp(activity.lastModelEventAt)) {
-    return `${agoText(now, activity.lastModelEventAt)} · 收到模型事件`;
-  }
-  if (finiteTimestamp(activity.lastCodexEventAt)) {
-    return `${agoText(now, activity.lastCodexEventAt)} · 收到 Codex 事件`;
-  }
-  return `${agoText(now, activity.lastProgressAt)} · 任务已启动`;
+  addProgressCandidate(candidates, activity.lastModelEventAt, 1, "model", null, (now) => (
+    `${agoText(now, activity.lastModelEventAt)} · 收到模型事件`
+  ));
+  addProgressCandidate(candidates, activity.lastProgressAt, -1, "status", null, (now) => (
+    `${agoText(now, activity.lastProgressAt)} · 任务已启动`
+  ));
+  return candidates.sort((left, right) => right.at - left.at || right.priority - left.priority)[0];
+}
+
+function addProgressCandidate(candidates, value, priority, kind, tool, text) {
+  const at = finiteTimestamp(value);
+  if (at) candidates.push({ at, priority, kind, tool, text });
 }
 
 function toolCompletionLabel(tool) {
@@ -212,7 +223,7 @@ function toolCompletionLabel(tool) {
 function healthLabel(activity, silenceMs, phase) {
   if (activity.connection === "disconnected") return "连接中断";
   if (activity.phase === "recovering" || activity.phase === "reconnecting") return "恢复中";
-  if (phase === "tool_running") {
+  if (phase === "tool_running" || phase === "parallel_pending") {
     if (silenceMs >= 10 * 60_000) return "工具长时间无输出";
     if (silenceMs >= 2 * 60_000) return "工具暂无新输出";
     return "正常";
@@ -233,7 +244,7 @@ function connectionLabel(value) {
 }
 
 function upstreamLabel(phase, activity) {
-  if (phase === "tool_running") return "等待工具结果";
+  if (phase === "tool_running" || phase === "parallel_pending") return "等待工具结果";
   if (phase === "model_streaming") return "正在接收响应";
   if (phase === "compacting") return "正在压缩上下文";
   if (phase === "reconnecting") return `自动重试中${activity.retryAttempt ? `（第 ${activity.retryAttempt} 次）` : ""}`;
