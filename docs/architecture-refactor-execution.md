@@ -361,3 +361,10 @@
 1. app-server 长任务持续输出 stderr，内存随任务时长增长；极快响应可能早于 pending request 注册；正常关闭后的强杀定时器还可能命中复用 PID。现已将 stderr 限制为保留最后 1 MiB，先注册 request 再写入 stdin，并在正常 close 后取消升级强杀；测试覆盖三种情况。
 2. `CODEX_FEISHU_MAX_CONCURRENT` 为 0、非数字或任务 Promise 拒绝，等待队列可能停止推进。dispatcher 现在把无效并发数收敛为 1，并在成功或失败后统一从 `finally` 继续 drain；测试覆盖 FIFO、拒绝路径基础结构和无效并发配置。
 3. 陈旧 `bridge.lock.json` 无法删除时，抢锁循环可能持续占用 CPU。现在删除失败会显式抛错并进入现有致命错误处理，不再无限循环；测试覆盖不可删除目标。
+
+### 发布和设备同步
+
+- 实现提交：`a4028d6dd57431ea3ed4a98eddcab854af490def`，已推送 GitHub `main`。
+- 新设备：`npm run check`、真实 app-server smoke 和 doctor 通过；15 个 Bot 全在线，14 个空闲 Bot 已重启并确认新 PID。承载本次任务的 `codex-assistant-1` 有 active run，因此没有中断，已安排在任务结束并变为空闲后一次性重启。
+- 旧设备：仓库快进到实现提交，`npm run check` 和 Codex CLI 0.136.0 app-server smoke 通过；17 个 Bot 全部 active run 为 0，均已重启并确认新 PID。最终 doctor 为 113/113 ok、0 warn、0 bad。
+- 旧设备原有的 `tools/codex-browser-control-mcp/scripts/restart-extension-bridge.ps1` 本地修改已保留，没有纳入本次提交或覆盖。
