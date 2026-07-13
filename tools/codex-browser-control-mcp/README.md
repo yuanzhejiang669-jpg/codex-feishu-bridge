@@ -26,17 +26,22 @@ Environment variables:
 
 | Name | Default | Purpose |
 |---|---|---|
-| `BROWSER_CONTROL_EXTENSION_TOKEN` | local config or `<local-extension-token>` | Shared local bridge token used by the MCP server. Keep the real value in Codex `config.toml` or the process environment. |
+| `BROWSER_CONTROL_EXTENSION_TOKEN` | none | Shared local bridge token used by the MCP server. When the extension bridge and authentication are enabled, startup fails until a private token is configured. |
 | `BROWSER_CONTROL_EXTENSION_REQUIRE_TOKEN` | enabled | Set to `0` only for legacy local integrations. |
 | `BROWSER_CONTROL_EXTENSION_PORT` | `18795` | Local extension bridge port. |
 | `BROWSER_CONTROL_EXTENSION_BRIDGE` | enabled | Set to `0` to disable the extension bridge entirely. |
 | `BROWSER_CONTROL_ALLOW_UNSAFE_CSP` | disabled | Server-side status flag for documenting unsafe CSP bypass. The bundled extension also defaults its CSP bypass constant to `false`. |
+| `BROWSER_CONTROL_OUTPUT_DIR` | `~/.codex/tmp/browser-control` | Dedicated default and allowed root for screenshots, downloads, and traces. Relative output paths resolve from this root. The package/source directory is never implicitly allowed. |
+| `BROWSER_CONTROL_ALLOWED_OUTPUT_DIRS` | none | Optional additional allowed roots separated by the platform path delimiter. The system temporary directory is always allowed. |
+| `BROWSER_CONTROL_ALLOWED_BROWSER_PATHS` | none | Optional exact paths to portable `chrome.exe` or `msedge.exe` files, separated by the platform path delimiter. Standard Google/Microsoft installation paths are allowed automatically. |
 
 Extension management and content settings commands are gated twice: the server environment variables default to disabled, and the extension constants default to disabled. To use them intentionally, enable both sides and add the required manifest permission before reloading the extension.
 
 Important boundaries:
 
 - CDP and extension JS execution are powerful by design. Use them only for pages the user asked Codex to automate.
+- Explicit `executablePath` and `BROWSER_CONTROL_BROWSER_PATH` values must point to a real, non-link `chrome.exe` or `msedge.exe` under a standard Google/Microsoft installation root. For a portable browser, also list its exact path in `BROWSER_CONTROL_ALLOWED_BROWSER_PATHS`.
+- Screenshot, download, and trace paths outside the configured output roots and system temporary directory are rejected.
 - The extension no longer strips Content Security Policy headers by default.
 - The extension no longer overrides page dialogs by default.
 - The extension no longer ships a page-dialog override content script.
@@ -146,7 +151,7 @@ Codex MCP config example:
 type = "stdio"
 command = "D:/Node.js/node.exe"
 args = ["C:/Users/12644/Documents/Codex/tools/browser-control-mcp/src/server.mjs"]
-env = { BROWSER_CONTROL_EXTENSION_PORT = "18795", BROWSER_CONTROL_EXTENSION_TOKEN = "replace-with-local-token" }
+env = { BROWSER_CONTROL_EXTENSION_PORT = "18795", BROWSER_CONTROL_EXTENSION_TOKEN = "replace-with-local-token", BROWSER_CONTROL_OUTPUT_DIR = "C:/Users/12644/Documents/Codex/mcp-data/browser-control" }
 ```
 
 ## Verification

@@ -2,7 +2,7 @@
 
 import { spawn } from "node:child_process";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -25,9 +25,19 @@ const EXTENSION_ALLOW_CONTENT_SETTINGS = boolEnv(process.env.BROWSER_CONTROL_ALL
 const SRC_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = path.resolve(SRC_DIR, "..");
 const EXTENSION_BRIDGE_RESTART_SCRIPT = path.join(PACKAGE_ROOT, "scripts", "restart-extension-bridge.ps1");
-const DEFAULT_SCREENSHOT_DIR = path.join(PACKAGE_ROOT, "screenshots");
-const DEFAULT_DOWNLOAD_DIR = path.join(PACKAGE_ROOT, "downloads");
-const DEFAULT_TRACE_DIR = path.join(PACKAGE_ROOT, "traces");
+const OUTPUT_ROOT = path.resolve(process.env.BROWSER_CONTROL_OUTPUT_DIR || path.join(os.homedir(), ".codex", "tmp", "browser-control"));
+const ALLOWED_OUTPUT_ROOTS = [...new Set([
+  OUTPUT_ROOT,
+  path.resolve(os.tmpdir()),
+  ...String(process.env.BROWSER_CONTROL_ALLOWED_OUTPUT_DIRS || "")
+    .split(path.delimiter)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .map((item) => path.resolve(item)),
+])];
+const DEFAULT_SCREENSHOT_DIR = path.join(OUTPUT_ROOT, "screenshots");
+const DEFAULT_DOWNLOAD_DIR = path.join(OUTPUT_ROOT, "downloads");
+const DEFAULT_TRACE_DIR = path.join(OUTPUT_ROOT, "traces");
 const GENERIC_SIMHTML_BRIDGE = path.join(PACKAGE_ROOT, "vendor", "generic_simphtml_bridge.py");
 const launched = new Map();
 const extensionSessions = new Map();
@@ -77,6 +87,35 @@ function asHost(value) {
 
 function jsonText(data) {
   return typeof data === "string" ? data : JSON.stringify(data, null, 2);
+}
+
+function isPathWithin(candidate, root) {
+  const relative = path.relative(root, candidate);
+  return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
+}
+
+function canonicalBoundaryPath(candidate) {
+  let existing = path.resolve(candidate);
+  const missingParts = [];
+  while (!existsSync(existing)) {
+    const parent = path.dirname(existing);
+    if (parent === existing) break;
+    missingParts.unshift(path.basename(existing));
+    existing = parent;
+  }
+  const canonicalExisting = existsSync(existing) ? realpathSync.native(existing) : existing;
+  return path.resolve(canonicalExisting, ...missingParts);
+}
+
+function resolveOutputPath(value, fallback, label = "output path") {
+  const candidate = value
+    ? path.resolve(path.isAbsolute(String(value)) ? String(value) : path.join(OUTPUT_ROOT, String(value)))
+    : path.resolve(fallback);
+  const canonicalCandidate = canonicalBoundaryPath(candidate);
+  if (!ALLOWED_OUTPUT_ROOTS.some((root) => isPathWithin(canonicalCandidate, canonicalBoundaryPath(root)))) {
+    throw new Error(`${label} must be inside an allowed output root: ${ALLOWED_OUTPUT_ROOTS.join(", ")}`);
+  }
+  return candidate;
 }
 
 function toolResult(data, extraContent = []) {
@@ -139,7 +178,7 @@ function sanitizeTraceValue(value, options = {}, key = "", seen = new WeakSet())
   if (value == null || typeof value === "boolean" || typeof value === "number") return value;
   if (typeof value === "string") {
     if (key === "script") {
-      return { length: value.length, preview: truncateTraceString(value, Math.min(options.maxResultChars || 8000, 1200)) };
+      return { length: value.length };
     }
     return truncateTraceString(value, options.maxResultChars || 8000);
   }
@@ -160,7 +199,7 @@ function sanitizeTraceValue(value, options = {}, key = "", seen = new WeakSet())
 
 function sanitizeTraceArgs(toolName, args = {}, options = {}) {
   const sanitized = sanitizeTraceValue(args, options);
-  if ((toolName === "browser_type" || toolName === "browser_locator_type") && sanitized && typeof sanitized === "object" && Object.prototype.hasOwnProperty.call(sanitized, "value")) {
+  if (["browser_type", "browser_locator_type", "browser_playwright_type"].includes(toolName) && sanitized && typeof sanitized === "object" && Object.prototype.hasOwnProperty.call(sanitized, "value")) {
     sanitized.value = `[redacted typed text: ${String(args.value || "").length} chars]`;
   }
   return sanitized;
@@ -241,7 +280,7 @@ function traceExportPayload(trace) {
 }
 
 function exportTrace(trace, outPath) {
-  const target = path.resolve(outPath || trace.exportPath);
+  const target = resolveOutputPath(outPath, trace.exportPath, "trace export path");
   mkdirSync(path.dirname(target), { recursive: true });
   writeFileSync(target, JSON.stringify(traceExportPayload(trace), null, 2), "utf8");
   return target;
@@ -438,13 +477,13 @@ function createTrace(args = {}) {
   let exportPath;
   let artifactDir;
   if (args.path) {
-    jsonlPath = path.resolve(String(args.path));
+    jsonlPath = resolveOutputPath(args.path, null, "trace path");
     dir = path.dirname(jsonlPath);
     const base = path.basename(jsonlPath, path.extname(jsonlPath));
     exportPath = path.join(dir, `${base}.json`);
     artifactDir = path.join(dir, `${base}-artifacts`);
   } else {
-    dir = path.join(path.resolve(String(args.dir || DEFAULT_TRACE_DIR)), id);
+    dir = path.join(resolveOutputPath(args.dir, DEFAULT_TRACE_DIR, "trace directory"), id);
     jsonlPath = path.join(dir, "trace.jsonl");
     exportPath = path.join(dir, "trace.json");
     artifactDir = path.join(dir, "artifacts");
@@ -1391,6 +1430,12 @@ async function extensionBridgeView(args = {}) {
   };
 }
 
+function assertExtensionBridgeConfiguration() {
+  if (extensionBridgeStatus.enabled && EXTENSION_BRIDGE_REQUIRE_TOKEN && EXTENSION_BRIDGE_TOKEN === DEFAULT_EXTENSION_BRIDGE_TOKEN) {
+    throw new Error("Browser extension bridge authentication is enabled but no private token is configured. Set BROWSER_CONTROL_EXTENSION_TOKEN or disable the extension bridge explicitly.");
+  }
+}
+
 function runChildCommand(command, args = [], options = {}) {
   const timeoutMs = Number(options.timeoutMs || 15000);
   return new Promise((resolve) => {
@@ -1510,26 +1555,53 @@ async function evaluateValue(cdp, expression, timeoutMs = 15000) {
   return result.result?.description ?? null;
 }
 
+function standardBrowserExecutablePaths() {
+  const roots = [process.env.ProgramFiles, process.env["ProgramFiles(x86)"], process.env.LOCALAPPDATA].filter(Boolean);
+  return roots.flatMap((root) => [
+    path.join(root, "Google", "Chrome", "Application", "chrome.exe"),
+    path.join(root, "Microsoft", "Edge", "Application", "msedge.exe"),
+  ]);
+}
+
+function allowedPortableBrowserPaths() {
+  return String(process.env.BROWSER_CONTROL_ALLOWED_BROWSER_PATHS || "")
+    .split(path.delimiter)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .map((item) => path.resolve(item));
+}
+
+function validateBrowserExecutable(executablePath, source = "executablePath") {
+  const resolved = path.resolve(String(executablePath));
+  const basename = path.basename(resolved).toLowerCase();
+  if (!["chrome.exe", "msedge.exe"].includes(basename)) {
+    throw new Error(`${source} must point to Google Chrome (chrome.exe) or Microsoft Edge (msedge.exe).`);
+  }
+  if (!existsSync(resolved)) throw new Error(`${source} does not exist: ${resolved}`);
+  const canonical = realpathSync.native(resolved);
+  if (canonical.toLowerCase() !== resolved.toLowerCase()) {
+    throw new Error(`${source} must be a real executable path, not a symlink or junction path: ${resolved}`);
+  }
+  const approved = [...standardBrowserExecutablePaths(), ...allowedPortableBrowserPaths()]
+    .filter((candidate) => existsSync(candidate))
+    .map((candidate) => path.resolve(candidate).toLowerCase());
+  if (!approved.includes(canonical.toLowerCase())) {
+    throw new Error(`${source} is not an approved Chrome/Edge installation path. Use a standard Google/Microsoft installation or list the exact portable executable in BROWSER_CONTROL_ALLOWED_BROWSER_PATHS.`);
+  }
+  return canonical;
+}
+
 function findBrowserExecutable(browser, explicitPath) {
-  if (explicitPath) return explicitPath;
-  if (process.env.BROWSER_CONTROL_BROWSER_PATH) return process.env.BROWSER_CONTROL_BROWSER_PATH;
+  if (explicitPath) return validateBrowserExecutable(explicitPath);
+  if (process.env.BROWSER_CONTROL_BROWSER_PATH) return validateBrowserExecutable(process.env.BROWSER_CONTROL_BROWSER_PATH, "BROWSER_CONTROL_BROWSER_PATH");
 
-  const roots = [
-    process.env.ProgramFiles,
-    process.env["ProgramFiles(x86)"],
-    process.env.LOCALAPPDATA,
-  ].filter(Boolean);
-
-  const chrome = [
-    ...roots.map((root) => path.join(root, "Google", "Chrome", "Application", "chrome.exe")),
-    "chrome.exe",
-  ];
-  const edge = [
-    ...roots.map((root) => path.join(root, "Microsoft", "Edge", "Application", "msedge.exe")),
-    "msedge.exe",
-  ];
+  const standard = standardBrowserExecutablePaths();
+  const chrome = standard.filter((candidate) => path.basename(candidate).toLowerCase() === "chrome.exe");
+  const edge = standard.filter((candidate) => path.basename(candidate).toLowerCase() === "msedge.exe");
   const candidates = String(browser || "edge").toLowerCase().includes("chrome") ? chrome : edge;
-  return candidates.find((candidate) => candidate.endsWith(".exe") && existsSync(candidate)) || candidates.at(-1);
+  const found = candidates.find((candidate) => existsSync(candidate));
+  if (!found) throw new Error(`No standard ${String(browser || "edge")} executable was found. Configure BROWSER_CONTROL_BROWSER_PATH and allow its exact path with BROWSER_CONTROL_ALLOWED_BROWSER_PATHS for a portable installation.`);
+  return validateBrowserExecutable(found, "auto-detected browser executable");
 }
 
 async function waitForDebugger(args, timeoutMs = 15000) {
@@ -1815,7 +1887,7 @@ async function toolBrowserDialog(args = {}) {
 }
 
 function downloadBehaviorParams(args = {}) {
-  const downloadPath = path.resolve(String(args.downloadPath || args.path || DEFAULT_DOWNLOAD_DIR));
+  const downloadPath = resolveOutputPath(args.downloadPath || args.path, DEFAULT_DOWNLOAD_DIR, "download directory");
   mkdirSync(downloadPath, { recursive: true });
   const behavior = args.behavior || "allow";
   return {
@@ -2002,7 +2074,7 @@ async function toolBrowserPlaywrightStart(args = {}) {
   if (!engine?.launch && !engine?.launchPersistentContext) throw new Error(`Unsupported Playwright browser: ${browserName}`);
   const headless = args.headless !== false;
   const launchOptions = { headless };
-  if (args.executablePath) launchOptions.executablePath = String(args.executablePath);
+  if (args.executablePath) launchOptions.executablePath = validateBrowserExecutable(args.executablePath);
   if (Array.isArray(args.args)) launchOptions.args = args.args.map(String);
   const id = randomUUID();
   let browser = null;
@@ -2082,7 +2154,7 @@ async function toolBrowserPlaywrightType(args = {}) {
 async function toolBrowserPlaywrightScreenshot(args = {}) {
   const session = resolvePlaywrightSession(args);
   const page = resolvePlaywrightPage(session, args);
-  const outPath = path.resolve(args.path || path.join(DEFAULT_SCREENSHOT_DIR, `playwright-screenshot-${Date.now()}.png`));
+  const outPath = resolveOutputPath(args.path, path.join(DEFAULT_SCREENSHOT_DIR, `playwright-screenshot-${Date.now()}.png`), "screenshot path");
   mkdirSync(path.dirname(outPath), { recursive: true });
   const buffer = await page.screenshot({
     path: outPath,
@@ -3538,7 +3610,7 @@ async function captureScreenshotData(cdp, args = {}, clip = null) {
 }
 
 function writeScreenshot(data, format, args = {}, suffix = "screenshot") {
-  const outPath = path.resolve(args.path || path.join(DEFAULT_SCREENSHOT_DIR, `${suffix}-${Date.now()}.${format}`));
+  const outPath = resolveOutputPath(args.path, path.join(DEFAULT_SCREENSHOT_DIR, `${suffix}-${Date.now()}.${format}`), "screenshot path");
   mkdirSync(path.dirname(outPath), { recursive: true });
   writeFileSync(outPath, Buffer.from(data, "base64"));
   return outPath;
@@ -3739,7 +3811,7 @@ async function toolBrowserScreenshot(args = {}) {
 
     try {
       const result = await cdp.send("Page.captureScreenshot", params, Number(args.timeoutMs || 30000));
-      const outPath = path.resolve(args.path || path.join(DEFAULT_SCREENSHOT_DIR, `screenshot-${Date.now()}.${format}`));
+      const outPath = resolveOutputPath(args.path, path.join(DEFAULT_SCREENSHOT_DIR, `screenshot-${Date.now()}.${format}`), "screenshot path");
       mkdirSync(path.dirname(outPath), { recursive: true });
       writeFileSync(outPath, Buffer.from(result.data, "base64"));
       const extra = args.includeData ? [{ type: "image", data: result.data, mimeType: `image/${format}` }] : [];
@@ -3774,8 +3846,8 @@ const tools = [
       type: "object",
       properties: {
         name: { type: "string", description: "Human-readable trace name." },
-        dir: { type: "string", description: "Trace output directory. Defaults to browser-control-mcp/traces/<trace-id>." },
-        path: { type: "string", description: "Explicit JSONL trace path. Also creates a sibling JSON export path." },
+        dir: { type: "string", description: "Trace output directory under an allowed output root. Defaults to <output-root>/traces/<trace-id>." },
+        path: { type: "string", description: "Explicit JSONL trace path under an allowed output root. Also creates a sibling JSON export path." },
         includeArgs: { type: "boolean", description: "Record sanitized tool arguments. Defaults to true." },
         includeResults: { type: "boolean", description: "Record sanitized tool results. Defaults to true." },
         includeSnapshots: { type: "boolean", description: "Capture compact page snapshots after actionable tools." },
@@ -3825,7 +3897,7 @@ const tools = [
         host: commonTabProperties.host,
         port: commonTabProperties.port,
         browser: { type: "string", enum: ["edge", "chrome"], description: "Browser to launch. Defaults to edge on Windows." },
-        executablePath: { type: "string", description: "Optional absolute path to browser executable." },
+        executablePath: { type: "string", description: "Optional real chrome.exe/msedge.exe path under a standard install root, or an exact path allowed by BROWSER_CONTROL_ALLOWED_BROWSER_PATHS." },
         userDataDir: { type: "string", description: "Optional browser profile directory. Defaults to a temp profile per port." },
         url: { type: "string", description: "Initial URL. Defaults to about:blank." },
         headless: { type: "boolean", description: "Launch headless instead of visible." },
@@ -3982,7 +4054,7 @@ const tools = [
       type: "object",
       properties: {
         ...commonTabProperties,
-        downloadPath: { type: "string", description: "Directory where downloads are saved. Defaults to browser-control-mcp/downloads." },
+        downloadPath: { type: "string", description: "Directory under an allowed output root. Defaults to <output-root>/downloads." },
         path: { type: "string", description: "Alias for downloadPath." },
         behavior: { type: "string", enum: ["allow", "allowAndName", "deny", "default"], description: "Defaults to allow." },
         eventsEnabled: { type: "boolean", description: "Enable Browser.download* events. Defaults to true." },
@@ -3997,7 +4069,7 @@ const tools = [
       type: "object",
       properties: {
         ...commonTabProperties,
-        downloadPath: { type: "string", description: "Directory where downloads are saved. Defaults to browser-control-mcp/downloads." },
+        downloadPath: { type: "string", description: "Directory under an allowed output root. Defaults to <output-root>/downloads." },
         path: { type: "string", description: "Alias for downloadPath." },
         suggestedFilename: { type: "string", description: "Optional substring filter for suggested filename." },
         behavior: { type: "string", enum: ["allow", "allowAndName"], description: "Defaults to allow." },
@@ -4044,7 +4116,7 @@ const tools = [
       properties: {
         browser: { type: "string", enum: ["chromium", "firefox", "webkit"], description: "Defaults to chromium." },
         headless: { type: "boolean", description: "Defaults to true." },
-        executablePath: { type: "string" },
+        executablePath: { type: "string", description: "Optional real chrome.exe/msedge.exe path under a standard install root, or an exact path allowed by BROWSER_CONTROL_ALLOWED_BROWSER_PATHS." },
         userDataDir: { type: "string", description: "Use Playwright persistent context with this profile directory." },
         url: { type: "string" },
         waitUntil: { type: "string", enum: ["load", "domcontentloaded", "networkidle", "commit"] },
@@ -4132,7 +4204,7 @@ const tools = [
       properties: {
         sessionId: { type: "string" },
         pageId: { type: "string" },
-        path: { type: "string" },
+        path: { type: "string", description: "Output path under an allowed output root." },
         fullPage: { type: "boolean" },
         format: { type: "string", enum: ["png", "jpeg"] },
         quality: { type: "number" },
@@ -4566,7 +4638,7 @@ const tools = [
         exact: { type: "boolean" },
         nth: { type: "number" },
         padding: { type: "number", description: "Extra pixels around the element clip." },
-        path: { type: "string", description: "Output path. Defaults to browser-control-mcp/screenshots." },
+        path: { type: "string", description: "Output path under an allowed output root. Defaults to <output-root>/screenshots." },
         format: { type: "string", enum: ["png", "jpeg"] },
         quality: { type: "number" },
         includeData: { type: "boolean" },
@@ -4801,6 +4873,7 @@ async function handleRequest(message) {
   }
 }
 
+assertExtensionBridgeConfiguration();
 const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
 startExtensionBridge();
 rl.on("line", (line) => {

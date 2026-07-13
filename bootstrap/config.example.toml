@@ -74,7 +74,8 @@ env = { TAVILY_KEY_POOL_PATH = "{{USER_HOME}}/Documents/Codex/mcp-data/key-pools
 type = "stdio"
 command = "{{NODE_EXE}}"
 args = ["{{REPO_ROOT}}/tools/codex-browser-control-mcp/src/server.mjs"]
-env = { BROWSER_CONTROL_EXTENSION_PORT = "18795", BROWSER_CONTROL_EXTENSION_TOKEN = "SET_IN_LOCAL_CONFIG" }
+# Portable browsers also require BROWSER_CONTROL_BROWSER_PATH and the same exact executable in BROWSER_CONTROL_ALLOWED_BROWSER_PATHS.
+env = { BROWSER_CONTROL_EXTENSION_PORT = "18795", BROWSER_CONTROL_EXTENSION_TOKEN = "SET_IN_LOCAL_CONFIG", BROWSER_CONTROL_OUTPUT_DIR = "{{CODEX_HOME}}/tmp/browser-control" }
 
 [mcp_servers.codex_desktop_control]
 type = "stdio"

@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { rmSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
@@ -9,6 +9,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const server = path.join(root, "src", "server.mjs");
 const extensionPort = 18796;
 const smokeTraceDir = path.join(os.tmpdir(), `codex-browser-control-smoke-trace-${process.pid}`);
+const rejectedPackageOutput = path.join(root, `disallowed-package-output-${process.pid}.jsonl`);
 const child = spawn(process.execPath, [server], {
   cwd: root,
   stdio: ["pipe", "pipe", "pipe"],
@@ -16,6 +17,7 @@ const child = spawn(process.execPath, [server], {
     ...process.env,
     BROWSER_CONTROL_EXTENSION_PORT: String(extensionPort),
     BROWSER_CONTROL_EXTENSION_TOKEN: "smoke-test-token",
+    BROWSER_CONTROL_OUTPUT_DIR: smokeTraceDir,
   },
 });
 
@@ -131,6 +133,25 @@ try {
     throw new Error("browser_playwright_status did not return a stable status payload");
   }
 
+  const rejectedTracePath = await request("tools/call", {
+    name: "browser_trace_start",
+    arguments: { path: rejectedPackageOutput },
+  });
+  if (!rejectedTracePath.isError || !rejectedTracePath.content?.[0]?.text?.includes("allowed output root")) {
+    throw new Error(`Trace path outside the output root was not rejected: ${JSON.stringify(rejectedTracePath)}`);
+  }
+
+  mkdirSync(smokeTraceDir, { recursive: true });
+  const fakeChrome = path.join(smokeTraceDir, "chrome.exe");
+  writeFileSync(fakeChrome, "not a browser", "utf8");
+  const rejectedExecutable = await request("tools/call", {
+    name: "browser_start",
+    arguments: { port: 65528, executablePath: fakeChrome },
+  });
+  if (!rejectedExecutable.isError || !rejectedExecutable.content?.[0]?.text?.includes("approved Chrome/Edge installation path")) {
+    throw new Error(`Fake chrome.exe outside approved install roots was not rejected: ${JSON.stringify(rejectedExecutable)}`);
+  }
+
   const traceStarted = await request("tools/call", {
     name: "browser_trace_start",
     arguments: { name: "smoke", dir: smokeTraceDir, includeConsole: true, includeNetwork: true },
@@ -141,6 +162,10 @@ try {
   }
 
   await request("tools/call", { name: "browser_status", arguments: { port: 65529 } });
+  const typedSecret = "TRACE_TYPED_SECRET_47d164";
+  const scriptSecret = "TRACE_SCRIPT_SECRET_c42b93";
+  await request("tools/call", { name: "browser_playwright_type", arguments: { value: typedSecret, selector: "input" } });
+  await request("tools/call", { name: "browser_extension_execute_js", arguments: { script: `return ${JSON.stringify(scriptSecret)}` } });
 
   const traceStatus = await request("tools/call", { name: "browser_trace_status", arguments: {} });
   const traceStatusJson = JSON.parse(traceStatus.content?.[0]?.text || "{}");
@@ -152,6 +177,19 @@ try {
   const traceStoppedJson = JSON.parse(traceStopped.content?.[0]?.text || "{}");
   if (!traceStoppedJson.ok || !traceStoppedJson.exported) {
     throw new Error("browser_trace_stop did not export the trace");
+  }
+  const traceText = readFileSync(traceStoppedJson.exported, "utf8");
+  if (traceText.includes(typedSecret) || traceText.includes(scriptSecret) || traceText.includes('"preview"')) {
+    throw new Error("Trace export retained typed text, script content, or a script preview");
+  }
+  const traceJson = JSON.parse(traceText);
+  const typedStep = traceJson.steps.find((step) => step.tool === "browser_playwright_type");
+  const scriptStep = traceJson.steps.find((step) => step.tool === "browser_extension_execute_js");
+  if (!String(typedStep?.args?.value || "").includes("redacted typed text")) {
+    throw new Error(`Playwright typed text was not explicitly redacted: ${JSON.stringify(typedStep)}`);
+  }
+  if (scriptStep?.args?.script?.length !== `return ${JSON.stringify(scriptSecret)}`.length || Object.keys(scriptStep.args.script).join(",") !== "length") {
+    throw new Error(`Script trace metadata did not retain only length: ${JSON.stringify(scriptStep)}`);
   }
 
   const traceExported = await request("tools/call", { name: "browser_trace_export", arguments: {} });
@@ -196,4 +234,5 @@ try {
 } finally {
   child.kill();
   rmSync(smokeTraceDir, { recursive: true, force: true });
+  rmSync(rejectedPackageOutput, { force: true });
 }

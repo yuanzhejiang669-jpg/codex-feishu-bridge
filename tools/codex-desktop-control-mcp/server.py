@@ -962,11 +962,13 @@ def _status_payload() -> dict[str, Any]:
 
 @mcp.tool()
 def codex_desktop_control_status() -> dict[str, Any]:
+    """Report desktop-control availability, screen geometry, optional UI/OCR backends, output paths, and stable error codes. Call this before a desktop workflow."""
     return _status_payload()
 
 
 @mcp.tool()
 def codex_desktop_control_ui_status() -> dict[str, Any]:
+    """Report visual UI detector and OCR readiness, including model installation guidance when the optional detector is unavailable."""
     try:
         has_ultralytics = _module_available('ultralytics')
         return {
@@ -983,6 +985,7 @@ def codex_desktop_control_ui_status() -> dict[str, Any]:
 
 @mcp.tool()
 def codex_desktop_control_uia_status() -> dict[str, Any]:
+    """Report whether Windows UI Automation is available. Prefer UIA over OCR for native controls when this returns available=true."""
     return _uia_status_payload()
 
 
@@ -999,6 +1002,10 @@ def codex_desktop_control_uia_find(
     max_depth: int = 4,
     limit: int = 50,
 ) -> dict[str, Any]:
+    """Find native UIA controls in a window.
+
+    Use hwnd or title_contains to select a window; name, automation_id, and control_type filter controls. exact=true requires complete field equality, while false uses case-insensitive substring matching. max_depth and limit bound traversal. Returned rectangles use physical screen coordinates.
+    """
     if not any([query, name_contains, automation_id, class_name, control_type]):
         return _fail('provide query, name_contains, automation_id, class_name, or control_type', 'VALIDATION_ERROR')
     try:
@@ -1032,6 +1039,7 @@ def codex_desktop_control_uia_tree(
     max_depth: int = 2,
     limit: int = 80,
 ) -> dict[str, Any]:
+    """Return a bounded native UIA control tree for a selected window. Select by hwnd or title_contains; max_depth and limit cap traversal size."""
     try:
         root = _uia_root(hwnd=hwnd, title_contains=title_contains)
         max_depth = max(0, min(int(max_depth), 8))
@@ -1063,6 +1071,10 @@ def codex_desktop_control_uia_click(
     verify_bbox: list[int] | None = None,
     verify_delay_ms: int = 200,
 ) -> dict[str, Any]:
+    """Find and invoke or click one native UIA control.
+
+    Filters match codex_desktop_control_uia_find; exact=true requires complete equality. index selects among matches. Prefer invoke=true for buttons and use verify_after to capture post-action evidence.
+    """
     if not any([query, name_contains, automation_id, class_name, control_type]):
         return _fail('provide query, name_contains, automation_id, class_name, or control_type', 'VALIDATION_ERROR')
     try:
@@ -1096,6 +1108,7 @@ def codex_desktop_control_uia_click(
 
 @mcp.tool()
 def codex_desktop_control_self_check() -> dict[str, Any]:
+    """Run non-destructive capture, clipboard, OCR, UIA, and output-path diagnostics. Use this when status is insufficient or a desktop tool is failing."""
     _trace_self_check('start')
     checks: dict[str, Any] = {}
     warnings: list[str] = []
@@ -1168,6 +1181,7 @@ def codex_desktop_control_self_check() -> dict[str, Any]:
 
 @mcp.tool()
 def codex_desktop_control_list_windows(title_contains: str | None = None, visible_only: bool = True) -> dict[str, Any]:
+    """List top-level Windows windows. title_contains is a case-insensitive title filter; visible_only excludes hidden windows by default. Returns hwnd values for later calls."""
     try:
         windows = _list_windows(title_contains=title_contains, visible_only=visible_only)
         return {'ok': True, 'count': len(windows), 'windows': windows[:200]}
@@ -1177,6 +1191,7 @@ def codex_desktop_control_list_windows(title_contains: str | None = None, visibl
 
 @mcp.tool()
 def codex_desktop_control_activate_window(hwnd: int | None = None, title_contains: str | None = None) -> dict[str, Any]:
+    """Bring one top-level window to the foreground. Select it by exact hwnd or a case-insensitive title substring; hwnd is preferred when known."""
     try:
         return _activate(_resolve_hwnd(hwnd=hwnd, title_contains=title_contains))
     except Exception as exc:
@@ -1193,6 +1208,10 @@ def codex_desktop_control_screenshot(
     format: str = 'png',
     client_area: bool = False,
 ) -> dict[str, Any]:
+    """Capture the virtual desktop, a physical-pixel bbox, or a selected window.
+
+    Select a window with hwnd/title_contains and optionally client_area=true. path must be inside CODEX_DESKTOP_CONTROL_OUTPUT_DIR; include_data embeds image bytes and can make responses large.
+    """
     if format.lower() not in {'png', 'jpeg', 'jpg'}:
         return _fail('format must be png or jpeg', 'VALIDATION_ERROR')
     fmt = 'jpeg' if format.lower() == 'jpg' else format.lower()
@@ -1239,6 +1258,7 @@ def codex_desktop_control_ocr(
     enhance: bool = False,
     client_area: bool = False,
 ) -> dict[str, Any]:
+    """Run OCR on an image file, physical-pixel screen bbox, or selected window. Returns text plus per-line boxes and coordinate-space metadata; enhance may improve low-contrast text at extra cost."""
     return _ocr_payload(image_path=image_path, hwnd=hwnd, title_contains=title_contains, bbox=bbox, enhance=enhance, client_area=client_area)
 
 
@@ -1272,7 +1292,8 @@ def _find_text_payload(
         for detail in ocr.get('details', []):
             text = detail.get('text', '')
             haystack = text if exact else text.lower()
-            if needle in haystack:
+            matched = haystack == needle if exact else needle in haystack
+            if matched:
                 points = detail.get('bbox') or []
                 xs = [float(point[0]) for point in points] if points else []
                 ys = [float(point[1]) for point in points] if points else []
@@ -1308,6 +1329,10 @@ def codex_desktop_control_find_text(
     enhance: bool = False,
     client_area: bool = False,
 ) -> dict[str, Any]:
+    """Locate OCR text in an image, screen bbox, or selected window.
+
+    exact=true requires a complete case-sensitive OCR line match; false uses case-insensitive substring matching. Returned screen_center coordinates are physical virtual-screen pixels suitable for click tools.
+    """
     return _find_text_payload(
         query=query,
         image_path=image_path,
@@ -1365,6 +1390,7 @@ def codex_desktop_control_wait_for_text(
     timeout_ms: int = 3000,
     interval_ms: int = 250,
 ) -> dict[str, Any]:
+    """Poll OCR until text appears or timeout_ms expires. Matching follows find_text; interval_ms controls polling frequency and exact=true requires a complete case-sensitive line match."""
     if not query.strip():
         return _fail('query must be non-empty', 'VALIDATION_ERROR')
     try:
@@ -1395,6 +1421,7 @@ def codex_desktop_control_detect_ui_elements(
     annotate_path: str | None = None,
     client_area: bool = False,
 ) -> dict[str, Any]:
+    """Detect visual UI candidates and optionally OCR text in an image, screen bbox, or window. conf_threshold is 0..1; annotate_path writes marked output under the configured output root."""
     try:
         if conf_threshold < 0 or conf_threshold > 1:
             return _fail('conf_threshold must be between 0 and 1', 'VALIDATION_ERROR')
@@ -1519,6 +1546,7 @@ def codex_desktop_control_click(
     verify_bbox: list[int] | None = None,
     verify_delay_ms: int = 200,
 ) -> dict[str, Any]:
+    """Left-click physical virtual-screen coordinates x,y. Optionally activate a window title first; verify_after captures bounded post-action visual evidence."""
     return _click_payload(
         x=x,
         y=y,
@@ -1543,6 +1571,7 @@ def codex_desktop_control_click_and_wait_text(
     timeout_ms: int = 3000,
     interval_ms: int = 250,
 ) -> dict[str, Any]:
+    """Click physical virtual-screen coordinates, then poll OCR for expected_text. Use bbox/window selectors to narrow verification; exact=true requires a complete case-sensitive OCR line match."""
     clicked = _click_payload(x=x, y=y, activate_title_contains=activate_title_contains)
     if not clicked.get('ok'):
         return _fail(clicked.get('error') or 'click failed', clicked.get('code'), click=clicked)
@@ -1568,6 +1597,7 @@ def codex_desktop_control_double_click(
     verify_bbox: list[int] | None = None,
     verify_delay_ms: int = 200,
 ) -> dict[str, Any]:
+    """Double-click physical virtual-screen coordinates. Optionally activate a window first and capture post-action verification evidence."""
     first = _click_payload(x=x, y=y, activate_title_contains=activate_title_contains)
     if not first.get('ok'):
         return first
@@ -1590,6 +1620,7 @@ def codex_desktop_control_hotkey(
     verify_bbox: list[int] | None = None,
     verify_delay_ms: int = 200,
 ) -> dict[str, Any]:
+    """Send a key chord such as ['ctrl','s'] to the foreground or selected window. Keys are pressed in order and released in reverse; verify_after captures visual evidence."""
     try:
         if activate_title_contains:
             _activate(_resolve_hwnd(title_contains=activate_title_contains))
@@ -1618,7 +1649,13 @@ def codex_desktop_control_paste_text(
     restore_clipboard: bool = True,
     restore_delay_ms: int = 200,
 ) -> dict[str, Any]:
+    """Paste Unicode text through the Windows clipboard and Ctrl+V.
+
+    Optionally activate a target window. restore_clipboard=true restores the prior clipboard even when paste or verification fails. verify_text polls OCR; verify_after captures post-action evidence.
+    """
     clipboard_snapshot = None
+    win32clipboard = None
+    result: dict[str, Any] | None = None
     try:
         if activate_title_contains:
             _activate(_resolve_hwnd(title_contains=activate_title_contains))
@@ -1631,11 +1668,8 @@ def codex_desktop_control_paste_text(
             win32clipboard.SetClipboardText(text, win32con.CF_UNICODETEXT)
         finally:
             win32clipboard.CloseClipboard()
+        result = {'ok': True, 'length': len(text), 'clipboard_restore_requested': bool(restore_clipboard)}
         _send_hotkey(['ctrl', 'v'])
-        result: dict[str, Any] = {'ok': True, 'length': len(text), 'clipboard_restore_requested': bool(restore_clipboard)}
-        if restore_clipboard:
-            time.sleep(max(0, int(restore_delay_ms)) / 1000.0)
-            result['clipboard_restore'] = _restore_clipboard_snapshot(win32clipboard, clipboard_snapshot)
         if verify_after:
             result['post_action'] = _post_action_verification(
                 bbox=verify_bbox,
@@ -1652,7 +1686,17 @@ def codex_desktop_control_paste_text(
             result['ok'] = bool(result['verification'].get('ok'))
         return result
     except Exception as exc:
-        return _fail(exc)
+        result = _fail(exc)
+        return result
+    finally:
+        if restore_clipboard and win32clipboard is not None and clipboard_snapshot is not None:
+            time.sleep(max(0, int(restore_delay_ms)) / 1000.0)
+            try:
+                restored = _restore_clipboard_snapshot(win32clipboard, clipboard_snapshot)
+            except Exception as exc:
+                restored = _fail(exc, 'CLIPBOARD_RESTORE_FAILED')
+            if result is not None:
+                result['clipboard_restore'] = restored
 
 
 if __name__ == '__main__':

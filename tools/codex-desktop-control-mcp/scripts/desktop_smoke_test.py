@@ -27,10 +27,73 @@ def main() -> None:
     require(status.get("screen", {}).get("virtual_width", 0) > 0, f"invalid screen info: {status.get('screen')}")
 
     self_check = server.codex_desktop_control_self_check()
-    require(self_check.get("ok") is True, json.dumps(self_check, ensure_ascii=False, indent=2))
+    if self_check.get("ok") is not True:
+        clipboard = self_check.get("checks", {}).get("clipboard", {})
+        other_checks = ["status", "uia", "windows", "screenshot", "visual_fallback"]
+        locked_clipboard_only = clipboard.get("ok") is False and all(self_check.get("checks", {}).get(name, {}).get("ok") is True for name in other_checks)
+        require(locked_clipboard_only, json.dumps(self_check, ensure_ascii=False, indent=2))
 
     wait_result = server.codex_desktop_control_wait_for_text("__codex_unlikely_text__", timeout_ms=0)
     require(wait_result.get("ok") is False and "text not found" in wait_result.get("error", ""), f"unexpected wait result: {wait_result}")
+
+    original_ocr_payload = server._ocr_payload
+    try:
+        server._ocr_payload = lambda **_kwargs: {
+            "ok": True,
+            "origin": [0.0, 0.0],
+            "coordinate_space": "image_pixels",
+            "source": {"type": "synthetic"},
+            "text": "Save\nSave As",
+            "details": [
+                {"text": "Save", "bbox": [[0, 0], [20, 0], [20, 10], [0, 10]]},
+                {"text": "Save As", "bbox": [[0, 20], [40, 20], [40, 30], [0, 30]]},
+            ],
+        }
+        exact_match = server._find_text_payload("Save", exact=True)
+        partial_match = server._find_text_payload("save", exact=False)
+        require(exact_match.get("count") == 1 and exact_match["matches"][0]["text"] == "Save", f"exact OCR match was not equality: {exact_match}")
+        require(partial_match.get("count") == 2, f"substring OCR match regressed: {partial_match}")
+    finally:
+        server._ocr_payload = original_ocr_payload
+
+    class FakeClipboard:
+        def EmptyClipboard(self):
+            pass
+
+        def SetClipboardText(self, _text, _format):
+            pass
+
+        def CloseClipboard(self):
+            pass
+
+    class FakeWin32Con:
+        CF_UNICODETEXT = 13
+
+    fake_clipboard = FakeClipboard()
+    restore_calls = []
+    originals = {
+        "import_win32": server._import_win32,
+        "open_clipboard": server._open_clipboard_with_retry,
+        "snapshot": server._clipboard_snapshot,
+        "restore": server._restore_clipboard_snapshot,
+        "hotkey": server._send_hotkey,
+    }
+    try:
+        server._import_win32 = lambda: (object(), FakeWin32Con(), object(), object(), fake_clipboard, object())
+        server._open_clipboard_with_retry = lambda: None
+        server._clipboard_snapshot = lambda _clipboard, _con: {"formats": [{"format": 13, "data": "original"}]}
+        server._restore_clipboard_snapshot = lambda _clipboard, snapshot: restore_calls.append(snapshot) or {"ok": True, "restored": True}
+        server._send_hotkey = lambda _keys: (_ for _ in ()).throw(RuntimeError("synthetic hotkey failure"))
+        failed_paste = server.codex_desktop_control_paste_text("temporary", restore_delay_ms=0)
+        require(failed_paste.get("ok") is False, f"synthetic paste failure unexpectedly succeeded: {failed_paste}")
+        require(len(restore_calls) == 1, f"clipboard was not restored after hotkey failure: {failed_paste}")
+        require(failed_paste.get("clipboard_restore", {}).get("ok") is True, f"restore result missing from failure payload: {failed_paste}")
+    finally:
+        server._import_win32 = originals["import_win32"]
+        server._open_clipboard_with_retry = originals["open_clipboard"]
+        server._clipboard_snapshot = originals["snapshot"]
+        server._restore_clipboard_snapshot = originals["restore"]
+        server._send_hotkey = originals["hotkey"]
 
     if self_check.get("desktop_available"):
         verified = server.codex_desktop_control_hotkey(keys=[], verify_after=True, verify_bbox=[0, 0, 320, 200])

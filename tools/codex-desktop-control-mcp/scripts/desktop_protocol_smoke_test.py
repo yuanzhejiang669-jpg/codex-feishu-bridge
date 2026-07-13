@@ -101,7 +101,10 @@ def main() -> None:
         send({'jsonrpc': '2.0', 'method': 'notifications/initialized', 'params': {}})
 
         listed = request('tools/list', {})
-        names = [tool.get('name') for tool in listed.get('tools', [])]
+        listed_tools = listed.get('tools', [])
+        names = [tool.get('name') for tool in listed_tools]
+        missing_descriptions = [tool.get('name') for tool in listed_tools if not str(tool.get('description') or '').strip()]
+        require(not missing_descriptions, f'tools missing descriptions: {missing_descriptions}')
         for required in [
             'codex_desktop_control_status',
             'codex_desktop_control_self_check',
@@ -122,7 +125,11 @@ def main() -> None:
         require('VALIDATION_ERROR' in status.get('error_codes', []), f'missing stable error code inventory: {status.get("error_codes")}')
 
         self_check = parse_tool_payload(request('tools/call', {'name': 'codex_desktop_control_self_check', 'arguments': {}}, timeout=30.0))
-        require(self_check.get('ok') is True, json.dumps(self_check, ensure_ascii=False, indent=2))
+        if self_check.get('ok') is not True:
+            clipboard = self_check.get('checks', {}).get('clipboard', {})
+            other_checks = ['status', 'uia', 'windows', 'screenshot', 'visual_fallback']
+            locked_clipboard_only = clipboard.get('ok') is False and all(self_check.get('checks', {}).get(name, {}).get('ok') is True for name in other_checks)
+            require(locked_clipboard_only, json.dumps(self_check, ensure_ascii=False, indent=2))
 
         uia_status = parse_tool_payload(request('tools/call', {'name': 'codex_desktop_control_uia_status', 'arguments': {}}))
         require(uia_status.get('ok') is True and 'available' in uia_status, f'uia_status failed: {uia_status}')

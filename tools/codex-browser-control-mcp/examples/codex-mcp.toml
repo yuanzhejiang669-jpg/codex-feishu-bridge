@@ -2,4 +2,5 @@
 type = "stdio"
 command = "D:/Node.js/node.exe"
 args = ["C:/Users/12644/Documents/Codex/tools/browser-control-mcp/src/server.mjs"]
-env = { BROWSER_CONTROL_EXTENSION_PORT = "18795", BROWSER_CONTROL_EXTENSION_TOKEN = "replace-with-local-token" }
+# For a portable browser, set BROWSER_CONTROL_BROWSER_PATH and list the same exact executable in BROWSER_CONTROL_ALLOWED_BROWSER_PATHS.
+env = { BROWSER_CONTROL_EXTENSION_PORT = "18795", BROWSER_CONTROL_EXTENSION_TOKEN = "replace-with-local-token", BROWSER_CONTROL_OUTPUT_DIR = "C:/Users/12644/Documents/Codex/mcp-data/browser-control" }
