@@ -31,6 +31,11 @@ import {
   environmentVariableSource,
   environmentVariableValue,
 } from "./src/control-panel/environment.mjs";
+import {
+  BRIDGE_START_SCRIPT_TIMEOUT_MS,
+  bridgeStartIsConfirmed,
+  normalizeConfirmedStartResult,
+} from "./src/control-panel/restart.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1807,11 +1812,13 @@ async function startFactoryBots(payload) {
   const results = [];
   for (const job of jobs) {
     const args = [...jobScriptArgs(job), "-EnableMcp"];
-    const result = await runScript(startBridgeScript, args, 60_000);
+    let result = await runScript(startBridgeScript, args, BRIDGE_START_SCRIPT_TIMEOUT_MS);
     await new Promise((resolve) => setTimeout(resolve, 800));
     const pid = parsePid(await readTextFile(path.join(job.runtimeRoot, "state", "bridge.pid")));
+    const confirmed = await bridgePidIsConfirmed(job, pid);
+    result = normalizeConfirmedStartResult(result, confirmed);
     job.updatedAt = new Date().toISOString();
-    if (result.ok && pid) {
+    if (confirmed) {
       job.status = "started";
       job.pid = pid;
       job.lastError = "";
@@ -1819,7 +1826,7 @@ async function startFactoryBots(payload) {
       job.status = "failed";
       job.lastError = result.stderr || result.error || "start bridge failed";
     }
-    results.push({ name: job.name, ok: result.ok && Boolean(pid), pid, stdout: result.stdout, stderr: result.stderr, error: result.error });
+    results.push({ name: job.name, ok: confirmed, pid, stdout: result.stdout, stderr: result.stderr, error: result.error });
   }
   return {
     ok: results.every((item) => item.ok),
@@ -3415,13 +3422,15 @@ async function restartIdleInstance(name) {
     };
   }
 
-  const startResult = await runScript(startBridgeScript, args, 60_000);
+  let startResult = await runScript(startBridgeScript, args, BRIDGE_START_SCRIPT_TIMEOUT_MS);
   await new Promise((resolve) => setTimeout(resolve, 1200));
   const afterPid = await readPidForDescriptor(descriptor);
+  const restarted = await bridgePidIsConfirmed(descriptor, afterPid);
+  startResult = normalizeConfirmedStartResult(startResult, restarted);
   return {
     name: descriptor.name,
-    action: startResult.ok && afterPid ? "restarted" : "failed",
-    reason: startResult.ok && afterPid ? "已重启并写入 PID" : "启动后未确认到 PID",
+    action: restarted ? "restarted" : "failed",
+    reason: restarted ? "已重启并确认 PID 与锁文件" : "启动后未确认到匹配的 PID 与锁文件",
     beforePid,
     afterPid,
     pidChanged: Boolean(beforePid && afterPid && beforePid !== afterPid),
@@ -3462,13 +3471,19 @@ function isProcessAlive(pid) {
 }
 
 async function assertBridgePidOwnership(descriptor, pid) {
+  if (await bridgePidIsConfirmed(descriptor, pid)) return;
+  throw new Error(`拒绝终止 PID ${pid}：Bridge 锁文件与所选 Bot 不匹配`);
+}
+
+async function bridgePidIsConfirmed(descriptor, pid) {
   const lockFile = path.join(descriptor.runtimeRoot, "state", "bridge.lock.json");
   const lock = await readJsonFile(lockFile);
-  const lockPid = Number(lock?.pid || 0);
-  const lockInstance = String(lock?.instance || "");
-  if (lockPid !== pid || lockInstance !== descriptor.name) {
-    throw new Error(`拒绝终止 PID ${pid}：Bridge 锁文件与所选 Bot 不匹配`);
-  }
+  return bridgeStartIsConfirmed({
+    pid,
+    processAlive: isProcessAlive(pid),
+    lock,
+    instanceName: descriptor.name,
+  });
 }
 
 async function clearForcedRestartState(descriptor) {
@@ -3512,17 +3527,15 @@ async function forceRestartInstance(name) {
   }
 
   await clearForcedRestartState(descriptor);
-  const startResult = await runScript(startBridgeScript, scriptArgsForInstance(descriptor.name), 60_000);
+  let startResult = await runScript(
+    startBridgeScript,
+    scriptArgsForInstance(descriptor.name),
+    BRIDGE_START_SCRIPT_TIMEOUT_MS,
+  );
   await new Promise((resolve) => setTimeout(resolve, 1200));
   const afterPid = await readPidForDescriptor(descriptor);
-  let lockVerified = false;
-  if (startResult.ok && afterPid && isProcessAlive(afterPid)) {
-    try {
-      await assertBridgePidOwnership(descriptor, afterPid);
-      lockVerified = true;
-    } catch {}
-  }
-  const restarted = Boolean(startResult.ok && afterPid && isProcessAlive(afterPid) && lockVerified);
+  const restarted = await bridgePidIsConfirmed(descriptor, afterPid);
+  startResult = normalizeConfirmedStartResult(startResult, restarted);
   return {
     name: descriptor.name,
     action: restarted ? "restarted" : "failed",

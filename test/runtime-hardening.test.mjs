@@ -5,6 +5,11 @@ import path from "node:path";
 import test from "node:test";
 
 import { createLogger } from "../src/logging/logger.mjs";
+import {
+  BRIDGE_START_SCRIPT_TIMEOUT_MS,
+  bridgeStartIsConfirmed,
+  normalizeConfirmedStartResult,
+} from "../src/control-panel/restart.mjs";
 import { createActiveRunStore } from "../src/runtime/active-runs.mjs";
 import { recordsMatchColumns } from "../src/utils/json.mjs";
 
@@ -67,4 +72,31 @@ test("sidebar record comparison detects only material column changes", () => {
   assert.equal(recordsMatchColumns(current, { ...current, title: "Changed" }, columns), false);
   assert.equal(recordsMatchColumns(null, current, columns), false);
   assert.equal(recordsMatchColumns(current, { ...current, nullable: undefined }, columns), true);
+});
+
+test("control panel trusts a live owned Bridge PID after the start wrapper times out", () => {
+  const confirmed = bridgeStartIsConfirmed({
+    pid: 4321,
+    processAlive: true,
+    lock: { pid: 4321, instance: "bot-1" },
+    instanceName: "bot-1",
+  });
+  const result = normalizeConfirmedStartResult({
+    ok: false,
+    error: "start script timed out",
+    exitCode: "ETIMEDOUT",
+  }, confirmed);
+
+  assert.equal(BRIDGE_START_SCRIPT_TIMEOUT_MS, 10_000);
+  assert.equal(confirmed, true);
+  assert.equal(result.ok, true);
+  assert.equal(result.detached, true);
+  assert.equal(result.error, "");
+  assert.match(result.wrapperError, /timed out/);
+  assert.equal(bridgeStartIsConfirmed({
+    pid: 4321,
+    processAlive: true,
+    lock: { pid: 9999, instance: "bot-1" },
+    instanceName: "bot-1",
+  }), false);
 });
