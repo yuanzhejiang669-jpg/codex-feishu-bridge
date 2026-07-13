@@ -2,6 +2,8 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
+import { writeJsonFileAtomicSync } from "../utils/json.mjs";
+
 export function createSeenEventsStore({
   seenPath,
   eventLocksDir,
@@ -13,7 +15,7 @@ export function createSeenEventsStore({
 
   function saveSeen() {
     const last = [...seen].slice(-1000);
-    fs.writeFileSync(seenPath, JSON.stringify(last, null, 2), "utf8");
+    writeJsonFileAtomicSync(seenPath, last);
   }
 
   function remember(id) {

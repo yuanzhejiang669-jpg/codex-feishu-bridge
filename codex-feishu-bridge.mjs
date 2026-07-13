@@ -62,7 +62,13 @@ import {
   normalizeTokenUsage,
 } from "./src/sessions/normalize.mjs";
 import { createSessionStore } from "./src/sessions/store.mjs";
-import { findDeepKey, parseJsonLoose, readJsonFile } from "./src/utils/json.mjs";
+import {
+  findDeepKey,
+  parseJsonLoose,
+  readJsonFile,
+  recordsMatchColumns,
+  writeJsonFileAtomicSync,
+} from "./src/utils/json.mjs";
 import {
   classifyCodexFailure,
   emptyCompletionError,
@@ -107,6 +113,8 @@ const CONFIG = {
   replyToMessage: (process.env.CODEX_FEISHU_REPLY_TO_MESSAGE || "0") === "1",
   useThreadReply: (process.env.CODEX_FEISHU_REPLY_IN_THREAD || "0") === "1",
   logDir: process.env.CODEX_FEISHU_LOG_DIR || path.join(DEFAULT_DATA_ROOT, "logs"),
+  logMaxBytes: Number(process.env.CODEX_FEISHU_LOG_MAX_BYTES || `${5 * 1024 * 1024}`),
+  logMaxBackups: Number(process.env.CODEX_FEISHU_LOG_MAX_BACKUPS || "3"),
   stateDir: process.env.CODEX_FEISHU_STATE_DIR || path.join(DEFAULT_DATA_ROOT, "state"),
   attachmentRelDir: safeRelativePath(
     process.env.CODEX_FEISHU_ATTACHMENT_REL_DIR || ".codex-feishu-attachments",
@@ -130,7 +138,10 @@ const CONFIG = {
 };
 
 const logPath = path.join(CONFIG.logDir, "codex-feishu-bridge.log");
-const log = createLogger(logPath);
+const log = createLogger(logPath, {
+  maxBytes: CONFIG.logMaxBytes,
+  maxBackups: CONFIG.logMaxBackups,
+});
 const seenPath = path.join(CONFIG.stateDir, "seen-events.json");
 const sessionsPath = path.join(CONFIG.stateDir, "sessions.json");
 const activeRunsPath = path.join(CONFIG.stateDir, "active-runs.json");
@@ -3748,7 +3759,7 @@ function syncCodexGlobalState(record, globalStatePath = codexGlobalStatePath) {
   }
 
   if (!changed) return false;
-  fs.writeFileSync(globalStatePath, JSON.stringify(state), "utf8");
+  writeJsonFileAtomicSync(globalStatePath, state, { space: 0 });
   return true;
 }
 
@@ -3779,7 +3790,7 @@ function removeCodexGlobalStateThread(threadId, globalStatePath = codexGlobalSta
   }
 
   if (!changed) return false;
-  fs.writeFileSync(globalStatePath, JSON.stringify(state), "utf8");
+  writeJsonFileAtomicSync(globalStatePath, state, { space: 0 });
   return true;
 }
 
@@ -3805,6 +3816,9 @@ async function mirrorCodexThreadRecordToDesktopHome(record) {
   const targetColumns = await sqliteTableColumns("threads", desktopCodexStateDbPath);
   const columns = sourceColumns.filter((name) => targetColumns.has(name));
   if (!columns.includes("id") || !columns.includes("rollout_path")) return false;
+
+  const current = await loadCodexThreadRecordFromDb(record.id, desktopCodexStateDbPath);
+  if (recordsMatchColumns(current, desktopRecord, columns)) return false;
 
   const result = await runSqliteThreadUpsert(desktopCodexStateDbPath, {
     columns,
@@ -4059,7 +4073,7 @@ async function reconcileCodexDesktopSidebarIndexes(reason = "startup") {
     for (const record of records) {
       changed = await ensureCodexDesktopSidebarIndexed(record.id, reason) || changed;
     }
-    if (records.length || changed) {
+    if (changed || reason === "startup") {
       log("INFO", "codex desktop sidebar indexes reconciled", {
         reason,
         codexHome: CONFIG.codexHome,

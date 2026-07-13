@@ -1,5 +1,7 @@
 import fs from "node:fs";
 
+import { writeJsonFileAtomicSync } from "../utils/json.mjs";
+
 export function createActiveRunStore({
   activeRunsPath,
   bridgePid = process.pid,
@@ -8,7 +10,7 @@ export function createActiveRunStore({
   const activeRuns = loadActiveRuns(activeRunsPath);
 
   function saveActiveRuns() {
-    fs.writeFileSync(activeRunsPath, JSON.stringify(activeRuns, null, 2), "utf8");
+    writeJsonFileAtomicSync(activeRunsPath, activeRuns);
   }
 
   function recordActiveRun(record) {

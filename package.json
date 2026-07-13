@@ -9,7 +9,7 @@
     "url": "git+ssh://git@github.com/yuanzhejiang669-jpg/codex-feishu-bridge.git"
   },
   "scripts": {
-    "check": "node scripts/check-syntax.mjs && node scripts/check-control-panel-static.mjs",
+    "check": "node scripts/check-syntax.mjs && node scripts/check-control-panel-static.mjs && node --test test/*.test.mjs",
     "doctor": "powershell.exe -NoProfile -File doctor-codex-feishu-bridge.ps1",
     "doctor:json": "powershell.exe -NoProfile -File doctor-codex-feishu-bridge.ps1 -Json",
     "register": "node register-codex-feishu-bot.mjs",

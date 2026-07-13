@@ -1,5 +1,7 @@
 import fs from "node:fs";
 
+import { writeJsonFileAtomicSync } from "../utils/json.mjs";
+
 export function createSessionStore({
   sessionsPath,
   createSessionData,
@@ -10,7 +12,7 @@ export function createSessionStore({
   const sessions = loadSessions(sessionsPath);
 
   function saveSessions() {
-    fs.writeFileSync(sessionsPath, JSON.stringify(sessions, null, 2), "utf8");
+    writeJsonFileAtomicSync(sessionsPath, sessions);
   }
 
   function getSession(chatId) {
