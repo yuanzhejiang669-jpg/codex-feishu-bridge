@@ -7,7 +7,6 @@ import path from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 import {
-  clearTimer,
   durationConfigLabel,
   hasDuration,
   normalizeRunMode,
@@ -48,10 +47,15 @@ import {
   STANDARD_SERVICE_TIER,
   createServiceTierPolicy,
 } from "./src/config/service-tier.mjs";
+import { AppServerClient } from "./src/codex/app-server-client.mjs";
+import { createAppServerProtocol } from "./src/codex/app-server-protocol.mjs";
 import { createCodexProviderConfig } from "./src/providers/codex-config.mjs";
 import { createActiveRunStore } from "./src/runtime/active-runs.mjs";
+import { createEventDispatcher } from "./src/runtime/event-dispatcher.mjs";
 import { createProcessRunner, isProcessAlive as isProcessAlivePid } from "./src/runtime/process-runner.mjs";
 import { createRecalledMessageStore } from "./src/runtime/recalled-messages.mjs";
+import { createRunWatchdog as createBaseRunWatchdog } from "./src/runtime/run-watchdog.mjs";
+import { createSingleInstanceLock } from "./src/runtime/single-instance-lock.mjs";
 import {
   appServerToolStatus,
   createRunActivity,
@@ -219,6 +223,24 @@ const {
   has: isMessageRecalled,
   remember: rememberRecalledMessage,
 } = recalledMessageStore;
+const singleInstanceLock = createSingleInstanceLock({
+  lockPath,
+  pidPath,
+  owner: {
+    pid: process.pid,
+    instance: process.env.CODEX_FEISHU_INSTANCE_NAME || "",
+    workspace: CONFIG.workspace,
+    codexHome: CONFIG.codexHome,
+    larkProfile: CONFIG.larkProfile || "default",
+    startedAt: Date.now(),
+  },
+  processAlive: isProcessAlivePid,
+  log,
+});
+const {
+  acquire: acquireSingleInstanceLock,
+  release: releaseSingleInstanceLock,
+} = singleInstanceLock;
 acquireSingleInstanceLock();
 try {
   fs.rmSync(stopPath, { force: true });
@@ -347,10 +369,8 @@ const {
   shouldRetryWithoutServiceTier,
 } = createServiceTierPolicy({ findProvider: findCodexProvider });
 let shuttingDown = false;
-let activeJobs = 0;
 let sidebarReconcileInFlight = false;
 let sidebarReconcileQueuedReason = "";
-const pendingEvents = [];
 const sessionStore = createSessionStore({
   sessionsPath,
   createSessionData,
@@ -375,6 +395,40 @@ const stats = {
   recovered: 0,
   failuresByKind: {},
 };
+const eventDispatcher = createEventDispatcher({
+  maxConcurrent: CONFIG.maxConcurrent,
+  chatIdOf,
+  messageIdOf,
+  eventIdOf,
+  isRecallEvent,
+  isMessageRecalled,
+  parseCommand: (event) => parseCommand(event?.content),
+  isOutOfBandCommand,
+  handleRecallEvent,
+  handleOutOfBandCommand,
+  handleEvent,
+  acknowledgeQueued: (event, ahead) => sendText(
+    chatIdOf(event),
+    `已加入等待队列：前面还有 ${ahead} 个任务。斜杠命令仍可立即执行；如需停止当前任务，请发送 /stop。`,
+    "queued",
+    messageIdOf(event),
+  ),
+  isShuttingDown: () => shuttingDown,
+  log,
+});
+const appServerProtocol = createAppServerProtocol({
+  config: CONFIG,
+  applySessionThreadOverrides,
+  applySessionTurnOverrides,
+  userTextFromContent,
+  attachmentPromptBlock,
+});
+const {
+  resumeParams: appServerResumeParams,
+  startParams: appServerStartParams,
+  steerParams: appServerSteerParams,
+  turnParams: appServerTurnParams,
+} = appServerProtocol;
 
 function cleanOverride(value) {
   const text = String(value || "").trim();
@@ -443,64 +497,6 @@ function applyProviderBundleOverride(session, bundle) {
 function recordFailureStats(failure) {
   const item = normalizeFailure(failure) || classifyCodexFailure(failure);
   stats.failuresByKind[item.kind] = (stats.failuresByKind[item.kind] || 0) + 1;
-}
-
-function pidFileMatches(pid) {
-  try {
-    return fs.existsSync(pidPath) && fs.readFileSync(pidPath, "utf8").trim() === String(pid);
-  } catch {
-    return false;
-  }
-}
-
-function isActiveBridgeLock(current) {
-  if (!current?.pid || !isProcessAlivePid(current.pid)) return false;
-  return pidFileMatches(current.pid);
-}
-
-function acquireSingleInstanceLock() {
-  const owner = {
-    pid: process.pid,
-    instance: process.env.CODEX_FEISHU_INSTANCE_NAME || "",
-    workspace: CONFIG.workspace,
-    codexHome: CONFIG.codexHome,
-    larkProfile: CONFIG.larkProfile || "default",
-    startedAt: Date.now(),
-  };
-
-  for (;;) {
-    try {
-      const fd = fs.openSync(lockPath, "wx");
-      fs.writeFileSync(fd, JSON.stringify(owner, null, 2), "utf8");
-      fs.closeSync(fd);
-      return;
-    } catch (error) {
-      if (error?.code !== "EEXIST") throw error;
-      const current = readJsonFile(lockPath);
-      if (isActiveBridgeLock(current)) {
-        log("ERROR", "another bridge instance is already running for this state dir", {
-          currentPid: current.pid,
-          currentInstance: current.instance || "",
-          currentWorkspace: current.workspace || "",
-          pid: process.pid,
-          lockPath,
-        });
-        process.exit(0);
-      }
-      try {
-        fs.rmSync(lockPath, { force: true });
-      } catch {}
-    }
-  }
-}
-
-function releaseSingleInstanceLock() {
-  try {
-    const current = readJsonFile(lockPath);
-    if (String(current?.pid || "") === String(process.pid)) {
-      fs.rmSync(lockPath, { force: true });
-    }
-  } catch {}
 }
 
 async function resetCurrentSession(chatId) {
@@ -4539,257 +4535,18 @@ async function syncCodexSidebarThread({ event, session, promptFile, outFile, std
   await ensureAppServerThreadVisible(threadId, "exec/completed");
 }
 
-class AppServerClient {
-  constructor({ cwd = CONFIG.workspace, label = "codex-app-server" } = {}) {
-    this.cwd = cwd;
-    this.label = label;
-    this.child = null;
-    this.nextId = 1;
-    this.pending = new Map();
-    this.buffer = "";
-    this.notifications = [];
-    this.notificationWaiters = [];
-    this.stderrChunks = [];
-    this.closed = false;
-  }
-
-  start() {
-    const args = [...CONFIG.codexCli.argsPrefix, "app-server", "--listen", "stdio://"];
-    this.child = spawn(CONFIG.codexCli.command, args, {
-      cwd: this.cwd,
-      env: {
-        ...process.env,
-        CODEX_HOME: CONFIG.codexHome,
-        CODEX_FEISHU_BRIDGE: "1",
-      },
-      windowsHide: true,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    activeChildren.set(this.child.pid, { child: this.child, label: `${CONFIG.codexCli.command} ${args.join(" ")}` });
-    this.child.stdout.on("data", (chunk) => this.onStdout(chunk));
-    this.child.stderr.on("data", (chunk) => this.stderrChunks.push(Buffer.from(chunk)));
-    this.child.on("error", (error) => this.rejectAll(error));
-    this.child.on("close", (code, signal) => {
-      this.closed = true;
-      activeChildren.delete(this.child?.pid);
-      const error = new Error(`codex app-server exited (${code ?? signal ?? "unknown"})`);
-      this.rejectAll(error);
-      for (const waiter of this.notificationWaiters.splice(0)) waiter(null);
-    });
-    return this;
-  }
-
-  onStdout(chunk) {
-    this.buffer += chunk.toString("utf8");
-    for (;;) {
-      const index = this.buffer.indexOf("\n");
-      if (index < 0) break;
-      const line = this.buffer.slice(0, index).trim();
-      this.buffer = this.buffer.slice(index + 1);
-      if (!line) continue;
-      let message;
-      try {
-        message = JSON.parse(line);
-      } catch (error) {
-        log("WARN", "app-server emitted non-json line", { line: line.slice(0, 1000), error: String(error) });
-        continue;
-      }
-      this.handleMessage(message);
-    }
-  }
-
-  handleMessage(message) {
-    if (message.id !== undefined && this.pending.has(message.id)) {
-      const pending = this.pending.get(message.id);
-      this.pending.delete(message.id);
-      clearTimeout(pending.timer);
-      if (Object.prototype.hasOwnProperty.call(message, "error")) {
-        pending.reject(new Error(errorText(message.error, "codex app-server request failed")));
-      } else {
-        pending.resolve(message.result);
-      }
-      return;
-    }
-
-    if (message.id !== undefined && message.method) {
-      this.respondToServerRequest(message);
-      return;
-    }
-
-    if (message.method) {
-      if (this.notificationWaiters.length) {
-        const waiter = this.notificationWaiters.shift();
-        waiter(message);
-      } else {
-        this.notifications.push(message);
-      }
-    }
-  }
-
-  respondToServerRequest(message) {
-    const method = message.method;
-    let result;
-    if (method === "item/commandExecution/requestApproval") {
-      result = { decision: "accept" };
-    } else if (method === "item/fileChange/requestApproval") {
-      result = { decision: "accept" };
-    } else if (method === "item/permissions/requestApproval") {
-      result = {
-        permissions: {
-          network: { enabled: true },
-          fileSystem: { read: null, write: [CONFIG.workspace] },
-        },
-        scope: "turn",
-      };
-    } else if (method === "applyPatchApproval" || method === "execCommandApproval") {
-      result = { decision: "approved" };
-    } else if (method === "item/tool/requestUserInput") {
-      result = { answers: {} };
-    } else if (method === "mcpServer/elicitation/request") {
-      result = { action: "cancel", content: null, _meta: null };
-    } else if (method === "item/tool/call") {
-      result = { contentItems: [{ type: "inputText", text: "Dynamic tool calls are not handled by the Feishu bridge client." }], success: false };
-    } else {
-      result = {};
-    }
-    this.write({ id: message.id, result });
-  }
-
-  write(message) {
-    if (!this.child || this.closed) throw new Error("codex app-server is not running");
-    this.child.stdin.write(`${JSON.stringify(message)}\n`, "utf8");
-  }
-
-  request(method, params = undefined, timeoutMs = 60_000) {
-    const id = this.nextId++;
-    this.write(params === undefined ? { id, method } : { id, method, params });
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(id);
-        reject(new Error(`codex app-server request timed out: ${method}`));
-      }, timeoutMs);
-      timer.unref?.();
-      this.pending.set(id, { resolve, reject, timer });
-    });
-  }
-
-  notify(method, params = undefined) {
-    this.write(params === undefined ? { method } : { method, params });
-  }
-
-  nextNotification(timeoutMs = 1000) {
-    if (this.notifications.length) return Promise.resolve(this.notifications.shift());
-    if (this.closed) return Promise.resolve(null);
-    return new Promise((resolve) => {
-      const timer = setTimeout(() => {
-        const index = this.notificationWaiters.indexOf(waiter);
-        if (index >= 0) this.notificationWaiters.splice(index, 1);
-        resolve(null);
-      }, timeoutMs);
-      timer.unref?.();
-      const waiter = (message) => {
-        clearTimeout(timer);
-        resolve(message);
-      };
-      this.notificationWaiters.push(waiter);
-    });
-  }
-
-  async stop() {
-    if (!this.child || this.closed) return;
-    try {
-      this.child.stdin.end();
-    } catch {}
-    try {
-      this.child.kill("SIGTERM");
-    } catch {}
-    setTimeout(() => terminateProcessTree(this.child?.pid, true), 5000).unref?.();
-  }
-
-  rejectAll(error) {
-    for (const pending of this.pending.values()) {
-      clearTimeout(pending.timer);
-      pending.reject(error);
-    }
-    this.pending.clear();
-  }
-
-  stderrText() {
-    return Buffer.concat(this.stderrChunks).toString("utf8");
-  }
-}
-
-function appServerThreadConfig() {
-  const config = {};
-  if (CONFIG.disableMcp) config.mcp_servers = {};
-  return Object.keys(config).length ? config : null;
-}
-
-function appServerStartParams(session, options = {}) {
-  const params = {
-    cwd: CONFIG.workspace,
-    approvalPolicy: "never",
-    sandbox: CONFIG.codexSandbox,
-    threadSource: "user",
-    config: appServerThreadConfig(),
-    serviceName: "codex-feishu-bridge",
-  };
-  return applySessionThreadOverrides(params, session, options);
-}
-
-function appServerResumeParams(session, options = {}) {
-  const params = {
-    threadId: session.codexThreadId,
-    cwd: CONFIG.workspace,
-    approvalPolicy: "never",
-    sandbox: CONFIG.codexSandbox,
-    config: appServerThreadConfig(),
-  };
-  return applySessionThreadOverrides(params, session, options);
-}
-
-function appServerInputItems(event, userContent) {
-  const input = [];
-  const text = appServerUserText(event, userContent);
-  if (text) input.push({ type: "text", text, text_elements: [] });
-  for (const attachment of Array.isArray(event.attachments) ? event.attachments : []) {
-    if (attachment?.type === "image" && attachment.path && fs.existsSync(attachment.path)) {
-      input.push({ type: "localImage", path: attachment.path });
-    }
-  }
-  if (!input.length) input.push({ type: "text", text: "(attachment only)", text_elements: [] });
-  return input;
-}
-
-function appServerTurnParams(threadId, event, userContent, session, options = {}) {
-  const params = {
-    threadId,
-    input: appServerInputItems(event, userContent),
-    clientUserMessageId: event.message_id || event.id || undefined,
-    cwd: CONFIG.workspace,
-    approvalPolicy: "never",
-    sandboxPolicy: { type: "dangerFullAccess" },
-  };
-  return applySessionTurnOverrides(params, session, options);
-}
-
-function appServerSteerParams(threadId, turnId, event, userContent) {
-  return {
-    threadId,
-    expectedTurnId: turnId,
-    clientUserMessageId: event.message_id || event.id || crypto.randomUUID(),
-    input: appServerInputItems(event, userContent),
-  };
-}
-
-function appServerUserText(event, userContent) {
-  const text = String(userContent || userTextFromContent(event.content) || "").trim();
-  const attachments = Array.isArray(event.attachments) ? event.attachments : [];
-  if (!text && !attachments.length) return "";
-  const parts = [];
-  if (text) parts.push(text);
-  if (attachments.length) parts.push(attachmentPromptBlock(attachments));
-  return parts.join("\n\n");
+function startAppServerClient({ cwd = CONFIG.workspace, label = "codex-app-server" } = {}) {
+  return new AppServerClient({
+    tool: CONFIG.codexCli,
+    codexHome: CONFIG.codexHome,
+    workspace: CONFIG.workspace,
+    cwd,
+    label,
+    activeChildren,
+    log,
+    formatError: errorText,
+    terminateProcessTree,
+  }).start();
 }
 
 function resultTextFromState(state) {
@@ -4856,53 +4613,11 @@ function createRunWatchdog(label, onTimeout, {
   totalMs = CONFIG.codexTimeoutMs,
   idleMs = CONFIG.codexIdleTimeoutMs,
 } = {}) {
-  let timedOut = false;
-  let reason = "";
-  let totalTimer = null;
-  let idleTimer = null;
-
-  const fire = (message) => {
-    if (timedOut) return;
-    timedOut = true;
-    reason = message;
-    onTimeout?.(message);
-  };
-
-  const armIdleTimer = () => {
-    clearTimer(idleTimer);
-    idleTimer = null;
-    if (!hasDuration(idleMs)) return;
-    idleTimer = setTimeout(() => {
-      fire(`${label} idle timed out after ${Math.round(idleMs / 1000)}s without progress`);
-    }, idleMs);
-    idleTimer.unref?.();
-  };
-
-  if (hasDuration(totalMs)) {
-    totalTimer = setTimeout(() => {
-      fire(`${label} timed out after ${Math.round(totalMs / 1000)}s`);
-    }, totalMs);
-    totalTimer.unref?.();
-  }
-  armIdleTimer();
-
-  return {
-    touch: armIdleTimer,
-    get timedOut() {
-      return timedOut;
-    },
-    get reason() {
-      return reason;
-    },
-    clear() {
-      clearTimer(totalTimer);
-      clearTimer(idleTimer);
-    },
-  };
+  return createBaseRunWatchdog(label, onTimeout, { totalMs, idleMs });
 }
 
 async function compactAppServerThread(session) {
-  const client = new AppServerClient({ cwd: CONFIG.workspace }).start();
+  const client = startAppServerClient({ cwd: CONFIG.workspace });
   const startedAt = Date.now();
   const watchdog = createRunWatchdog("codex app-server compaction", () => {
     void client.stop();
@@ -4963,7 +4678,7 @@ async function withAppServerThread(session, { createIfMissing = true, timeoutMs 
     throw new Error("当前会话还没有创建 Codex 原生 thread。");
   }
 
-  const client = new AppServerClient({ cwd: CONFIG.workspace }).start();
+  const client = startAppServerClient({ cwd: CONFIG.workspace });
   try {
     await initializeAppServerClient(client);
     const threadId = createIfMissing
@@ -5476,7 +5191,7 @@ function isActiveTurnRaceError(error) {
 async function runGoalLoop(run, goalPatch) {
   const { chatId, messageId, session, state } = run;
   const startedAt = Date.now();
-  const client = new AppServerClient({ cwd: CONFIG.workspace }).start();
+  const client = startAppServerClient({ cwd: CONFIG.workspace });
   run.client = client;
   const activeJob = {
     pid: client.child.pid,
@@ -5639,7 +5354,7 @@ async function runGoalLoop(run, goalPatch) {
 }
 
 async function withConfigClient(fn) {
-  const client = new AppServerClient({ cwd: CONFIG.workspace }).start();
+  const client = startAppServerClient({ cwd: CONFIG.workspace });
   try {
     await initializeAppServerClient(client);
     return await fn(client);
@@ -5870,7 +5585,7 @@ async function runCodexAppServer(event, session, state = null, onState = null, o
   const recoveryAttempt = Number(options.recoveryAttempt || 0);
   const userContent = userTextFromContent(event.content);
   const liveState = state || createRunState(session, event, userContent);
-  const client = new AppServerClient({ cwd: CONFIG.workspace }).start();
+  const client = startAppServerClient({ cwd: CONFIG.workspace });
   const activeJob = {
     pid: client.child.pid,
     client,
@@ -6314,48 +6029,19 @@ function safeFilePart(value) {
 }
 
 function removePendingEventsByMessageId(messageId) {
-  const target = String(messageId || "").trim();
-  if (!target) return 0;
-  let removed = 0;
-  for (let index = pendingEvents.length - 1; index >= 0; index -= 1) {
-    if (messageIdOf(pendingEvents[index]) === target) {
-      pendingEvents.splice(index, 1);
-      removed += 1;
-    }
-  }
-  return removed;
-}
-
-function pendingEventMatchesChat(event, chatId) {
-  const target = String(chatId || "").trim();
-  if (!target) return false;
-  const current = chatIdOf(event);
-  return current && current === target;
+  return eventDispatcher.removeByMessageId(messageId);
 }
 
 function clearPendingEventsForChat(chatId, { all = false } = {}) {
-  let removed = 0;
-  for (let index = pendingEvents.length - 1; index >= 0; index -= 1) {
-    if (all || pendingEventMatchesChat(pendingEvents[index], chatId)) {
-      pendingEvents.splice(index, 1);
-      removed += 1;
-    }
-  }
-  return removed;
+  return eventDispatcher.clearForChat(chatId, { all });
 }
 
 function pendingEventsForChat(chatId) {
-  if (!chatId) return 0;
-  return pendingEvents.filter((event) => pendingEventMatchesChat(event, chatId)).length;
+  return eventDispatcher.countForChat(chatId);
 }
 
 function queueSummary(chatId) {
-  const knownForChat = pendingEventsForChat(chatId);
-  const unknown = pendingEvents.filter((event) => !chatIdOf(event)).length;
-  const parts = [`总队列 ${pendingEvents.length}`];
-  if (chatId) parts.push(`当前聊天 ${knownForChat}`);
-  if (unknown) parts.push(`未知聊天 ${unknown}`);
-  return parts.join("，");
+  return eventDispatcher.summary(chatId);
 }
 
 function handleRecallEvent(rawEvent) {
@@ -6380,41 +6066,6 @@ function handleRecallEvent(rawEvent) {
     removedEvents,
     removedAttachments,
   });
-}
-
-function enqueue(event) {
-  if (isRecallEvent(event)) {
-    handleRecallEvent(event);
-    return;
-  }
-
-  const messageId = messageIdOf(event);
-  if (messageId && isMessageRecalled(messageId)) {
-    log("INFO", "recalled message ignored before enqueue", { messageId, eventId: eventIdOf(event) });
-    return;
-  }
-
-  const command = parseCommand(event?.content);
-  if (isOutOfBandCommand(command)) {
-    void handleOutOfBandCommand(event, command)
-      .catch((error) => log("ERROR", "out-of-band command handling failed", { error: String(error.stack || error) }));
-    return;
-  }
-  const chatId = chatIdOf(event);
-  if (activeJobs >= CONFIG.maxConcurrent || pendingEvents.length) {
-    void sendText(
-      chatId,
-      `已加入等待队列：前面还有 ${pendingEvents.length + activeJobs} 个任务。斜杠命令仍可立即执行；如需停止当前任务，请发送 /stop。`,
-      "queued",
-      messageId,
-    ).catch((error) => log("WARN", "queue ack failed", {
-      messageId,
-      chatId,
-      error: String(error.message || error).slice(0, 1000),
-    }));
-  }
-  pendingEvents.push({ ...event, queuedAt: Date.now() });
-  drainQueue();
 }
 
 function isOutOfBandCommand(command) {
@@ -6455,20 +6106,6 @@ async function handleOutOfBandCommand(rawEvent, command) {
     contentPreview: userTextFromContent(event.content).slice(0, 200),
   });
   await handleCommand(event, command);
-}
-
-function drainQueue() {
-  if (shuttingDown) return;
-  while (activeJobs < CONFIG.maxConcurrent && pendingEvents.length) {
-    const event = pendingEvents.shift();
-    activeJobs += 1;
-    handleEvent(event)
-      .catch((error) => log("ERROR", "event handling failed", { error: String(error.stack || error) }))
-      .finally(() => {
-        activeJobs -= 1;
-        drainQueue();
-      });
-  }
 }
 
 async function handleEvent(rawEvent) {
@@ -8552,7 +8189,7 @@ function startEventConsumer(eventKey) {
     const trimmed = line.trim();
     if (!trimmed) return;
     try {
-      enqueue(JSON.parse(trimmed));
+      eventDispatcher.enqueue(JSON.parse(trimmed));
     } catch (error) {
       log("WARN", "failed to parse event line", { line: trimmed.slice(0, 1000), error: String(error) });
     }

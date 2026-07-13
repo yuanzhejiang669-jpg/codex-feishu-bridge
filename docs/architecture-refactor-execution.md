@@ -328,3 +328,36 @@
 - 旧设备控制面板不能通过临时 SSH 会话里的 `Start-Process` 可靠保活，最终改用已有计划任务 `CodexFeishuBridgeControlPanel` 启动。
 - `codex-assistant-old6` 和 `codex-assistant-old-baike-3` 曾出现“启动后未确认到 PID”，后续状态复查均已在线。
 - `codex-assistant-old-baike-3` 的 watchdog 初次未刷新健康行，单独触发 `CodexFeishuBridgeWatchdog-codex-assistant-old-baike-3` 后恢复 healthy。
+
+## 2026-07-13 阶段 11：Codex 传输、协议和事件调度边界
+
+改动：
+
+- 新增 `src/codex/app-server-client.mjs`，迁移 app-server 子进程、JSONL 请求响应、通知缓冲和审批响应。
+- 新增 `src/codex/app-server-protocol.mjs`，迁移 thread/start、thread/resume、turn/start 和 turn/steer 参数构造。
+- 新增 `src/runtime/event-queue.mjs` 和 `src/runtime/event-dispatcher.mjs`，迁移等待队列、并发计数、召回过滤和任务完成后的续调度。
+- 新增 `src/runtime/run-watchdog.mjs`，迁移总时长和空闲超时计时。
+- 新增 `src/runtime/single-instance-lock.mjs`，迁移单实例锁、陈旧锁接管和所有者释放。
+- 新增 `test/architecture-boundaries.test.mjs`，固定上述模块的现有行为契约。
+- `codex-feishu-bridge.mjs` 保留依赖组装和高层业务流程，不改变飞书命令、卡片文案、配置、Thread 映射或重启语义。
+
+验证：
+
+- 每个迁移阶段均运行 `npm run check`。
+- 静态检查、控制面板 smoke test 和 27 项 Node 测试全部通过。
+- `npm run smoke:app-server` 使用真实 Codex CLI 0.133.0 完成 initialize 握手并正常关闭子进程。
+- app-server 测试覆盖同步响应竞态、传输不可用和现有权限响应策略。
+- 调度测试覆盖 FIFO、并发限制、排队提示和任务完成后的继续调度。
+- 单实例测试覆盖活锁拒绝、死锁接管和非所有者禁止释放。
+
+同步状态：
+
+- 本节记录代码提交前的本机验证结果；GitHub、旧设备和 Bot 重启结果在完成后补充。
+
+### 对抗性审查
+
+假设三个月后出现故障，最可能的三项原因及处理如下：
+
+1. app-server 长任务持续输出 stderr，内存随任务时长增长；极快响应可能早于 pending request 注册；正常关闭后的强杀定时器还可能命中复用 PID。现已将 stderr 限制为保留最后 1 MiB，先注册 request 再写入 stdin，并在正常 close 后取消升级强杀；测试覆盖三种情况。
+2. `CODEX_FEISHU_MAX_CONCURRENT` 为 0、非数字或任务 Promise 拒绝，等待队列可能停止推进。dispatcher 现在把无效并发数收敛为 1，并在成功或失败后统一从 `finally` 继续 drain；测试覆盖 FIFO、拒绝路径基础结构和无效并发配置。
+3. 陈旧 `bridge.lock.json` 无法删除时，抢锁循环可能持续占用 CPU。现在删除失败会显式抛错并进入现有致命错误处理，不再无限循环；测试覆盖不可删除目标。

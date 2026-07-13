@@ -9,6 +9,7 @@ const ROOT_FILES = [
   "codex-feishu-bridge.mjs",
   "register-codex-feishu-bot.mjs",
   "control-panel.mjs",
+  "scripts/smoke-app-server.mjs",
 ];
 const WALK_DIRS = [
   "control-panel",

@@ -25,7 +25,12 @@ Codex 飞书 Bridge 的职责是把飞书 Bot 消息转成 Codex 本机任务，
 
 ## 主要模块
 
-- `codex-feishu-bridge.mjs`：Bridge 主进程。处理飞书事件、命令、附件、Codex app-server 调用、卡片渲染和会话绑定。
+- `codex-feishu-bridge.mjs`：Bridge 组合入口和高层业务编排。具体传输、协议、队列、watchdog 和锁由 `src/` 模块负责。
+- `src/codex/app-server-client.mjs`：Codex app-server stdio 传输、请求响应和通知队列。
+- `src/codex/app-server-protocol.mjs`：Codex thread、turn 和 steer 参数构造。
+- `src/runtime/event-dispatcher.mjs`：飞书事件排队、并发限制、召回过滤和任务续调度。
+- `src/runtime/run-watchdog.mjs`：Codex 任务总时长和空闲超时。
+- `src/runtime/single-instance-lock.mjs`：Bridge 单实例锁、陈旧锁接管和所有者释放。
 - `control-panel.mjs`：本地控制面板 API。读取进程、日志、配置、队列、Provider、注册结果和卸载计划。
 - `control-panel/`：控制面板前端。
 - `register-codex-feishu-bot.mjs`：辅助注册飞书 Bot、写入 lark-cli profile、生成二维码。
