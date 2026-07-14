@@ -49,6 +49,10 @@ import {
 } from "./src/config/service-tier.mjs";
 import { AppServerClient } from "./src/codex/app-server-client.mjs";
 import { createAppServerProtocol } from "./src/codex/app-server-protocol.mjs";
+import {
+  codexRuntimeVersionLines,
+  readCodexRuntimeVersionStatus,
+} from "./src/codex/runtime-version.mjs";
 import { createCodexProviderConfig } from "./src/providers/codex-config.mjs";
 import { createActiveRunStore } from "./src/runtime/active-runs.mjs";
 import { createEventDispatcher } from "./src/runtime/event-dispatcher.mjs";
@@ -7831,8 +7835,11 @@ function goalMarkdown(session, goal, title = "Codex goal") {
 async function statusMarkdown(chatId) {
   await syncChatSessionsWithCodex(chatId);
   const session = getSession(chatId);
-  const eventStatus = await readEventStatus();
-  const authStatus = await readAuthSummary();
+  const [eventStatus, authStatus, codexRuntimeStatus] = await Promise.all([
+    readEventStatus(),
+    readAuthSummary(),
+    readCodexRuntimeVersionStatus({ codexCli: CONFIG.codexCli, runTool }),
+  ]);
   const job = activeCodexJobs.get(chatId);
   const context = sessionContextSummary(session);
   return [
@@ -7852,6 +7859,7 @@ async function statusMarkdown(chatId) {
     "",
     `工作区：\`${CONFIG.workspace}\``,
     `Codex Home：\`${CONFIG.codexHome}\``,
+    ...codexRuntimeVersionLines(codexRuntimeStatus),
     `设置：${settingsSummary(session)}`,
     `运行模式：\`${CONFIG.runMode}\` · 沙箱：\`${CONFIG.codexSandbox}\` · MCP：${CONFIG.disableMcp ? "禁用" : "启用"}`,
     `超时：总时长 ${durationConfigLabel(CONFIG.codexTimeoutMs)} · 无进展 ${durationConfigLabel(CONFIG.codexIdleTimeoutMs)}`,
