@@ -6108,7 +6108,7 @@ async function handleOutOfBandCommand(rawEvent, command) {
   await handleCommand(event, command);
 }
 
-async function handleEvent(rawEvent) {
+async function handleEvent(rawEvent, dispatchControl = {}) {
   const messageId = messageIdOf(rawEvent);
   const dedupeId = eventIdOf(rawEvent) || messageId;
   if (!messageId) {
@@ -6131,25 +6131,32 @@ async function handleEvent(rawEvent) {
     log("INFO", "recalled message skipped after preflight", { messageId, reason: event?.recallReason || "" });
     return;
   }
+  if (dispatchControl.isCancelled?.()) {
+    log("INFO", "queued message cleared during preflight", { messageId, chatId: chatIdOf(event) });
+    return;
+  }
   const chatId = event.chat_id;
   if (!chatId) {
     log("WARN", "event missing chat_id", event);
     return;
   }
 
-  stats.events += 1;
   const userContent = userTextFromContent(event.content);
-  log("INFO", "message received", {
-    eventId: event.event_id,
-    messageId,
-    chatId,
-    chatType: event.chat_type,
-    senderId: event.sender_id,
-    contentPreview: userContent.slice(0, 120),
-  });
-
   const command = parseCommand(event.content);
   if (command) {
+    if (dispatchControl.commit && !dispatchControl.commit()) {
+      log("INFO", "queued command cleared during preflight", { messageId, chatId, command: command.name });
+      return;
+    }
+    stats.events += 1;
+    log("INFO", "message received", {
+      eventId: event.event_id,
+      messageId,
+      chatId,
+      chatType: event.chat_type,
+      senderId: event.sender_id,
+      contentPreview: userContent.slice(0, 120),
+    });
     stats.commands += 1;
     await handleCommand(event, command);
     return;
@@ -6159,6 +6166,21 @@ async function handleEvent(rawEvent) {
     ...(await downloadImageAttachments(event)),
     ...(await downloadFileAttachments(event)),
   ];
+  if (dispatchControl.commit && !dispatchControl.commit()) {
+    cleanupClearedDownloads(downloadedAttachments);
+    log("INFO", "queued message cleared before execution", { messageId, chatId });
+    return;
+  }
+
+  stats.events += 1;
+  log("INFO", "message received", {
+    eventId: event.event_id,
+    messageId,
+    chatId,
+    chatType: event.chat_type,
+    senderId: event.sender_id,
+    contentPreview: userContent.slice(0, 120),
+  });
 
   if (event.message_type === "image" && !userContent) {
     const imageAttachments = downloadedAttachments.filter((item) => item?.type === "image");
@@ -6334,6 +6356,25 @@ async function handleEvent(rawEvent) {
     throw error;
   } finally {
     if (activeRunRecorded) clearActiveRun(messageId);
+  }
+}
+
+function cleanupClearedDownloads(attachments) {
+  const root = path.resolve(attachmentDir);
+  for (const attachment of attachments || []) {
+    if (!attachment?.path) continue;
+    const resolved = path.resolve(attachment.path);
+    const relative = path.relative(root, resolved);
+    if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) continue;
+    try {
+      fs.rmSync(resolved, { force: true });
+    } catch (error) {
+      log("WARN", "cleared message attachment cleanup failed", {
+        messageId: attachment.messageId,
+        path: resolved,
+        error: String(error?.message || error).slice(0, 1000),
+      });
+    }
   }
 }
 

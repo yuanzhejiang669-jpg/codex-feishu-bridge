@@ -250,6 +250,158 @@ test("event dispatcher continues after a queued job rejects", async () => {
   assert.deepEqual(errors, [{ level: "ERROR", message: "event handling failed" }]);
 });
 
+test("event dispatcher clear cancels a queued event already in preflight", async () => {
+  const phases = [];
+  let releaseFirst;
+  let releasePreflight;
+  let enterPreflight;
+  const firstDone = new Promise((resolve) => {
+    releaseFirst = resolve;
+  });
+  const preflightDone = new Promise((resolve) => {
+    releasePreflight = resolve;
+  });
+  const preflightEntered = new Promise((resolve) => {
+    enterPreflight = resolve;
+  });
+  const dispatcher = createEventDispatcher({
+    maxConcurrent: 1,
+    chatIdOf: (event) => event.chatId,
+    messageIdOf: (event) => event.messageId,
+    handleEvent: async (event, control) => {
+      if (event.messageId === "first") {
+        phases.push("first");
+        await firstDone;
+        assert.equal(control.commit(), true);
+        return;
+      }
+      phases.push("second-preflight");
+      enterPreflight();
+      await preflightDone;
+      if (!control.commit()) {
+        phases.push("second-cleared");
+        return;
+      }
+      phases.push("second-committed");
+    },
+  });
+
+  dispatcher.enqueue({ chatId: "chat-a", messageId: "first" });
+  dispatcher.enqueue({ chatId: "chat-a", messageId: "second" });
+  releaseFirst();
+  await preflightEntered;
+  assert.equal(dispatcher.clearForChat("chat-a"), 1);
+  assert.equal(dispatcher.pendingCount, 0);
+  releasePreflight();
+  await waitFor(() => dispatcher.activeJobs === 0);
+  assert.deepEqual(phases, ["first", "second-preflight", "second-cleared"]);
+});
+
+test("event dispatcher clear does not cancel a queued event after commit", async () => {
+  let releaseCommitted;
+  let reportCommitted;
+  const committedDone = new Promise((resolve) => {
+    releaseCommitted = resolve;
+  });
+  const committed = new Promise((resolve) => {
+    reportCommitted = resolve;
+  });
+  const dispatcher = createEventDispatcher({
+    maxConcurrent: 1,
+    chatIdOf: (event) => event.chatId,
+    messageIdOf: (event) => event.messageId,
+    handleEvent: async (event, control) => {
+      assert.equal(control.commit(), true);
+      if (event.messageId === "second") {
+        reportCommitted();
+        await committedDone;
+      }
+    },
+  });
+
+  dispatcher.enqueue({ chatId: "chat-a", messageId: "first" });
+  dispatcher.enqueue({ chatId: "chat-a", messageId: "second" });
+  await committed;
+  assert.equal(dispatcher.clearForChat("chat-a"), 0);
+  releaseCommitted();
+  await waitFor(() => dispatcher.activeJobs === 0);
+});
+
+test("event dispatcher recall cancels an uncommitted event in preflight", async () => {
+  let releasePreflight;
+  let enterPreflight;
+  const preflightDone = new Promise((resolve) => {
+    releasePreflight = resolve;
+  });
+  const preflightEntered = new Promise((resolve) => {
+    enterPreflight = resolve;
+  });
+  let committed = false;
+  const dispatcher = createEventDispatcher({
+    maxConcurrent: 1,
+    chatIdOf: (event) => event.chatId,
+    messageIdOf: (event) => event.messageId,
+    handleEvent: async (_event, control) => {
+      enterPreflight();
+      await preflightDone;
+      committed = control.commit();
+    },
+  });
+
+  dispatcher.enqueue({ chatId: "chat-a", messageId: "message-1" });
+  await preflightEntered;
+  assert.equal(dispatcher.removeByMessageId("message-1"), 1);
+  releasePreflight();
+  await waitFor(() => dispatcher.activeJobs === 0);
+  assert.equal(committed, false);
+});
+
+test("event dispatcher clear is idempotent and all mode includes cross-chat preflight", async () => {
+  let releaseFirst;
+  let releasePreflight;
+  let enterPreflight;
+  const firstDone = new Promise((resolve) => {
+    releaseFirst = resolve;
+  });
+  const preflightDone = new Promise((resolve) => {
+    releasePreflight = resolve;
+  });
+  const preflightEntered = new Promise((resolve) => {
+    enterPreflight = resolve;
+  });
+  let thirdCommitted = null;
+  const dispatcher = createEventDispatcher({
+    maxConcurrent: 1,
+    chatIdOf: (event) => event.chatId,
+    messageIdOf: (event) => event.messageId,
+    handleEvent: async (event, control) => {
+      if (event.messageId === "first") {
+        await firstDone;
+        assert.equal(control.commit(), true);
+        return;
+      }
+      enterPreflight();
+      await preflightDone;
+      thirdCommitted = control.commit();
+    },
+  });
+
+  dispatcher.enqueue({ chatId: "chat-current", messageId: "first" });
+  dispatcher.enqueue({ chatId: "chat-a", messageId: "second" });
+  dispatcher.enqueue({ chatId: "chat-b", messageId: "third" });
+  assert.equal(dispatcher.clearForChat("chat-a"), 1);
+  assert.equal(dispatcher.clearForChat("chat-a"), 0);
+  assert.equal(dispatcher.summary("chat-a"), "总队列 1，当前聊天 0");
+
+  releaseFirst();
+  await preflightEntered;
+  assert.equal(dispatcher.clearForChat("", { all: true }), 1);
+  assert.equal(dispatcher.clearForChat("", { all: true }), 0);
+  releasePreflight();
+  await waitFor(() => dispatcher.activeJobs === 0);
+  assert.equal(thirdCommitted, false);
+});
+
 test("run watchdog distinguishes idle timeout and supports progress touches", async () => {
   let reason = "";
   const watchdog = createRunWatchdog("test run", (value) => {

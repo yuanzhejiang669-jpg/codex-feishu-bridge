@@ -17,8 +17,12 @@ export function createEventDispatcher({
   log = () => {},
   now = Date.now,
 } = {}) {
-  const queue = createEventQueue({ chatIdOf, messageIdOf });
+  const queue = createEventQueue({
+    chatIdOf: (entry) => chatIdOf(entry.event),
+    messageIdOf: (entry) => messageIdOf(entry.event),
+  });
   const concurrency = Math.max(1, Number(maxConcurrent) || 1);
+  const inFlight = new Set();
   let activeJobs = 0;
 
   function enqueue(event) {
@@ -45,7 +49,8 @@ export function createEventDispatcher({
       return;
     }
 
-    if (activeJobs >= concurrency || queue.length) {
+    const wasQueued = activeJobs >= concurrency || queue.length > 0;
+    if (wasQueued) {
       void acknowledgeQueued(event, queue.length + activeJobs)
         .catch((error) => log("WARN", "queue ack failed", {
           messageId,
@@ -53,31 +58,75 @@ export function createEventDispatcher({
           error: String(error?.message || error).slice(0, 1000),
         }));
     }
-    queue.enqueue({ ...event, queuedAt: now() });
+    queue.enqueue({
+      event: { ...event, queuedAt: now() },
+      wasQueued,
+    });
     drain();
   }
 
   function drain() {
     if (isShuttingDown()) return;
     while (activeJobs < concurrency && queue.length) {
-      const event = queue.dequeue();
+      const entry = queue.dequeue();
+      const state = {
+        event: entry.event,
+        wasQueued: entry.wasQueued,
+        cancelled: false,
+        committed: false,
+      };
+      inFlight.add(state);
       activeJobs += 1;
-      handleEvent(event)
+      handleEvent(state.event, {
+        isCancelled: () => state.cancelled,
+        commit: () => {
+          if (state.cancelled) return false;
+          state.committed = true;
+          return true;
+        },
+      })
         .catch((error) => log("ERROR", "event handling failed", {
           error: String(error?.stack || error),
         }))
         .finally(() => {
+          inFlight.delete(state);
           activeJobs -= 1;
           drain();
         });
     }
   }
 
+  function cancelInFlight(predicate, { queuedOnly = false } = {}) {
+    let cancelled = 0;
+    for (const state of inFlight) {
+      if (state.cancelled || state.committed) continue;
+      if (queuedOnly && !state.wasQueued) continue;
+      if (!predicate(state.event)) continue;
+      state.cancelled = true;
+      cancelled += 1;
+    }
+    return cancelled;
+  }
+
+  function removeByMessageId(messageId) {
+    const target = String(messageId || "").trim();
+    if (!target) return 0;
+    return queue.removeByMessageId(target)
+      + cancelInFlight((event) => messageIdOf(event) === target);
+  }
+
+  function clearForChat(chatId, { all = false } = {}) {
+    const target = String(chatId || "").trim();
+    const matches = (event) => all || (target && chatIdOf(event) === target);
+    return queue.clearForChat(target, { all })
+      + cancelInFlight(matches, { queuedOnly: true });
+  }
+
   return {
     enqueue,
     drain,
-    removeByMessageId: (messageId) => queue.removeByMessageId(messageId),
-    clearForChat: (chatId, options) => queue.clearForChat(chatId, options),
+    removeByMessageId,
+    clearForChat,
     countForChat: (chatId) => queue.countForChat(chatId),
     summary: (chatId) => queue.summary(chatId),
     get activeJobs() {
