@@ -1,0 +1,50 @@
+appId: io.github.codex-feishu-bridge.desktop
+productName: Codex Feishu Bridge
+copyright: Copyright 2026 Codex Feishu Bridge contributors
+
+directories:
+  output: out
+
+asar: true
+npmRebuild: false
+
+files:
+  - src/**/*
+  - package.json
+
+extraResources:
+  - from: resources/scripts
+    to: scripts
+    filter:
+      - "**/*"
+  - from: generated/engine
+    to: engine
+    filter:
+      - "**/*"
+  - from: node_modules/@larksuite/cli/bin/lark-cli.exe
+    to: tools/lark-cli.exe
+  - from: node_modules/@larksuite/cli/LICENSE
+    to: licenses/lark-cli-LICENSE
+  - from: node_modules/node/bin/node.exe
+    to: tools/node.exe
+  - from: resources/licenses/node-LICENSE
+    to: licenses/node-LICENSE
+
+win:
+  icon: resources/icon.ico
+  target:
+    - target: nsis
+      arch:
+        - x64
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  deleteAppDataOnUninstall: false
+
+publish:
+  provider: github
+  owner: yuanzhejiang669-jpg
+  repo: codex-feishu-bridge

@@ -4,6 +4,8 @@
 
 > 当前项目面向个人本机部署和多 Bot 工作流，不是云端托管服务。仓库只保存代码、脚本、示例配置和公开文档；真实密钥、飞书 profile、运行日志、二维码、会话状态和本机实例配置不会提交。
 
+Windows 用户可以从 GitHub Releases 下载 `Codex Feishu Bridge Setup.exe`。客户端内置 Node.js、lark-cli 和 Bridge 引擎；`v0.2.0` 之后的安装版通过“系统 -> 客户端更新”检查 GitHub 稳定发行版，后台下载，并在没有活动任务时重启安装。
+
 ## 界面预览
 
 控制面板把多 Bot、watchdog、本地模型代理、Provider 和工作空间管理集中到一个本机网页里。

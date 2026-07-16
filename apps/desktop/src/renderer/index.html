@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'">
+  <title>Codex Feishu Bridge</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark"><img src="icon.png" alt=""></div>
+        <div>
+          <strong>Codex Feishu</strong>
+          <span>Bridge Desktop</span>
+        </div>
+      </div>
+      <nav aria-label="主导航">
+        <button class="nav-item active" data-view="overview">总览</button>
+        <button class="nav-item" data-view="bots">Bot</button>
+        <button class="nav-item" data-view="workspaces">工作空间</button>
+        <button class="nav-item" data-view="providers">Provider</button>
+        <button class="nav-item" data-view="capabilities">MCP / Skills</button>
+        <button class="nav-item" data-view="system">系统</button>
+      </nav>
+      <div class="sidebar-footer">
+        <span id="app-version">v0.1.0</span>
+        <span id="setup-mode" class="read-only">开发沙箱</span>
+      </div>
+    </aside>
+
+    <main>
+      <header class="topbar">
+        <div>
+          <h1 id="view-title">运行总览</h1>
+          <p id="generated-at">正在读取本机状态</p>
+        </div>
+        <button id="refresh-button" class="primary-button" type="button">刷新</button>
+      </header>
+
+      <section id="loading" class="loading-band">正在检查 Codex 与 Bridge</section>
+      <section id="error-band" class="error-band hidden" role="alert"></section>
+
+      <section id="overview-view" class="view">
+        <div class="status-strip">
+          <div><span>Codex</span><strong id="codex-summary">检查中</strong></div>
+          <div><span>Bridge</span><strong id="bridge-summary">检查中</strong></div>
+          <div><span>在线 Bot</span><strong id="online-summary">-</strong></div>
+          <div><span>活动任务</span><strong id="runs-summary">-</strong></div>
+        </div>
+
+        <section class="content-section">
+          <div class="section-heading">
+            <h2>Codex 环境</h2>
+            <span id="codex-status-badge" class="badge neutral">检查中</span>
+          </div>
+          <dl class="detail-grid" id="codex-details"></dl>
+        </section>
+
+        <section class="content-section">
+          <div class="section-heading">
+            <h2>Bot 状态</h2>
+            <span id="bot-count" class="section-meta">0 个实例</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Bot</th><th>状态</th><th>PID</th><th>任务</th><th>工作空间</th><th></th></tr></thead>
+              <tbody id="bot-table-body"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <section id="bots-view" class="view hidden">
+        <div class="view-actions">
+          <button id="create-bot-button" class="primary-button" type="button">+ 新建 Bot</button>
+        </div>
+        <section class="content-section">
+          <div class="section-heading"><h2>全部 Bot</h2><span id="bots-view-count" class="section-meta"></span></div>
+          <div id="bot-list" class="bot-list"></div>
+        </section>
+        <section id="bot-readiness-panel" class="content-section hidden">
+          <div class="section-heading"><h2 id="bot-readiness-title">运行准备检查</h2><span id="bot-readiness-status" class="badge neutral">未检查</span></div>
+          <p id="bot-readiness-summary" class="readiness-summary"></p>
+          <div id="bot-readiness-list" class="compatibility-list"></div>
+          <div id="bot-readiness-actions" class="readiness-actions hidden">
+            <div>
+              <strong>完善飞书能力</strong>
+              <span>导入消息、卡片、会话和云文档推荐权限，只保留接收消息事件，发布后再登录用户身份。</span>
+            </div>
+            <div class="inline-actions">
+              <button data-readiness-action="copy-permissions" class="secondary-button" type="button">复制推荐权限 JSON</button>
+              <button data-readiness-action="open-permissions" class="secondary-button" type="button">打开权限管理</button>
+              <button data-readiness-action="open-events" class="secondary-button" type="button">打开事件配置</button>
+              <button data-readiness-action="authorize-user" class="primary-button" type="button">登录 Lark CLI 用户身份</button>
+            </div>
+            <p id="bot-readiness-action-status" class="form-note"></p>
+          </div>
+        </section>
+      </section>
+
+      <section id="workspaces-view" class="view hidden">
+        <div class="view-actions">
+          <button id="create-workspace-factory-button" class="primary-button" type="button">+ 新建空间 Bot</button>
+        </div>
+        <section id="workspace-factory-editor" class="content-section hidden">
+          <div class="section-heading"><h2>空间 Bot 创建方案</h2><span class="section-meta">1-16 个 Bot</span></div>
+          <form id="workspace-factory-form" class="form-grid">
+            <label><span>空间名称</span><input name="spaceName" required value="写作"></label>
+            <label><span>空间 slug</span><input name="slug" required value="writing" pattern="[a-z0-9][a-z0-9-]*"></label>
+            <label><span>Bot 数量</span><input name="count" required type="number" min="1" max="16" value="1"></label>
+            <label><span>起始序号</span><input name="baseIndex" required type="number" min="1" max="999" value="1"></label>
+            <label><span>Bot 标识模板</span><input name="namePattern" required value="codex-assistant-{index}-{slug}"></label>
+            <label><span>飞书显示名模板</span><input name="labelPattern" required value="Codex助手{index}-{space}"></label>
+            <label><span>全局 Provider</span><select name="providerId" required><option value="">请选择</option></select></label>
+            <label><span>模型</span><input name="model" required placeholder="例如 gpt-5.6-sol"></label>
+            <label><span>推理强度</span><select name="reasoning"><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option></select></label>
+            <label><span>平台</span><select name="brand"><option value="feishu">飞书</option><option value="lark">Lark</option></select></label>
+            <label class="form-wide"><span>共享 Codex Home 目录名</span><input name="codexHomeName" placeholder="默认 codex-space-{slug}"></label>
+            <label class="form-wide checkbox-field"><input name="initializeAgents" type="checkbox" checked><span>从全局配置初始化空间 AGENTS.md</span></label>
+            <div id="workspace-agents-paths" class="form-wide path-summary"></div>
+            <div class="form-wide inline-actions">
+              <button id="workspace-factory-preview-button" class="secondary-button" type="button">生成预览</button>
+              <button id="workspace-factory-queue-button" class="primary-button" type="submit" disabled>初始化空间并生成队列</button>
+            </div>
+          </form>
+          <div id="workspace-factory-preview" class="operation-result hidden"></div>
+        </section>
+        <section id="workspace-factory-queue-section" class="content-section hidden">
+          <div class="section-heading"><h2>空间 Bot 创建队列</h2><span id="workspace-factory-queue-summary" class="section-meta"></span></div>
+          <p class="readiness-summary">每个 Bot 都需要单独扫码创建飞书应用。队列会保存进度，但不会保存 App Secret、Token 或 API Key。</p>
+          <div id="workspace-factory-queue" class="factory-queue"></div>
+          <div id="workspace-factory-qr" class="qr-panel hidden">
+            <img id="workspace-factory-qr-image" class="hidden" alt="飞书注册二维码">
+            <strong id="workspace-factory-qr-message"></strong>
+            <button id="workspace-factory-cancel-button" class="secondary-button" type="button">取消扫码</button>
+          </div>
+        </section>
+        <section class="content-section">
+          <div class="section-heading"><h2>已发现工作空间</h2><span id="workspace-count" class="section-meta"></span></div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Bot</th><th>工作空间</th><th>Codex Home</th></tr></thead>
+              <tbody id="workspace-table-body"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <section id="providers-view" class="view hidden">
+        <section class="content-section">
+          <div class="section-heading"><h2>全局 Provider</h2><span id="provider-catalog-count" class="section-meta"></span></div>
+          <p id="provider-catalog-error" class="readiness-summary hidden"></p>
+          <div class="table-wrap">
+            <table class="provider-table">
+              <thead><tr><th>Provider</th><th>Base URL</th><th>接口</th><th>环境变量</th><th>Key</th></tr></thead>
+              <tbody id="provider-catalog-body"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <div class="two-column provider-workbench">
+          <section class="content-section">
+            <div class="section-heading"><h2>添加 Provider</h2><span class="section-meta">Responses API</span></div>
+            <form id="provider-add-form" class="stack-form">
+              <label><span>Provider 标识</span><input name="id" required maxlength="64" placeholder="例如 company-api"></label>
+              <label><span>显示名称</span><input name="name" maxlength="120" placeholder="例如 Company API"></label>
+              <label><span>Base URL</span><input name="baseUrl" required type="url" placeholder="https://api.example.com/v1"></label>
+              <label><span>环境变量名</span><input name="envKey" required pattern="[A-Z_][A-Z0-9_]*" placeholder="COMPANY_API_KEY"></label>
+              <label><span>API Key</span><input name="apiKey" required type="password" autocomplete="new-password"></label>
+              <label><span>测试模型</span><input name="model" placeholder="先拉取模型后选择或填写"></label>
+              <div class="inline-actions">
+                <button id="provider-add-models" class="secondary-button" type="button">拉取模型</button>
+                <button id="provider-add-probe" class="secondary-button" type="button">测试请求</button>
+                <button class="primary-button" type="submit">保存 Provider</button>
+              </div>
+            </form>
+          </section>
+
+          <section class="content-section">
+            <div class="section-heading"><h2>替换 API Key</h2><span class="section-meta">先验证再保存</span></div>
+            <form id="provider-replace-form" class="stack-form">
+              <label><span>已有 Provider</span><select name="id" required><option value="">请选择</option></select></label>
+              <label><span>新 API Key</span><input name="apiKey" required type="password" autocomplete="new-password"></label>
+              <label><span>测试模型</span><input name="model" required placeholder="用于 /responses 测试"></label>
+              <div class="inline-actions">
+                <button id="provider-replace-models" class="secondary-button" type="button">拉取模型</button>
+                <button class="primary-button" type="submit">验证并替换</button>
+              </div>
+            </form>
+            <p class="form-note">新 Key 写入 Windows 用户环境变量。已运行的 Bot 不会热更新，之后新启动的进程才会读取它。</p>
+          </section>
+        </div>
+
+        <section class="content-section">
+          <div class="section-heading"><h2>同步到客户端 Bot</h2><span id="provider-sync-target-count" class="section-meta"></span></div>
+          <p class="readiness-summary">只同步 Provider 定义到本客户端创建且使用隔离 Codex Home 的 Bot；不会写入现有 Bridge 或旧 Bot。</p>
+          <div class="inline-actions">
+            <button id="provider-sync-preview-button" class="secondary-button" type="button">预览同步</button>
+            <button id="provider-sync-apply-button" class="primary-button hidden" type="button">确认同步</button>
+          </div>
+          <div id="provider-operation-result" class="operation-result hidden" aria-live="polite"></div>
+        </section>
+      </section>
+
+      <section id="capabilities-view" class="view hidden">
+        <section class="capability-source-band">
+          <div><strong>能力来源</strong><span id="capability-source-home"></span></div>
+          <div><span>MCP 配置</span><code id="capability-source-config"></code></div>
+          <div><span>Skills 目录</span><code id="capability-source-skills"></code></div>
+        </section>
+        <div class="migration-toolbar">
+          <select id="migration-target" aria-label="目标 Bot"><option value="">选择隔离配置的 Bot</option></select>
+          <button id="preview-migration-button" class="secondary-button" type="button">预览源路径与目标</button>
+        </div>
+        <div id="migration-target-detail" class="path-summary hidden"></div>
+        <section id="migration-preview" class="migration-preview hidden"></section>
+        <div class="two-column">
+          <section class="content-section">
+            <div class="section-heading"><h2>MCP</h2><span id="mcp-count" class="section-meta"></span></div>
+            <div id="mcp-list" class="capability-list"></div>
+          </section>
+          <section class="content-section">
+            <div class="section-heading"><h2>Skills</h2><span id="skill-count" class="section-meta"></span></div>
+            <div id="skill-list" class="capability-list"></div>
+          </section>
+        </div>
+      </section>
+
+      <section id="system-view" class="view hidden">
+        <section class="content-section">
+          <div class="section-heading"><h2>客户端更新</h2><span id="update-status" class="badge neutral">未检查</span></div>
+          <div class="update-row">
+            <dl id="update-details" class="detail-grid compact-detail"></dl>
+            <div class="update-actions">
+              <progress id="update-progress" class="hidden" max="100" value="0"></progress>
+              <span id="update-message" class="readiness-summary"></span>
+              <div class="inline-actions">
+                <button id="check-update-button" class="secondary-button" type="button">检查更新</button>
+                <button id="install-update-button" class="primary-button hidden" type="button">重启并安装</button>
+              </div>
+            </div>
+          </div>
+        </section>
+        <section class="content-section">
+          <div class="section-heading"><h2>Windows 运行</h2><span id="desktop-runtime-status" class="badge neutral">检查中</span></div>
+          <div class="setting-list">
+            <label class="setting-row">
+              <span><strong>登录后启动客户端</strong><small>Windows 登录后在后台启动客户端并恢复已启用的 Bot</small></span>
+              <input id="launch-at-login-setting" type="checkbox">
+            </label>
+            <label class="setting-row">
+              <span><strong>关闭到托盘</strong><small>关闭窗口后客户端继续在系统托盘运行</small></span>
+              <input id="close-to-tray-setting" type="checkbox">
+            </label>
+          </div>
+          <p id="recovery-summary" class="readiness-summary"></p>
+        </section>
+        <section class="content-section">
+          <div class="section-heading"><h2>兼容性检查</h2><span id="compatibility-status" class="badge neutral">检查中</span></div>
+          <div id="compatibility-list" class="compatibility-list"></div>
+        </section>
+        <section class="content-section">
+          <div class="section-heading"><h2>客户端引擎</h2><span id="engine-status" class="badge neutral">检查中</span></div>
+          <dl class="detail-grid" id="engine-details"></dl>
+        </section>
+        <section class="content-section">
+          <div class="section-heading"><h2>本机路径</h2><span class="section-meta">只读</span></div>
+          <dl class="detail-grid" id="system-paths"></dl>
+        </section>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="bot-dialog" class="bot-dialog">
+    <form id="bot-form" method="dialog">
+      <div class="dialog-heading">
+        <div><h2>新建 Bot</h2><span id="bot-form-mode">开发沙箱</span></div>
+        <button id="close-bot-dialog" class="icon-button" type="button" aria-label="关闭" title="关闭">×</button>
+      </div>
+      <div id="bot-form-error" class="error-band hidden" role="alert"></div>
+      <div class="form-grid">
+        <label class="form-wide"><span>配置归属</span><select id="bot-configuration-target" name="configurationTarget"><option value="global">普通 Bot · 使用全局 Codex 配置</option><option value="space">补充到已有空间</option></select></label>
+        <label id="bot-space-target-field" class="form-wide hidden"><span>目标空间</span><select id="bot-space-target" name="spaceSourceName"><option value="">请选择已有空间</option></select></label>
+        <p id="bot-configuration-summary" class="form-wide form-note"></p>
+        <label><span>Bot 标识</span><input id="bot-name" name="name" required maxlength="64" pattern="[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,62}[A-Za-z0-9])?" title="只能包含字母、数字、点、下划线和连字符" placeholder="例如 codex-assistant-1"></label>
+        <label><span>显示名称</span><input id="bot-label" name="label" maxlength="100" placeholder="Codex助手1"></label>
+        <label class="form-wide"><span>工作空间</span><input id="bot-workspace" name="workspace" placeholder="留空时自动创建"></label>
+        <label><span>平台</span><select id="bot-brand" name="brand"><option value="feishu">飞书</option><option value="lark">Lark</option></select></label>
+        <label><span>Profile</span><input id="bot-profile" name="profile" maxlength="64" placeholder="默认与 Bot 标识相同"></label>
+      </div>
+      <div class="path-preview-control">
+        <button id="preview-bot-paths-button" class="secondary-button" type="button">预览最终路径</button>
+      </div>
+      <dl id="bot-path-preview" class="detail-grid compact-detail hidden"></dl>
+      <div id="bot-provider-section" class="credential-section hidden">
+        <h3>模型 Provider</h3>
+        <div class="form-grid">
+          <label class="form-wide"><span>配置方式</span><select id="provider-mode" name="providerMode"><option value="global">使用已保存的全局 Provider</option><option value="custom">高级：单独配置 Responses API</option><option value="current">共享当前 Codex Home</option></select></label>
+        </div>
+        <div id="global-provider-fields" class="form-grid provider-fields">
+          <label><span>全局 Provider</span><select id="bot-global-provider" name="globalProviderId" required><option value="">请选择</option></select></label>
+          <label><span>模型</span><input id="bot-global-model" name="globalProviderModel" required placeholder="例如 gpt-5.6-sol"></label>
+          <label><span>推理强度</span><select id="bot-global-reasoning" name="globalProviderReasoning"><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option></select></label>
+        </div>
+        <div id="custom-provider-fields" class="form-grid provider-fields">
+          <label><span>Provider 标识</span><input id="provider-id" name="providerId" value="custom" maxlength="64"></label>
+          <label><span>模型</span><input id="provider-model" name="providerModel" placeholder="例如 gpt-5.6-sol"></label>
+          <label class="form-wide"><span>Base URL</span><input id="provider-base-url" name="providerBaseUrl" type="url" placeholder="https://example.com/v1"></label>
+          <label class="form-wide"><span>API Key</span><input id="provider-api-key" name="providerApiKey" type="password" autocomplete="new-password"></label>
+          <label><span>推理强度</span><select id="provider-reasoning" name="providerReasoning"><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option></select></label>
+          <div class="provider-test-control"><button id="test-provider-button" class="secondary-button" type="button">测试模型 API</button><span id="provider-test-status"></span></div>
+        </div>
+      </div>
+      <div class="credential-section">
+        <h3>已有飞书应用</h3>
+        <div class="form-grid">
+          <label><span>App ID</span><input id="bot-app-id" name="appId" autocomplete="off" placeholder="cli_..."></label>
+          <label><span>App Secret</span><input id="bot-app-secret" name="appSecret" type="password" autocomplete="new-password"></label>
+        </div>
+      </div>
+      <div id="qr-panel" class="qr-panel hidden">
+        <img id="registration-qr" class="hidden" alt="飞书注册二维码">
+        <strong id="registration-message">正在请求二维码</strong>
+      </div>
+      <div class="dialog-actions">
+        <button id="cancel-registration-button" class="secondary-button hidden" type="button">取消扫码</button>
+        <button id="create-with-credentials-button" class="secondary-button" type="button">使用已有应用创建</button>
+        <button id="create-with-qr-button" class="primary-button" type="button">扫码自动创建</button>
+      </div>
+    </form>
+  </dialog>
+  <script src="app.js"></script>
+</body>
+</html>

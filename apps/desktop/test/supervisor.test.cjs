@@ -1,0 +1,179 @@
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const test = require("node:test");
+const {
+  inspectManagedBots,
+  managedRuntimeRoot,
+  processEnvironment,
+  setManagedBotAutoStart,
+  startManagedBot,
+  stopManagedBot,
+  stopManagedBotAndDisableAutoStart,
+} = require("../src/main/services/supervisor.cjs");
+
+function fixture() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cfb-desktop-supervisor-test-"));
+  const dataRoot = path.join(root, "data");
+  const localAppData = path.join(root, "local");
+  const botRoot = path.join(dataRoot, "managed-bots", "assistant-1");
+  fs.mkdirSync(botRoot, { recursive: true });
+  fs.writeFileSync(path.join(botRoot, "bot.json"), JSON.stringify({
+    schemaVersion: 1,
+    name: "assistant-1",
+    profile: "assistant-1",
+    workspace: path.join(root, "workspace"),
+  }), "utf8");
+  return { root, dataRoot, localAppData };
+}
+
+test("inspects managed Bot runtime state from the selected local app data", () => {
+  const value = fixture();
+  try {
+    const runtimeRoot = managedRuntimeRoot(value.localAppData, "assistant-1");
+    const stateDir = path.join(runtimeRoot, "state");
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.writeFileSync(path.join(stateDir, "bridge.pid"), String(process.pid), "utf8");
+    fs.writeFileSync(path.join(stateDir, "active-runs.json"), JSON.stringify({ runs: { one: {} } }), "utf8");
+    fs.writeFileSync(path.join(stateDir, "seen-events.json"), JSON.stringify(["event-1"]), "utf8");
+    const [bot] = inspectManagedBots(value.dataRoot, value.localAppData);
+    assert.equal(bot.online, true);
+    assert.equal(bot.activeRunCount, 1);
+    assert.equal(bot.runtimeRoot, runtimeRoot);
+    assert.equal(bot.messageEventVerified, true);
+    assert.equal(bot.messageEventCount, 1);
+    assert.match(bot.messageEventVerifiedAt, /^\d{4}-\d{2}-\d{2}T/);
+  } finally {
+    fs.rmSync(value.root, { recursive: true, force: true });
+  }
+});
+
+test("updates auto-start only for a client-managed Bot", () => {
+  const value = fixture();
+  try {
+    const enabled = setManagedBotAutoStart("assistant-1", true, { dataRoot: value.dataRoot });
+    assert.equal(enabled.autoStart, true);
+    const disabled = setManagedBotAutoStart("assistant-1", false, { dataRoot: value.dataRoot });
+    assert.equal(disabled.autoStart, false);
+    assert.equal(fs.readdirSync(path.dirname(disabled.configPath)).some((name) => /\.(tmp|bak)$/.test(name)), false);
+    assert.throws(() => setManagedBotAutoStart("legacy-bot", true, { dataRoot: value.dataRoot }), /客户端管理/);
+  } finally {
+    fs.rmSync(value.root, { recursive: true, force: true });
+  }
+});
+
+test("refuses to stop a managed Bot while it has an active task", async () => {
+  const value = fixture();
+  try {
+    const stateDir = path.join(managedRuntimeRoot(value.localAppData, "assistant-1"), "state");
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.writeFileSync(path.join(stateDir, "bridge.pid"), String(process.pid), "utf8");
+    fs.writeFileSync(path.join(stateDir, "active-runs.json"), JSON.stringify({ runs: { one: {} } }), "utf8");
+    await assert.rejects(() => stopManagedBot("assistant-1", {
+      dataRoot: value.dataRoot,
+      localAppData: value.localAppData,
+      force: false,
+    }), /活动任务/);
+  } finally {
+    fs.rmSync(value.root, { recursive: true, force: true });
+  }
+});
+
+test("manual stop disables auto-start so recovery does not immediately restart the Bot", async () => {
+  const value = fixture();
+  try {
+    setManagedBotAutoStart("assistant-1", true, { dataRoot: value.dataRoot });
+    await stopManagedBotAndDisableAutoStart("assistant-1", {
+      dataRoot: value.dataRoot,
+      stopBot: async () => ({ online: false }),
+    });
+    const [bot] = inspectManagedBots(value.dataRoot, value.localAppData);
+    assert.equal(bot.autoStart, false);
+  } finally {
+    fs.rmSync(value.root, { recursive: true, force: true });
+  }
+});
+
+test("failed manual stop restores the previous auto-start setting", async () => {
+  const value = fixture();
+  try {
+    setManagedBotAutoStart("assistant-1", true, { dataRoot: value.dataRoot });
+    await assert.rejects(() => stopManagedBotAndDisableAutoStart("assistant-1", {
+      dataRoot: value.dataRoot,
+      stopBot: async () => { throw new Error("stop failed"); },
+    }), /stop failed/);
+    const [bot] = inspectManagedBots(value.dataRoot, value.localAppData);
+    assert.equal(bot.autoStart, true);
+  } finally {
+    fs.rmSync(value.root, { recursive: true, force: true });
+  }
+});
+
+test("builds a child environment with exact bundled tools and isolated profile home", () => {
+  const env = processEnvironment({
+    dataRoot: "C:\\ClientData",
+    localAppData: "C:\\RuntimeData",
+    nodePath: "C:\\Program Files\\Client\\node.exe",
+    larkCliPath: "C:\\Program Files\\Client\\lark-cli.exe",
+  });
+  assert.equal(env.LOCALAPPDATA, "C:\\RuntimeData");
+  assert.equal(env.USERPROFILE, "C:\\ClientData\\profile-home");
+  assert.equal(env.LARK_CLI_BIN, "C:\\Program Files\\Client\\lark-cli.exe");
+  assert.match(env.PATH, /Program Files\\Client/);
+});
+
+test("injects a DPAPI-backed Provider key only into the managed Bot child environment", () => {
+  const value = fixture();
+  try {
+    const configPath = path.join(value.dataRoot, "managed-bots", "assistant-1", "bot.json");
+    const bot = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    bot.configPath = configPath;
+    bot.provider = { mode: "custom", envKey: "BOT_API_KEY" };
+    fs.writeFileSync(path.join(path.dirname(configPath), "provider-secret.bin"), Buffer.from("encrypted"));
+    const env = processEnvironment({
+      dataRoot: value.dataRoot,
+      localAppData: value.localAppData,
+      nodePath: "C:\\Client\\node.exe",
+      larkCliPath: "C:\\Client\\lark-cli.exe",
+      decryptSecret: (valueBuffer) => valueBuffer.toString("utf8") === "encrypted" ? "decrypted-key" : "",
+    }, bot);
+    assert.equal(env.BOT_API_KEY, "decrypted-key");
+    assert.equal(process.env.BOT_API_KEY, undefined);
+  } finally {
+    fs.rmSync(value.root, { recursive: true, force: true });
+  }
+});
+
+test("starts through the packaged PowerShell contract and confirms a live PID", { skip: process.platform !== "win32" }, async () => {
+  const value = fixture();
+  try {
+    const engineRoot = path.join(value.root, "engine");
+    const toolsRoot = path.join(value.root, "tools");
+    const nodePath = path.join(toolsRoot, "node.exe");
+    const larkCliPath = path.join(toolsRoot, "lark-cli.exe");
+    fs.mkdirSync(engineRoot, { recursive: true });
+    fs.mkdirSync(toolsRoot, { recursive: true });
+    fs.writeFileSync(nodePath, "", "utf8");
+    fs.writeFileSync(larkCliPath, "", "utf8");
+    fs.writeFileSync(path.join(engineRoot, "start-codex-feishu-bridge.ps1"), [
+      "param([string]$Name, [string]$LarkProfile, [string]$Workspace, [string]$CodexHome)",
+      "$state = Join-Path (Join-Path (Join-Path $env:LOCALAPPDATA 'CodexFeishuBridge') 'instances') (Join-Path $Name 'state')",
+      "New-Item -ItemType Directory -Force -Path $state | Out-Null",
+      `Set-Content -LiteralPath (Join-Path $state 'bridge.pid') -Value '${process.pid}' -Encoding ASCII`,
+    ].join("\r\n"), "utf8");
+    const result = await startManagedBot("assistant-1", {
+      dataRoot: value.dataRoot,
+      localAppData: value.localAppData,
+      engineRoot,
+      nodePath,
+      larkCliPath,
+      defaultCodexHome: path.join(value.root, "codex-home"),
+      codexAvailable: true,
+    });
+    assert.equal(result.online, true);
+    assert.equal(result.processId, process.pid);
+  } finally {
+    fs.rmSync(value.root, { recursive: true, force: true });
+  }
+});

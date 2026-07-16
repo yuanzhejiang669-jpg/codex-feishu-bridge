@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "policyId": "bridge-lark-common-v1",
+  "capturedAt": "2026-07-15",
+  "tenantScopes": [
+    "application:bot.basic_info:read",
+    "cardkit:card:read",
+    "cardkit:card:write",
+    "im:chat:readonly",
+    "im:message.group_at_msg:readonly",
+    "im:message.p2p_msg:readonly",
+    "im:message:readonly",
+    "im:message:send_as_bot",
+    "im:resource"
+  ],
+  "userScopes": [
+    "docs:document.comment:create",
+    "docs:document.comment:delete",
+    "docs:document.comment:read",
+    "docs:document.comment:update",
+    "docs:document.content:read",
+    "docs:document.media:download",
+    "docs:document.media:upload",
+    "docs:permission.member:create",
+    "docs:permission.member:delete",
+    "docs:permission.member:retrieve",
+    "docs:permission.member:update",
+    "docx:document",
+    "docx:document:create",
+    "drive:drive.metadata:readonly",
+    "drive:drive.search:readonly",
+    "drive:drive:readonly",
+    "drive:file:download",
+    "drive:file:readonly",
+    "drive:file:upload",
+    "im:chat:readonly",
+    "im:message.group_msg:get_as_user",
+    "im:message.p2p_msg:get_as_user",
+    "im:message.reactions:read",
+    "im:message:readonly",
+    "im:resource",
+    "search:docs:read",
+    "search:message",
+    "wiki:node:read",
+    "wiki:node:retrieve",
+    "wiki:space:read",
+    "wiki:space:retrieve",
+    "wiki:wiki:readonly"
+  ],
+  "eventKeys": [
+    "im.message.receive_v1"
+  ]
+}
