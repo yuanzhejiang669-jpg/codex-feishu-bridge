@@ -101,7 +101,7 @@ import {
 } from "./src/logging/errors.mjs";
 import modelReasoning from "./src/config/model-reasoning.cjs";
 
-const { acceptedEfforts, loadRegistry: loadReasoningRegistry, mapReasoningEffort, reviewStatus: reasoningReviewStatus } = modelReasoning;
+const { acceptedEfforts, capabilityMappingLines, loadRegistry: loadReasoningRegistry, mapReasoningEffort, reviewStatus: reasoningReviewStatus } = modelReasoning;
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_TOOLS = resolveDefaultTools();
@@ -7364,7 +7364,7 @@ async function handleModelCommand(chatId, rest, messageId) {
     if (first === "effort" || first === "reasoning") {
       const effort = normalizeReasoningEffort(args[1]);
       if (!effort) {
-        await sendText(chatId, "用法：`/model effort <none|minimal|low|medium|high|xhigh|max>`", "model-effort-usage", messageId);
+        await sendMarkdown(chatId, modelCapabilityMarkdown(session, { includeUsage: true }), "model-effort-usage", messageId);
         return;
       }
       validateReasoningSelection(effectiveSessionSettings(session).provider, effectiveSessionSettings(session).model, effort);
@@ -7439,13 +7439,18 @@ function modelStatusMarkdown(session, title = "Codex model") {
   ].join("\n");
 }
 
-function modelCapabilityMarkdown(session) {
+function modelCapabilityMarkdown(session, { includeUsage = false } = {}) {
   const settings = effectiveSessionSettings(session);
   const mapping = settings.reasoningMapping;
   const capability = mapping.capability;
   const review = reasoningReviewStatus(capability, MODEL_REASONING_REGISTRY);
   const supported = acceptedEfforts(capability, MODEL_REASONING_REGISTRY);
-  return [
+  const rows = capabilityMappingLines({
+    provider: settings.provider,
+    model: settings.model,
+    currentEffort: settings.requestedReasoning,
+  }, MODEL_REASONING_REGISTRY);
+  const lines = [
     "**当前模型推理能力**",
     "",
     `provider：\`${settings.provider || "默认"}\``,
@@ -7453,10 +7458,22 @@ function modelCapabilityMarkdown(session) {
     `规则：\`${capability.name}\` (${capability.id})`,
     `状态：${capability.known ? `${review.stale ? "待复核" : "已收录"} · 核验 ${capability.verifiedAt} · 下次 ${review.reviewDueAt}` : "未收录 · 通用透传"}`,
     `可接受请求值：${supported.map((effort) => `\`${effort}\``).join("、")}`,
+    "",
+    "完整映射（请求值 → Codex 参数 → 上游语义）：",
+    ...rows,
+    "",
     `当前映射：\`${settings.requestedReasoning}\` → \`${mapping.supported ? mapping.effectiveEffort : "不支持"}\` → \`${mapping.supported ? mapping.upstreamValue : "不支持"}\``,
     capability.sourceUrl ? `来源：${capability.sourceUrl}` : "来源：暂无模型专属来源",
     `能力池版本：\`${MODEL_REASONING_REGISTRY.registryVersion}\``,
-  ].join("\n");
+  ];
+  if (includeUsage) {
+    lines.push(
+      "",
+      "切换当前会话：`/model effort <请求值>`",
+      `例如：\`/model effort ${settings.requestedReasoning || MODEL_REASONING_REGISTRY.defaultRequestedEffort}\``,
+    );
+  }
+  return lines.join("\n");
 }
 
 function modelTestMarkdown(result) {

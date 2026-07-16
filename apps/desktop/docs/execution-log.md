@@ -1234,3 +1234,35 @@ Adversarial review and fixes:
 Completion boundary for this iteration:
 
 - Local implementation and verification are only the first stage. Completion additionally requires `origin/main`, a matching stable GitHub Release, old-device script-hosted source/Bots, current-device script-hosted Bots, and the installed desktop client to be synchronized and independently verified.
+
+## 0.4.2 complete reasoning-map visibility
+
+Requirements confirmed:
+
+- Let a Feishu user see how every canonical effort maps through the Bridge without repeatedly switching and checking `/model`.
+- Keep execution, persistence, the offline capability registry, and existing Bot configuration unchanged.
+- Use the same behavior in script-hosted Bridge instances and the packaged desktop engine.
+
+Implementation completed:
+
+- Added a shared complete-mapping formatter that emits every canonical request value in `request -> Codex -> upstream` order.
+- Updated `/model capability` to display the complete map, mark the current requested effort, and label model-specific unsupported values explicitly.
+- Updated `/model effort` without a value to show the current Provider/model-specific capability map plus the switching command instead of a fixed generic usage string.
+- Bumped the desktop client to `0.4.2` because its packaged Bridge engine changed.
+
+Verification completed so far:
+
+- Focused reasoning tests cover the complete DeepSeek V4 map, current-value marker, Grok unsupported value, and unknown-model generic passthrough.
+- Root syntax, static, registry, and unit checks pass `47/47`; desktop syntax, unit, and integration checks pass `119/119`.
+- Windows x64 packaging, proxy smoke, checksums, and release verification pass for `0.4.2`.
+- Source, staged engine, and unpacked engine copies of both the Bridge entry and shared formatter have byte-identical SHA-256 hashes; the unpacked Node runtime prints the expected seven-line DeepSeek map.
+
+Adversarial review and fixes:
+
+1. Three-month failure: the source formatter changes but `stage-engine` or the installer carries the previous engine, so script Bots and client Bots display different maps. Validation compared SHA-256 hashes across source, staged, and unpacked files and executed the unpacked formatter. Guard: desktop packaging continues to stage the complete shared engine, and the complete-map unit test runs before packaging.
+2. Three-month failure: a capability update adds an unsupported canonical effort and the card silently presents it as selectable. Validation uses Grok 4.5, whose `none` mapping is null. Guard: the shared formatter emits `不支持`, while `acceptedEfforts` excludes it and command validation still rejects it.
+3. Three-month failure: the complete mapping becomes too large or loses its current marker on Feishu mobile. Validation fixes the output to exactly one row per canonical effort, seven rows for the current schema, with one deterministic `← 当前` marker. Guard: regression tests assert the exact DeepSeek rows and marker and verify the unknown-model row count matches the canonical registry.
+
+Completion boundary:
+
+- GitHub publication, old-device synchronization, current-device idle Bot restarts, installed-client upgrade, and managed-Bot recovery remain required before this iteration is complete.

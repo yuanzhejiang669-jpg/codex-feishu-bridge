@@ -355,6 +355,8 @@ This list is the durable parity checklist against the existing local control pan
 96. [x] Use one versioned model-reasoning capability registry across script-hosted and desktop-managed execution.
 97. [x] Show requested, effective, and upstream reasoning values and reject known impossible combinations.
 98. [x] Warn when a known capability rule is due for review and mark unknown models as unverified generic passthrough.
+99. [x] Show every canonical request effort as a request-to-Codex-to-upstream mapping and mark the current request in `/model capability`.
+100. [x] Make `/model effort` without a value show the current Provider/model mapping instead of a fixed generic effort list.
 
 `0.1.6 Provider center` acceptance: items 26-35 are implemented; API keys never enter TOML, renderer state, IPC results, or logs; synchronization is previewable and transactional; only client-managed isolated Codex Homes are eligible; existing Bridge processes and legacy Bot files remain unchanged.
 
@@ -373,6 +375,8 @@ This list is the durable parity checklist against the existing local control pan
 `0.4.0 Provider removal and capability selection` acceptance: Provider deletion shows global configuration, managed-space, Bot, proxy, and environment-variable impact before confirmation; it refuses to break any client-managed Bot, preserves unrelated TOML content, removes managed proxy routes transactionally, and deletes a Windows user environment variable only when no retained definition references it. MCP and Skills each expose independent select-all, clear-selection, and selected/eligible counts; missing-path MCP entries remain unselected and disabled.
 
 `0.4.1 Reasoning defaults and runtime clarity` acceptance: every new script-hosted or desktop-managed Bot defaults to requested `medium` reasoning unless the user explicitly selects another accepted effort; one offline, versioned registry maps that request to the selected model's effective Codex value and upstream meaning; known impossible combinations are rejected, unknown models are visibly marked unverified, rules older than the review interval are flagged, and existing Bot configuration is never rewritten. The system view distinguishes the Codex runtime entry executable from its containing directory and companion EXE count.
+
+`0.4.2 Complete reasoning-map visibility` acceptance: `/model capability` lists every canonical request value in the stable `request -> Codex -> upstream` order, marks the current request, and visibly labels unsupported model-specific values without changing execution or persistence behavior. `/model effort` without a value renders the same current Provider/model-specific map and a concrete switching example instead of a fixed seven-value usage string. The script-hosted Bridge and packaged desktop engine use the same shared formatter and registry.
 
 ## 8. Verification strategy
 
