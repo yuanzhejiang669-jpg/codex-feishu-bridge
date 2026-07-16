@@ -99,6 +99,10 @@ const elements = {
   botGlobalProvider: document.querySelector("#bot-global-provider"),
   botGlobalModel: document.querySelector("#bot-global-model"),
   botGlobalReasoning: document.querySelector("#bot-global-reasoning"),
+  botGlobalReasoningHint: document.querySelector("#bot-global-reasoning-hint"),
+  providerReasoning: document.querySelector("#provider-reasoning"),
+  providerReasoningHint: document.querySelector("#provider-reasoning-hint"),
+  workspaceReasoningHint: document.querySelector("#workspace-reasoning-hint"),
   previewBotPaths: document.querySelector("#preview-bot-paths-button"),
   botPathPreview: document.querySelector("#bot-path-preview"),
   botConfigurationTarget: document.querySelector("#bot-configuration-target"),
@@ -379,7 +383,9 @@ function renderSystemPaths(currentState) {
   elements.systemPaths.innerHTML = detailRows([
     ["Bridge 数据", currentState.bridge.root],
     ["Codex 安装包", currentState.codex.installLocation],
-    ["Codex 运行时", currentState.codex.runtimePath],
+    ["Codex 运行时入口", currentState.codex.runtimePath],
+    ["Codex 运行时目录", currentState.codex.runtimeDirectory],
+    ["Codex 运行时组件", `${currentState.codex.runtimeExecutableCount || 0} 个 EXE`],
     ["客户端数据", currentState.setup.dataRoot],
     ["客户端 Bot 运行数据", currentState.setup.runtimeLocalAppData],
     ["数据 Schema", `${currentState.setup.dataSchema.currentVersion ?? "未初始化"} / ${currentState.setup.dataSchema.supportedVersion}`],
@@ -493,6 +499,66 @@ function renderProtocolProxy(proxy = {}) {
     : `mimo2codex ${text(proxy.version)} 已随客户端提供；添加 Chat Completions Provider 后自动启动。`;
 }
 
+function globMatches(value, pattern) {
+  const escaped = String(pattern || "").replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
+  return new RegExp(`^${escaped}$`, "i").test(String(value || ""));
+}
+
+function reasoningCapability(provider, model) {
+  const registry = state?.setup?.reasoningCapabilities || {};
+  const entries = registry.entries || [];
+  const modelMatch = (entry) => (entry.modelPatterns || []).some((pattern) => globMatches(model, pattern));
+  return entries.find((entry) => modelMatch(entry)
+    && (!(entry.providerPatterns || []).length || entry.providerPatterns.some((pattern) => globMatches(provider, pattern)) || !provider))
+    || entries.find(modelMatch)
+    || {
+      id: "generic",
+      name: "未收录模型",
+      mapping: Object.fromEntries((registry.canonicalEfforts || []).map((effort) => [effort, effort])),
+      upstreamValues: Object.fromEntries((registry.canonicalEfforts || []).map((effort) => [effort, effort])),
+      defaultRequestedEffort: registry.defaultRequestedEffort || "medium",
+    };
+}
+
+function updateReasoningSelect(select, hint, provider, model) {
+  if (!select || !hint) return;
+  const registry = state?.setup?.reasoningCapabilities || {};
+  const capability = reasoningCapability(provider, model);
+  const efforts = (registry.canonicalEfforts || ["none", "minimal", "low", "medium", "high", "xhigh", "max"])
+    .filter((effort) => capability.mapping?.[effort] !== null && capability.mapping?.[effort] !== undefined);
+  const previous = select.value || registry.defaultRequestedEffort || "medium";
+  select.innerHTML = efforts.map((effort) => {
+    const effective = capability.mapping[effort];
+    const label = effective === effort ? effort : `${effort} → ${effective}`;
+    return `<option value="${escapeHtml(effort)}">${escapeHtml(label)}</option>`;
+  }).join("");
+  select.value = efforts.includes(previous)
+    ? previous
+    : efforts.includes(capability.defaultRequestedEffort) ? capability.defaultRequestedEffort : efforts[0] || "";
+  const effective = capability.mapping?.[select.value];
+  const upstream = capability.upstreamValues?.[effective] || effective;
+  const verifiedAt = Date.parse(`${capability.verifiedAt || ""}T00:00:00Z`);
+  const reviewDue = Number.isFinite(verifiedAt)
+    ? verifiedAt + Number(registry.reviewAfterDays || 90) * 24 * 60 * 60 * 1000
+    : NaN;
+  const stale = Number.isFinite(reviewDue) && Date.now() >= reviewDue;
+  hint.textContent = capability.id === "generic"
+    ? "能力池未收录，按 Codex 通用参数透传"
+    : `${capability.name} · 请求 ${select.value} · 实际 ${effective} · 上游 ${upstream}${stale ? " · 规则待复核" : ""}`;
+  hint.title = capability.sourceUrl ? `核验 ${capability.verifiedAt} · ${capability.sourceUrl}` : "暂无模型专属来源";
+}
+
+function updateBotReasoningControls() {
+  const mode = elements.providerMode.value;
+  if (mode === "global") {
+    updateReasoningSelect(elements.botGlobalReasoning, elements.botGlobalReasoningHint,
+      elements.botGlobalProvider.value, elements.botGlobalModel.value);
+  } else if (mode === "custom") {
+    updateReasoningSelect(elements.providerReasoning, elements.providerReasoningHint,
+      document.querySelector("#provider-id").value, document.querySelector("#provider-model").value);
+  }
+}
+
 function renderWorkspaceFactory(factoryState = {}, catalog = {}) {
   const providerSelect = elements.workspaceFactoryForm.elements.providerId;
   const selectedProvider = providerSelect.value;
@@ -505,6 +571,12 @@ function renderWorkspaceFactory(factoryState = {}, catalog = {}) {
     providerSelect.value = catalog.selectedId;
     if (!elements.workspaceFactoryForm.elements.model.value) elements.workspaceFactoryForm.elements.model.value = catalog.selectedModel || "";
   }
+  updateReasoningSelect(
+    elements.workspaceFactoryForm.elements.reasoning,
+    elements.workspaceReasoningHint,
+    providerSelect.value,
+    elements.workspaceFactoryForm.elements.model.value,
+  );
 
   const bots = factoryState.bots || [];
   elements.workspaceFactoryQueueSection.classList.toggle("hidden", bots.length === 0);
@@ -776,6 +848,7 @@ function updateBotProviderMode() {
     document.querySelector(selector).required = mode === "custom";
   });
   elements.providerTestStatus.textContent = "";
+  updateBotReasoningControls();
 }
 
 function resetBotDialog() {
@@ -1140,6 +1213,12 @@ elements.workspaceFactoryForm.addEventListener("input", () => {
   elements.workspaceFactoryQueueButton.disabled = true;
   elements.workspaceFactoryPreview.classList.add("hidden");
   renderWorkspaceAgentsPaths();
+  updateReasoningSelect(
+    elements.workspaceFactoryForm.elements.reasoning,
+    elements.workspaceReasoningHint,
+    elements.workspaceFactoryForm.elements.providerId.value,
+    elements.workspaceFactoryForm.elements.model.value,
+  );
 });
 elements.workspaceFactoryPreviewButton.addEventListener("click", async () => {
   if (!elements.workspaceFactoryForm.reportValidity()) return;
@@ -1219,6 +1298,12 @@ elements.testProvider.addEventListener("click", () => {
 elements.providerMode.addEventListener("change", () => {
   updateBotProviderMode();
 });
+elements.botGlobalProvider.addEventListener("change", updateBotReasoningControls);
+elements.botGlobalModel.addEventListener("input", updateBotReasoningControls);
+document.querySelector("#provider-id").addEventListener("input", updateBotReasoningControls);
+document.querySelector("#provider-model").addEventListener("input", updateBotReasoningControls);
+elements.botGlobalReasoning.addEventListener("change", updateBotReasoningControls);
+elements.providerReasoning.addEventListener("change", updateBotReasoningControls);
 elements.botConfigurationTarget.addEventListener("change", () => updateBotConfigurationTarget(true));
 elements.botSpaceTarget.addEventListener("change", () => updateBotConfigurationTarget(true));
 elements.customProviderFields.addEventListener("input", () => { elements.providerTestStatus.textContent = ""; });

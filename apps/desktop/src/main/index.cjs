@@ -24,6 +24,7 @@ const { readDesktopSettings, writeDesktopSettings } = require("./services/deskto
 const { createWindowsStartup } = require("./services/windows-startup.cjs");
 const { applyCapabilityMigration, previewCapabilityMigration } = require("./services/capability-migration.cjs");
 const { inspectProvider, testProvider } = require("./services/provider-setup.cjs");
+const { reasoningRegistry } = require("./services/reasoning-effort.cjs");
 const {
   addGlobalProvider,
   applyGlobalProviderRemoval,
@@ -309,6 +310,7 @@ async function loadState() {
       startupError,
       recovery: recoverySupervisor?.snapshot() || {},
       workspaceFactory: readWorkspaceFactoryQueue(managedDataRoot()),
+      reasoningCapabilities: reasoningRegistry(),
       protocolProxy: protocolProxyService?.snapshot() || { supported: false, status: "unavailable", providerCount: 0 },
     },
     update: updaterService?.snapshot() || {

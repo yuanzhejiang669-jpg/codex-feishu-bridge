@@ -99,6 +99,9 @@ import {
   normalizeFailure,
   safeJson,
 } from "./src/logging/errors.mjs";
+import modelReasoning from "./src/config/model-reasoning.cjs";
+
+const { acceptedEfforts, loadRegistry: loadReasoningRegistry, mapReasoningEffort, reviewStatus: reasoningReviewStatus } = modelReasoning;
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_TOOLS = resolveDefaultTools();
@@ -116,7 +119,7 @@ const CONFIG = {
   runMode: normalizeRunMode(process.env.CODEX_FEISHU_RUN_MODE || "app-server"),
   codexSandbox: process.env.CODEX_FEISHU_SANDBOX || "danger-full-access",
   codexModel: process.env.CODEX_FEISHU_MODEL || "",
-  codexReasoning: process.env.CODEX_FEISHU_REASONING || "max",
+  codexReasoning: process.env.CODEX_FEISHU_REASONING || "",
   codexTimeoutMs: parseDurationMs(process.env.CODEX_FEISHU_CODEX_TIMEOUT_MS, 0),
   codexIdleTimeoutMs: parseDurationMs(process.env.CODEX_FEISHU_CODEX_IDLE_TIMEOUT_MS, 60 * 60_000),
   disableMcp: (process.env.CODEX_FEISHU_DISABLE_MCP || "0") !== "0",
@@ -295,7 +298,8 @@ const ManagedCard = createManagedCardClass({
   cardThrottleMs: CONFIG.cardThrottleMs,
   log,
 });
-const REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh", "max"]);
+const MODEL_REASONING_REGISTRY = loadReasoningRegistry();
+const REASONING_EFFORTS = new Set(MODEL_REASONING_REGISTRY.canonicalEfforts);
 const MIN_SIDEBAR_RECONCILE_INTERVAL_MS = 5_000;
 const PROVIDER_MODEL_LIST_TIMEOUT_MS = 30_000;
 const PROVIDER_MODEL_TEST_TIMEOUT_MS = 60_000;
@@ -306,42 +310,42 @@ const PROVIDER_BUNDLES = [
     name: "mimo2codex / DeepSeek V4 Pro",
     provider: "mimo2codex",
     model: "deepseek-v4-pro",
-    reasoning: "max",
+    reasoning: "medium",
   },
   {
     id: "m2c-deepseek-flash",
     name: "mimo2codex / DeepSeek V4 Flash",
     provider: "mimo2codex",
     model: "deepseek-v4-flash",
-    reasoning: "max",
+    reasoning: "medium",
   },
   {
     id: "m2c-apideepseek",
     name: "mimo2codex / API DeepSeek V4 Pro",
     provider: "mimo2codex-apideepseek",
     model: "deepseek-v4-pro",
-    reasoning: "max",
+    reasoning: "medium",
   },
   {
     id: "m2c-apideepseek-flash",
     name: "mimo2codex / API DeepSeek V4 Flash",
     provider: "mimo2codex-apideepseek",
     model: "deepseek-v4-flash",
-    reasoning: "max",
+    reasoning: "medium",
   },
   {
     id: "m2c-kimi",
     name: "mimo2codex / Kimi",
     provider: "mimo2codex",
     model: "kimi-k2.6",
-    reasoning: "max",
+    reasoning: "medium",
   },
   {
     id: "m2c-glm",
     name: "mimo2codex / GLM",
     provider: "mimo2codex",
     model: "glm-5.2",
-    reasoning: "max",
+    reasoning: "medium",
   },
 ];
 const codexProviderConfig = createCodexProviderConfig({
@@ -442,9 +446,17 @@ function cleanOverride(value) {
 function effectiveSessionSettings(session) {
   const model = cleanOverride(session?.modelOverride) || CONFIG.codexModel || resolveCodexConfigValue("model") || "";
   const provider = cleanOverride(session?.providerOverride) || resolveCodexConfigValue("model_provider") || "openai";
-  const reasoning = cleanOverride(session?.reasoningOverride) || CONFIG.codexReasoning || resolveCodexConfigValue("model_reasoning_effort") || "";
+  const requestedReasoning = cleanOverride(session?.reasoningOverride) || CONFIG.codexReasoning || resolveCodexConfigValue("model_reasoning_effort") || MODEL_REASONING_REGISTRY.defaultRequestedEffort;
+  const reasoningMapping = mapReasoningEffort({ provider, model, effort: requestedReasoning }, MODEL_REASONING_REGISTRY);
+  const reasoning = reasoningMapping.supported ? reasoningMapping.effectiveEffort : "";
   const serviceTier = cleanOverride(session?.serviceTierOverride) || resolveCodexConfigValue("service_tier") || "";
-  return { model, provider, reasoning, serviceTier };
+  return { model, provider, requestedReasoning, reasoning, reasoningMapping, serviceTier };
+}
+
+function assertReasoningSupported(settings) {
+  if (settings.reasoningMapping.supported) return settings;
+  const capability = settings.reasoningMapping.capability;
+  throw new Error(`${capability.name} 不支持推理强度 ${settings.requestedReasoning}；可接受请求值：${acceptedEfforts(capability, MODEL_REASONING_REGISTRY).join("、") || "无"}`);
 }
 
 function settingsSummary(session) {
@@ -452,7 +464,7 @@ function settingsSummary(session) {
   return [
     `provider ${settings.provider || "默认"}`,
     `model ${settings.model || "默认"}`,
-    `reasoning ${settings.reasoning || "默认"}`,
+    `reasoning ${settings.requestedReasoning || "默认"}${settings.reasoningMapping.mapped ? ` → ${settings.reasoning}` : ""}`,
     `speed ${displayServiceTier(settings.serviceTier) || "默认"}`,
   ].join(" · ");
 }
@@ -467,7 +479,7 @@ function applySessionThreadOverrides(params, session, options = {}) {
 }
 
 function applySessionTurnOverrides(params, session, options = {}) {
-  const settings = effectiveSessionSettings(session);
+  const settings = assertReasoningSupported(effectiveSessionSettings(session));
   const serviceTier = serviceTierForTurnSettings(settings, options);
   if (settings.model) params.model = settings.model;
   if (serviceTier) params.serviceTier = serviceTier;
@@ -5614,7 +5626,7 @@ async function runCodexAppServer(event, session, state = null, onState = null, o
   let serviceTierPlan = null;
 
   try {
-    const settings = effectiveSessionSettings(session);
+    const settings = assertReasoningSupported(effectiveSessionSettings(session));
     serviceTierPlan = serviceTierPlanForTurnSettings(settings, options);
     const serviceTier = serviceTierPlan.serviceTier;
     log("INFO", "starting codex app-server turn", {
@@ -5835,7 +5847,7 @@ async function runCodex(event, session, state = null, onState = null) {
   const outFile = path.join(outputDir, `${Date.now()}-${safeFilePart(messageId)}.txt`);
   const promptFile = path.join(promptDir, `${Date.now()}-${safeFilePart(messageId)}.md`);
   fs.writeFileSync(promptFile, buildPrompt(event, session), "utf8");
-  const settings = effectiveSessionSettings(session);
+  const settings = assertReasoningSupported(effectiveSessionSettings(session));
   const serviceTierPlan = serviceTierPlanForExecSettings(settings);
   const serviceTier = serviceTierPlan.serviceTier;
 
@@ -7307,6 +7319,11 @@ async function handleModelCommand(chatId, rest, messageId) {
     return;
   }
 
+  if (action === "capability" || action === "capabilities") {
+    await sendMarkdown(chatId, modelCapabilityMarkdown(session), "model-capability", messageId);
+    return;
+  }
+
   if (action === "list" || action === "refresh") {
     try {
       await sendMarkdown(chatId, await modelListMarkdown(session), "model-list", messageId);
@@ -7350,6 +7367,7 @@ async function handleModelCommand(chatId, rest, messageId) {
         await sendText(chatId, "用法：`/model effort <none|minimal|low|medium|high|xhigh|max>`", "model-effort-usage", messageId);
         return;
       }
+      validateReasoningSelection(effectiveSessionSettings(session).provider, effectiveSessionSettings(session).model, effort);
       if (persist) await writeCodexConfigValue("model_reasoning_effort", effort);
       setSessionOverride(session, "reasoningOverride", effort);
       await sendMarkdown(chatId, modelStatusMarkdown(session, persist ? "已切换并保存 reasoning。" : "已切换当前会话 reasoning。"), "model-effort", messageId);
@@ -7366,6 +7384,7 @@ async function handleModelCommand(chatId, rest, messageId) {
       await sendText(chatId, "推理强度只能是：`none`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`。", "model-effort-invalid", messageId);
       return;
     }
+    if (effort) validateReasoningSelection(effectiveSessionSettings(session).provider, model, effort);
 
     if (model.toLowerCase() === "default") {
       session.modelOverride = "";
@@ -7391,18 +7410,52 @@ function normalizeReasoningEffort(value) {
   return REASONING_EFFORTS.has(text) ? text : "";
 }
 
+function validateReasoningSelection(provider, model, effort) {
+  const mapping = mapReasoningEffort({ provider, model, effort }, MODEL_REASONING_REGISTRY);
+  if (!mapping.supported) {
+    throw new Error(`${mapping.capability.name} 不支持推理强度 ${mapping.requestedEffort}；可接受请求值：${acceptedEfforts(mapping.capability, MODEL_REASONING_REGISTRY).join("、") || "无"}`);
+  }
+  return mapping;
+}
+
 function modelStatusMarkdown(session, title = "Codex model") {
   const settings = effectiveSessionSettings(session);
+  const mapping = settings.reasoningMapping;
+  const capability = mapping.capability;
+  const review = reasoningReviewStatus(capability, MODEL_REASONING_REGISTRY);
   return [
     `**${title}**`,
     "",
     `当前会话：\`${session.title || "未命名会话"}\` (${session.id})`,
     `模型：\`${settings.model || "默认"}\`${session.modelOverride ? "（会话覆盖）" : "（配置默认）"}`,
-    `推理强度：\`${settings.reasoning || "默认"}\`${session.reasoningOverride ? "（会话覆盖）" : "（配置默认）"}`,
+    `请求推理强度：\`${settings.requestedReasoning || "默认"}\`${session.reasoningOverride ? "（会话覆盖）" : "（配置默认）"}`,
+    `实际 Codex 参数：\`${mapping.supported ? mapping.effectiveEffort : "不支持"}\``,
+    `上游语义：\`${mapping.supported ? mapping.upstreamValue : "不支持"}\``,
+    `能力规则：${capability.known ? `\`${capability.name}\` · ${review.stale ? `待复核（应于 ${review.reviewDueAt} 前复核）` : "已收录"}` : "未收录，按 Codex 通用值透传"}`,
     `provider：\`${settings.provider || "默认"}\``,
     `速度：\`${displayServiceTier(settings.serviceTier) || "默认"}\``,
     "",
-    "用法：`/model list`、`/model refresh`、`/model test <模型ID>`、`/model <模型ID> [推理强度]`、`/model effort <强度>`、`/model save <模型ID> [强度]`、`/model clear`",
+    "用法：`/model list`、`/model capability`、`/model test <模型ID>`、`/model <模型ID> [推理强度]`、`/model effort <强度>`、`/model save <模型ID> [强度]`、`/model clear`",
+  ].join("\n");
+}
+
+function modelCapabilityMarkdown(session) {
+  const settings = effectiveSessionSettings(session);
+  const mapping = settings.reasoningMapping;
+  const capability = mapping.capability;
+  const review = reasoningReviewStatus(capability, MODEL_REASONING_REGISTRY);
+  const supported = acceptedEfforts(capability, MODEL_REASONING_REGISTRY);
+  return [
+    "**当前模型推理能力**",
+    "",
+    `provider：\`${settings.provider || "默认"}\``,
+    `模型：\`${settings.model || "默认"}\``,
+    `规则：\`${capability.name}\` (${capability.id})`,
+    `状态：${capability.known ? `${review.stale ? "待复核" : "已收录"} · 核验 ${capability.verifiedAt} · 下次 ${review.reviewDueAt}` : "未收录 · 通用透传"}`,
+    `可接受请求值：${supported.map((effort) => `\`${effort}\``).join("、")}`,
+    `当前映射：\`${settings.requestedReasoning}\` → \`${mapping.supported ? mapping.effectiveEffort : "不支持"}\` → \`${mapping.supported ? mapping.upstreamValue : "不支持"}\``,
+    capability.sourceUrl ? `来源：${capability.sourceUrl}` : "来源：暂无模型专属来源",
+    `能力池版本：\`${MODEL_REASONING_REGISTRY.registryVersion}\``,
   ].join("\n");
 }
 

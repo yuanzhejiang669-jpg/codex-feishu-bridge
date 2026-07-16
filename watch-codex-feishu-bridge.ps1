@@ -9,7 +9,7 @@ param(
   [string]$Sandbox = "danger-full-access",
   [ValidateSet("app-server", "auto", "exec")]
   [string]$RunMode = "app-server",
-  [string]$Reasoning = "max",
+  [string]$Reasoning = "",
   [string]$EventKeys = "im.message.receive_v1",
   [int]$CodexTimeoutSeconds = 0,
   [int]$CodexIdleTimeoutSeconds = 3600,

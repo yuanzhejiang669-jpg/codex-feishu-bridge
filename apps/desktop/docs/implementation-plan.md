@@ -352,6 +352,9 @@ This list is the durable parity checklist against the existing local control pan
 93. [x] Remove a client-managed Chat Provider from the proxy registry and stop the proxy when no managed routes remain.
 94. [x] Add independent select-all, clear-selection, and selected-count controls for MCP and Skills migration.
 95. [x] Preserve unrelated TOML sections and comments during Provider removal and block deletion while a managed Bot still depends on it.
+96. [x] Use one versioned model-reasoning capability registry across script-hosted and desktop-managed execution.
+97. [x] Show requested, effective, and upstream reasoning values and reject known impossible combinations.
+98. [x] Warn when a known capability rule is due for review and mark unknown models as unverified generic passthrough.
 
 `0.1.6 Provider center` acceptance: items 26-35 are implemented; API keys never enter TOML, renderer state, IPC results, or logs; synchronization is previewable and transactional; only client-managed isolated Codex Homes are eligible; existing Bridge processes and legacy Bot files remain unchanged.
 
@@ -368,6 +371,8 @@ This list is the durable parity checklist against the existing local control pan
 `0.3.0 Provider translation and managed removal` acceptance: the Provider center can validate and save either native Responses endpoints or OpenAI-compatible Chat Completions endpoints; Chat endpoints are routed through the pinned MIT-licensed `mimo2codex` runtime bundled and supervised by the desktop client, without storing API keys in TOML, proxy JSON, renderer state, IPC results, or logs. Bot and isolated-space removal always previews affected processes and paths, refuses active tasks, preserves user workspaces by default, never touches legacy Bots or Feishu cloud applications, and requires explicit confirmation before deleting client-owned runtime or isolated Codex Home data.
 
 `0.4.0 Provider removal and capability selection` acceptance: Provider deletion shows global configuration, managed-space, Bot, proxy, and environment-variable impact before confirmation; it refuses to break any client-managed Bot, preserves unrelated TOML content, removes managed proxy routes transactionally, and deletes a Windows user environment variable only when no retained definition references it. MCP and Skills each expose independent select-all, clear-selection, and selected/eligible counts; missing-path MCP entries remain unselected and disabled.
+
+`0.4.1 Reasoning defaults and runtime clarity` acceptance: every new script-hosted or desktop-managed Bot defaults to requested `medium` reasoning unless the user explicitly selects another accepted effort; one offline, versioned registry maps that request to the selected model's effective Codex value and upstream meaning; known impossible combinations are rejected, unknown models are visibly marked unverified, rules older than the review interval are flagged, and existing Bot configuration is never rewritten. The system view distinguishes the Codex runtime entry executable from its containing directory and companion EXE count.
 
 ## 8. Verification strategy
 

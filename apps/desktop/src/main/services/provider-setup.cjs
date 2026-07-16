@@ -2,6 +2,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const TOML = require("smol-toml");
+const { normalizeReasoningEffort, resolveReasoningSelection } = require("./reasoning-effort.cjs");
 
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
 const ENV_PATTERN = /^[A-Z_][A-Z0-9_]{0,127}$/;
@@ -22,7 +23,8 @@ function normalizeProviderInput(raw = {}, botName = "bot") {
     const model = String(raw.model || "").trim();
     if (!ID_PATTERN.test(id)) throw new Error("请选择有效的全局 Provider");
     if (!model) throw new Error("模型名称不能为空");
-    return { mode, id, model, reasoning: String(raw.reasoning || "medium").trim() || "medium" };
+    const reasoning = normalizeReasoningEffort(raw.reasoning);
+    return { mode, id, model, reasoning, reasoningPlan: resolveReasoningSelection({ provider: id, model, effort: reasoning }) };
   }
   if (mode !== "custom") throw new Error("Provider 模式无效");
   const id = String(raw.id || "").trim();
@@ -38,6 +40,7 @@ function normalizeProviderInput(raw = {}, botName = "bot") {
   if (!ENV_PATTERN.test(envKey)) throw new Error("Provider 环境变量名称格式无效");
   const apiKey = String(raw.apiKey || "").trim();
   if (!apiKey) throw new Error("Provider API Key 不能为空");
+  const reasoning = normalizeReasoningEffort(raw.reasoning);
   return {
     mode,
     id,
@@ -47,7 +50,8 @@ function normalizeProviderInput(raw = {}, botName = "bot") {
     envKey,
     apiKey,
     wireApi: "responses",
-    reasoning: String(raw.reasoning || "medium").trim() || "medium",
+    reasoning,
+    reasoningPlan: resolveReasoningSelection({ provider: id, model, effort: reasoning }),
   };
 }
 
@@ -110,7 +114,7 @@ function prepareProviderConfiguration(bot, raw, options) {
     const config = parseConfig(configPath);
     config.model = provider.model;
     config.model_provider = provider.id;
-    config.model_reasoning_effort = provider.reasoning;
+    config.model_reasoning_effort = provider.reasoningPlan.effectiveEffort;
     config.model_providers ||= {};
     config.model_providers[provider.id] = structuredClone(definition);
     const temporaryConfig = `${configPath}.cfb-${crypto.randomUUID()}.tmp`;
@@ -126,6 +130,9 @@ function prepareProviderConfiguration(bot, raw, options) {
         envKey,
         wireApi: String(definition.wire_api || "responses"),
         reasoning: provider.reasoning,
+        effectiveReasoning: provider.reasoningPlan.effectiveEffort,
+        upstreamReasoning: provider.reasoningPlan.upstreamValue,
+        reasoningCapability: provider.reasoningPlan.capabilityName,
         credentialStorage: "windows-user-environment",
       },
       commit() {
@@ -157,7 +164,7 @@ function prepareProviderConfiguration(bot, raw, options) {
   const config = parseConfig(configPath);
   config.model = provider.model;
   config.model_provider = provider.id;
-  config.model_reasoning_effort = provider.reasoning;
+  config.model_reasoning_effort = provider.reasoningPlan.effectiveEffort;
   config.model_providers ||= {};
   config.model_providers[provider.id] = {
     name: provider.name,
@@ -184,6 +191,9 @@ function prepareProviderConfiguration(bot, raw, options) {
       envKey: provider.envKey,
       wireApi: provider.wireApi,
       reasoning: provider.reasoning,
+      effectiveReasoning: provider.reasoningPlan.effectiveEffort,
+      upstreamReasoning: provider.reasoningPlan.upstreamValue,
+      reasoningCapability: provider.reasoningPlan.capabilityName,
       credentialStorage: "windows-dpapi",
     },
     commit() {

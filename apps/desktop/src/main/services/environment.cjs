@@ -1,4 +1,5 @@
 const { execFile } = require("node:child_process");
+const fs = require("node:fs");
 const path = require("node:path");
 const { promisify } = require("node:util");
 
@@ -17,6 +18,20 @@ function parseJsonOutput(stdout) {
   const end = text.lastIndexOf("}");
   if (start < 0 || end < start) throw new Error("Codex inspection returned invalid JSON");
   return JSON.parse(text.slice(start, end + 1));
+}
+
+function inspectRuntimeDirectory(runtimePath) {
+  if (!runtimePath) return { runtimeDirectory: "", runtimeExecutableCount: 0 };
+  const runtimeDirectory = path.dirname(runtimePath);
+  let runtimeExecutableCount = 0;
+  try {
+    runtimeExecutableCount = fs.readdirSync(runtimeDirectory, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && path.extname(entry.name).toLowerCase() === ".exe")
+      .length;
+  } catch {
+    runtimeExecutableCount = 0;
+  }
+  return { runtimeDirectory, runtimeExecutableCount };
 }
 
 async function runCodex(runtimePath, args, timeout) {
@@ -73,12 +88,14 @@ async function inspectCodex(scriptPath) {
     });
     const inspection = parseJsonOutput(result.stdout);
     const runtimePath = inspection.cachedRuntimePath || inspection.sourceRuntimePath || "";
+    const runtimeDirectory = inspectRuntimeDirectory(runtimePath);
     const version = await runCodex(runtimePath, ["--version"], 8_000);
     const auth = await runCodex(runtimePath, ["login", "status"], 10_000);
     return {
       supported: true,
       ...inspection,
       runtimePath,
+      ...runtimeDirectory,
       cliVersion: cleanVersion(version.output),
       loginState: loginState(auth.output, auth.ok),
       loginSummary: auth.output.split(/\r?\n/).find(Boolean) || "",
@@ -98,7 +115,7 @@ async function inspectCodex(scriptPath) {
 module.exports = {
   cleanVersion,
   inspectCodex,
+  inspectRuntimeDirectory,
   loginState,
   parseJsonOutput,
 };
-

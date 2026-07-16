@@ -15,7 +15,7 @@ const WALK_DIRS = [
   "control-panel",
   "src",
 ];
-const CHECK_EXTENSIONS = new Set([".js", ".mjs"]);
+const CHECK_EXTENSIONS = new Set([".cjs", ".js", ".mjs"]);
 
 const targets = new Set(ROOT_FILES.map((file) => path.join(ROOT, file)));
 for (const dir of WALK_DIRS) {

@@ -84,6 +84,17 @@ function findManagedBot(name, options) {
   return bot;
 }
 
+function managedBotStartArguments(bot, codexHome) {
+  const args = [
+    "-Name", bot.name,
+    "-LarkProfile", bot.profile,
+    "-Workspace", bot.workspace,
+    "-CodexHome", codexHome,
+  ];
+  if (bot.provider?.reasoning) args.push("-Reasoning", bot.provider.reasoning);
+  return args;
+}
+
 function setManagedBotAutoStart(name, enabled, options) {
   const bot = findManagedBot(name, options);
   const destination = bot.configPath;
@@ -117,12 +128,8 @@ async function startManagedBot(name, options) {
   const scriptPath = path.join(options.engineRoot, "start-codex-feishu-bridge.ps1");
   if (!fs.existsSync(scriptPath)) throw new Error("客户端 Bridge 启动脚本缺失");
   const codexHome = bot.codexHome || options.defaultCodexHome;
-  await runPowerShell(scriptPath, [
-    "-Name", bot.name,
-    "-LarkProfile", bot.profile,
-    "-Workspace", bot.workspace,
-    "-CodexHome", codexHome,
-  ], { env: processEnvironment(options, bot), timeoutMs: 60_000 });
+  const startArgs = managedBotStartArguments(bot, codexHome);
+  await runPowerShell(scriptPath, startArgs, { env: processEnvironment(options, bot), timeoutMs: 60_000 });
 
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
@@ -164,6 +171,7 @@ async function stopManagedBotAndDisableAutoStart(name, options) {
 
 module.exports = {
   inspectManagedBots,
+  managedBotStartArguments,
   managedRuntimeRoot,
   processEnvironment,
   runPowerShell,

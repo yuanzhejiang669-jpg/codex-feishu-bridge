@@ -1,0 +1,72 @@
+{
+  "schemaVersion": 1,
+  "registryVersion": "2026-07-16",
+  "reviewAfterDays": 90,
+  "defaultRequestedEffort": "medium",
+  "canonicalEfforts": ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+  "entries": [
+    {
+      "id": "deepseek-v4", "name": "DeepSeek V4",
+      "providerPatterns": ["deepseek*", "mimo2codex*"], "modelPatterns": ["deepseek-v4-*"],
+      "selectableEfforts": ["none", "high", "max"], "defaultRequestedEffort": "medium", "maximumEffort": "max",
+      "controlKind": "reasoning_effort",
+      "mapping": {"none": "none", "minimal": "none", "low": "high", "medium": "high", "high": "high", "xhigh": "max", "max": "max"},
+      "upstreamValues": {"none": "thinking.disabled", "high": "high", "max": "max"},
+      "sourceUrl": "https://api-docs.deepseek.com/zh-cn/guides/thinking_mode", "verifiedAt": "2026-07-16"
+    },
+    {
+      "id": "kimi-k2.7-code", "name": "Kimi K2.7 Code",
+      "providerPatterns": ["kimi*", "moonshot*", "mimo2codex*"], "modelPatterns": ["kimi-k2.7-code*"],
+      "selectableEfforts": ["high"], "defaultRequestedEffort": "medium", "maximumEffort": "high",
+      "controlKind": "fixed_thinking",
+      "mapping": {"none": null, "minimal": null, "low": "high", "medium": "high", "high": "high", "xhigh": "high", "max": "high"},
+      "upstreamValues": {"high": "thinking.enabled"},
+      "sourceUrl": "https://platform.moonshot.cn/docs/api/chat", "verifiedAt": "2026-07-16"
+    },
+    {
+      "id": "kimi-k2.6", "name": "Kimi K2.6",
+      "providerPatterns": ["kimi*", "moonshot*", "mimo2codex*"], "modelPatterns": ["kimi-k2.6*"],
+      "selectableEfforts": ["none", "high"], "defaultRequestedEffort": "medium", "maximumEffort": "high",
+      "controlKind": "thinking_toggle",
+      "mapping": {"none": "none", "minimal": "none", "low": "high", "medium": "high", "high": "high", "xhigh": "high", "max": "high"},
+      "upstreamValues": {"none": "thinking.disabled", "high": "thinking.enabled"},
+      "sourceUrl": "https://platform.moonshot.cn/docs/guide/use-kimi-k2-thinking-model", "verifiedAt": "2026-07-16"
+    },
+    {
+      "id": "glm-5.2", "name": "GLM-5.2",
+      "providerPatterns": ["glm*", "zai*", "zhipu*", "mimo2codex*"], "modelPatterns": ["glm-5.2*"],
+      "selectableEfforts": ["none", "high", "max"], "defaultRequestedEffort": "medium", "maximumEffort": "max",
+      "controlKind": "reasoning_effort",
+      "mapping": {"none": "none", "minimal": "none", "low": "high", "medium": "high", "high": "high", "xhigh": "max", "max": "max"},
+      "upstreamValues": {"none": "thinking.disabled", "high": "high", "max": "max"},
+      "sourceUrl": "https://docs.bigmodel.cn/api-reference/model-api/chat-completion", "verifiedAt": "2026-07-16"
+    },
+    {
+      "id": "grok-4.5", "name": "Grok 4.5",
+      "providerPatterns": ["xai*", "grok*", "mimo2codex*"], "modelPatterns": ["grok-4.5*"],
+      "selectableEfforts": ["low", "medium", "high"], "defaultRequestedEffort": "medium", "maximumEffort": "high",
+      "controlKind": "reasoning_effort",
+      "mapping": {"none": null, "minimal": "low", "low": "low", "medium": "medium", "high": "high", "xhigh": "high", "max": "high"},
+      "upstreamValues": {"low": "low", "medium": "medium", "high": "high"},
+      "sourceUrl": "https://docs.x.ai/developers/model-capabilities/text/reasoning", "verifiedAt": "2026-07-16"
+    },
+    {
+      "id": "grok-4.20-multi-agent", "name": "Grok 4.20 Multi-Agent",
+      "providerPatterns": ["xai*", "grok*", "mimo2codex*"], "modelPatterns": ["grok-4.20-multi-agent*"],
+      "selectableEfforts": ["low", "medium", "high", "xhigh"], "defaultRequestedEffort": "medium", "maximumEffort": "xhigh",
+      "controlKind": "agent_count",
+      "mapping": {"none": null, "minimal": "low", "low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh", "max": "xhigh"},
+      "upstreamValues": {"low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh"},
+      "sourceUrl": "https://docs.x.ai/developers/model-capabilities/text/reasoning", "verifiedAt": "2026-07-16"
+    },
+    {
+      "id": "grok-4.3", "name": "Grok 4.3",
+      "providerPatterns": ["xai*", "grok*", "mimo2codex*"], "modelPatterns": ["grok-4.3*"],
+      "selectableEfforts": ["none", "low", "medium", "high"], "defaultRequestedEffort": "medium", "maximumEffort": "high",
+      "controlKind": "reasoning_effort",
+      "mapping": {"none": "none", "minimal": "low", "low": "low", "medium": "medium", "high": "high", "xhigh": "high", "max": "high"},
+      "upstreamValues": {"none": "none", "low": "low", "medium": "medium", "high": "high"},
+      "sourceUrl": "https://docs.x.ai/developers/migration/may-15-retirement", "verifiedAt": "2026-07-16"
+    }
+  ]
+}

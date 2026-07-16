@@ -1194,3 +1194,43 @@ GitHub publication verification:
 - Public stable Release `v0.4.0` is neither draft nor prerelease and contains the exact installer, blockmap, `latest.yml`, and checksums assets.
 - Public `latest.yml` reports `0.4.0` and references `Codex-Feishu-Bridge-Setup-0.4.0.exe` with size `169705334` bytes.
 - An anonymous download produced SHA-256 `83F80CF8FFAF73B42BA611CF994D2567D0EF9D2C99EC8F62B5CA5A96F27CEFAD`, exactly matching the published `checksums.txt`; the temporary verification directory was removed afterward.
+
+## 0.4.1 reasoning defaults, model capability registry, and runtime clarity
+
+Requirements confirmed:
+
+- Use `medium` as the default reasoning effort across script-hosted and desktop-managed creation and startup paths without overwriting existing explicit Bot settings.
+- Keep common reasoning choices convenient while allowing every Codex-supported reasoning effort and rejecting unknown values.
+- Maintain an offline model capability pool for current non-GPT families and use the same mapping in the script-hosted Bridge and desktop client.
+- Show the requested effort, effective Codex effort, and upstream meaning without silently rewriting existing Bot configuration.
+- Make the system view distinguish the selected Codex runtime entry executable from its runtime directory and companion executables.
+
+Implementation completed:
+
+- Changed the Bridge final fallback, environment example, and built-in Provider bundles from `max` to `medium`; launcher/watchdog parameters remain empty unless explicitly supplied so an existing Codex config is not masked.
+- Changed the script-hosted `mimo2codex` compatibility patch to preserve an explicit reasoning effort and apply `medium` only when the translated request does not specify one.
+- Added a schema-validated registry for DeepSeek V4, Kimi K2.6/K2.7 Code, GLM-5.2, Grok 4.3/4.5/4.20 Multi-Agent, plus an explicit unverified generic fallback.
+- Replaced generic reasoning inputs with model-aware selects. The UI shows aliases as mappings, for example `medium → high`, and identifies the capability source or the unverified fallback.
+- Added shared Bridge/desktop mapping so slash commands and new Bot/space creation retain the requested value while sending or writing the effective value.
+- Added `/model capability`; `/model` status now reports requested, effective, upstream, source verification, and review status. Known impossible values fail before execution or persistence.
+- Added a 90-day review deadline and a documented update procedure; stale rules warn without taking a working Bot offline.
+- Added runtime-directory and EXE-component inspection and exposed both beside the runtime entry path in the system view.
+
+Verification completed:
+
+- Desktop syntax, unit, and integration checks passed `119/119`.
+- Script-hosted Bridge syntax, static checks, registry validation, and unit tests passed `45/45`; PowerShell parsing separately passed for the launcher, watchdog, and `mimo2codex` proxy launcher.
+- Staged-engine validation loaded the same seven-entry registry, and the packaged Bridge engine smoke was healthy on isolated port `18329`.
+- Isolated visual capture confirmed that workspace creation opens with `medium` in a model-aware select and displays the unverified fallback without overlap.
+- A fresh Windows x64 unpacked build completed; its executable reports `0.4.1.0`, packaged smoke exited `0`, and both `resources\engine\config\model-reasoning-capabilities.json` and the shared loader are present.
+- Isolated system-view capture rendered successfully; runtime-directory and component-count behavior is also covered by a focused filesystem test.
+
+Adversarial review and fixes:
+
+1. Three-month failure: provider semantics change while the offline pool still looks authoritative. Verification advanced the clock beyond the review interval. Fix: every known entry requires an official source and verification date; after 90 days the Bridge and client visibly mark it due for review, and the update SOP requires a registry-version bump and both test suites.
+2. Three-month failure: source behavior is correct but the packaged client omits the registry or uses a divergent copy. Verification staged a fresh engine, ran the registry checker inside it, and started its Bridge on port `18329`. Fix: `stage-engine.cjs` now always copies `config`, while both runtime surfaces load the shared engine module instead of maintaining separate mappings.
+3. Three-month failure: the launcher's default `medium` environment override masks an existing explicit `config.toml` choice, while a newly created client's requested value is visible only in Bot JSON. Verification traced the complete desktop supervisor → PowerShell → Bridge precedence chain. Fix: launchers no longer manufacture an environment override; Bridge applies `medium` only after session, explicit environment, and Codex config values are absent, and the desktop supervisor passes a client-managed Bot's recorded requested value explicitly. Existing Bot files remain untouched.
+
+Completion boundary for this iteration:
+
+- Local implementation and verification are only the first stage. Completion additionally requires `origin/main`, a matching stable GitHub Release, old-device script-hosted source/Bots, current-device script-hosted Bots, and the installed desktop client to be synchronized and independently verified.

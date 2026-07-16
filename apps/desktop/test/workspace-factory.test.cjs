@@ -55,6 +55,9 @@ test("previews one or many Bots sharing one isolated Codex Home", () => {
     assert.equal(new Set(preview.bots.map((bot) => bot.codexHome)).size, 1);
     assert.equal(new Set(preview.bots.map((bot) => bot.workspace)).size, 3);
     assert.equal(previewWorkspaceFactory(input(1), value).bots.length, 1);
+    assert.equal(preview.factory.reasoning, "medium");
+    assert.equal(previewWorkspaceFactory({ ...input(1), reasoning: "minimal" }, value).factory.reasoning, "minimal");
+    assert.throws(() => previewWorkspaceFactory({ ...input(1), reasoning: "super" }, value), /推理强度/);
   } finally { fs.rmSync(value.root, { recursive: true, force: true }); }
 });
 
@@ -69,6 +72,23 @@ test("creates a secret-free persistent queue and selected Provider config", () =
     assert.match(configText, /model_provider = "company"/);
     assert.match(configText, /env_key = "COMPANY_API_KEY"/);
     assert.equal(configText.includes("secret"), false);
+  } finally { fs.rmSync(value.root, { recursive: true, force: true }); }
+});
+
+test("maps workspace reasoning for the selected model and records both values", () => {
+  const value = fixture();
+  try {
+    const state = createWorkspaceFactoryQueue({
+      ...input(1),
+      model: "deepseek-v4-preview",
+      reasoning: "medium",
+    }, value);
+    const configText = fs.readFileSync(path.join(state.factory.codexHome, "config.toml"), "utf8");
+    assert.match(configText, /model_reasoning_effort = "high"/);
+    assert.equal(state.factory.reasoning, "medium");
+    assert.equal(state.factory.reasoningPlan.effectiveEffort, "high");
+    assert.equal(state.factory.providerReference.reasoning, "medium");
+    assert.equal(state.factory.providerReference.effectiveReasoning, "high");
   } finally { fs.rmSync(value.root, { recursive: true, force: true }); }
 });
 

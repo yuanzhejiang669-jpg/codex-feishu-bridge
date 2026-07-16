@@ -90,7 +90,7 @@ function Update-Mimo2CodexFileIfNeeded {
   Write-ProxyLog "mimo2codex patched: $Path"
 }
 
-function Ensure-Mimo2CodexDeepSeekMaxPolicy {
+function Ensure-Mimo2CodexReasoningPolicy {
   $moduleRoot = Join-Path $env:APPDATA "npm\node_modules\mimo2codex"
   $deepseekProvider = Join-Path $moduleRoot "dist\providers\deepseek.js"
   $genericProvider = Join-Path $moduleRoot "dist\providers\generic.js"
@@ -115,8 +115,23 @@ function Ensure-Mimo2CodexDeepSeekMaxPolicy {
     if (chat.thinking?.type === "disabled") {
         delete chat.reasoning_effort;
     }
+    else if (chat.reasoning_effort === undefined) {
+        chat.reasoning_effort = "medium";
+    }
+'@)
+    $text = $text.Replace(@'
+    if (chat.thinking?.type === "disabled") {
+        delete chat.reasoning_effort;
+    }
     else {
         chat.reasoning_effort = "max";
+    }
+'@, @'
+    if (chat.thinking?.type === "disabled") {
+        delete chat.reasoning_effort;
+    }
+    else if (chat.reasoning_effort === undefined) {
+        chat.reasoning_effort = "medium";
     }
 '@)
     return $text
@@ -133,7 +148,24 @@ function Ensure-Mimo2CodexDeepSeekMaxPolicy {
         delete chat.reasoning_effort;
         return chat;
     }
+    if (chat.reasoning_effort === undefined) {
+        chat.reasoning_effort = "medium";
+    }
+'@)
+    $text = $text.Replace(@'
+    if (chat.thinking?.type === "disabled") {
+        delete chat.reasoning_effort;
+        return chat;
+    }
     chat.reasoning_effort = "max";
+'@, @'
+    if (chat.thinking?.type === "disabled") {
+        delete chat.reasoning_effort;
+        return chat;
+    }
+    if (chat.reasoning_effort === undefined) {
+        chat.reasoning_effort = "medium";
+    }
 '@)
     return $text
   }
@@ -261,7 +293,7 @@ Import-UserEnvIfMissing @(
   "XAI_API_KEY"
 )
 
-Ensure-Mimo2CodexDeepSeekMaxPolicy
+Ensure-Mimo2CodexReasoningPolicy
 
 Start-Mimo2CodexProxy `
   -Name "mimo2codex-8788" `

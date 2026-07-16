@@ -7,7 +7,7 @@ param(
   [string]$Sandbox = "danger-full-access",
   [ValidateSet("app-server", "auto", "exec")]
   [string]$RunMode = "app-server",
-  [string]$Reasoning = "max",
+  [string]$Reasoning = "",
   [string]$EventKeys = "im.message.receive_v1",
   [int]$CodexTimeoutSeconds = 0,
   [int]$CodexIdleTimeoutSeconds = 3600,
@@ -364,7 +364,7 @@ Write-Host "Desktop Codex home: $(if ($env:CODEX_FEISHU_DESKTOP_CODEX_HOME) { $e
 Write-Host "Codex CLI: $($env:CODEX_CLI_BIN)"
 Write-Host "Run mode: $($env:CODEX_FEISHU_RUN_MODE)"
 Write-Host "Sandbox: $($env:CODEX_FEISHU_SANDBOX)"
-Write-Host "Reasoning: $($env:CODEX_FEISHU_REASONING)"
+Write-Host "Reasoning: $(if ($env:CODEX_FEISHU_REASONING) { $env:CODEX_FEISHU_REASONING } else { 'Codex config or default medium' })"
 Write-Host "Event keys: $($env:CODEX_FEISHU_EVENT_KEYS)"
 Write-Host "Codex total timeout: $(if ($CodexTimeoutSeconds -gt 0) { "$CodexTimeoutSeconds seconds" } else { 'disabled' })"
 Write-Host "Codex idle timeout: $(if ($CodexIdleTimeoutSeconds -gt 0) { "$CodexIdleTimeoutSeconds seconds" } else { 'disabled' })"

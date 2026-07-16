@@ -5,6 +5,7 @@ const path = require("node:path");
 const test = require("node:test");
 const {
   inspectManagedBots,
+  managedBotStartArguments,
   managedRuntimeRoot,
   processEnvironment,
   setManagedBotAutoStart,
@@ -12,6 +13,13 @@ const {
   stopManagedBot,
   stopManagedBotAndDisableAutoStart,
 } = require("../src/main/services/supervisor.cjs");
+
+test("passes only an explicitly recorded reasoning request to the launcher", () => {
+  const base = { name: "assistant-1", profile: "assistant-1", workspace: "C:\\workspace" };
+  assert.equal(managedBotStartArguments(base, "C:\\codex-home").includes("-Reasoning"), false);
+  const args = managedBotStartArguments({ ...base, provider: { reasoning: "xhigh" } }, "C:\\codex-home");
+  assert.deepEqual(args.slice(-2), ["-Reasoning", "xhigh"]);
+});
 
 function fixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "cfb-desktop-supervisor-test-"));

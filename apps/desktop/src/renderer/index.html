@@ -116,7 +116,7 @@
             <label><span>飞书显示名模板</span><input name="labelPattern" required value="Codex助手{index}-{space}"></label>
             <label><span>全局 Provider</span><select name="providerId" required><option value="">请选择</option></select></label>
             <label><span>模型</span><input name="model" required placeholder="例如 gpt-5.6-sol"></label>
-            <label><span>推理强度</span><select name="reasoning"><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option></select></label>
+            <label><span>推理强度</span><select name="reasoning"><option value="medium">medium</option></select><small id="workspace-reasoning-hint"></small></label>
             <label><span>平台</span><select name="brand"><option value="feishu">飞书</option><option value="lark">Lark</option></select></label>
             <label class="form-wide"><span>共享 Codex Home 目录名</span><input name="codexHomeName" placeholder="默认 codex-space-{slug}"></label>
             <label class="form-wide checkbox-field"><input name="initializeAgents" type="checkbox" checked><span>从全局配置初始化空间 AGENTS.md</span></label>
@@ -314,14 +314,14 @@
         <div id="global-provider-fields" class="form-grid provider-fields">
           <label><span>全局 Provider</span><select id="bot-global-provider" name="globalProviderId" required><option value="">请选择</option></select></label>
           <label><span>模型</span><input id="bot-global-model" name="globalProviderModel" required placeholder="例如 gpt-5.6-sol"></label>
-          <label><span>推理强度</span><select id="bot-global-reasoning" name="globalProviderReasoning"><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option></select></label>
+          <label><span>推理强度</span><select id="bot-global-reasoning" name="globalProviderReasoning"><option value="medium">medium</option></select><small id="bot-global-reasoning-hint"></small></label>
         </div>
         <div id="custom-provider-fields" class="form-grid provider-fields">
           <label><span>Provider 标识</span><input id="provider-id" name="providerId" value="custom" maxlength="64"></label>
           <label><span>模型</span><input id="provider-model" name="providerModel" placeholder="例如 gpt-5.6-sol"></label>
           <label class="form-wide"><span>Base URL</span><input id="provider-base-url" name="providerBaseUrl" type="url" placeholder="https://example.com/v1"></label>
           <label class="form-wide"><span>API Key</span><input id="provider-api-key" name="providerApiKey" type="password" autocomplete="new-password"></label>
-          <label><span>推理强度</span><select id="provider-reasoning" name="providerReasoning"><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option></select></label>
+          <label><span>推理强度</span><select id="provider-reasoning" name="providerReasoning"><option value="medium">medium</option></select><small id="provider-reasoning-hint"></small></label>
           <div class="provider-test-control"><button id="test-provider-button" class="secondary-button" type="button">测试模型 API</button><span id="provider-test-status"></span></div>
         </div>
       </div>

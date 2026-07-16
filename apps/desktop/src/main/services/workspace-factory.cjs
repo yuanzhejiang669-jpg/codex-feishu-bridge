@@ -3,6 +3,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const TOML = require("smol-toml");
 const { readManagedBots } = require("./bot-setup.cjs");
+const { normalizeReasoningEffort, resolveReasoningSelection } = require("./reasoning-effort.cjs");
 
 const SLUG_PATTERN = /^[a-z0-9][a-z0-9-]{0,59}$/;
 const NAME_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,62}[A-Za-z0-9])?$/;
@@ -82,9 +83,12 @@ function normalizeFactory(raw = {}, options = {}) {
   const initializeAgents = raw.initializeAgents === true
     || new Set(["1", "true", "on", "yes"]).has(String(raw.initializeAgents || "").trim().toLowerCase());
   const codexHome = path.resolve(options.codexHomeRoot, codexHomeName);
+  const reasoning = normalizeReasoningEffort(raw.reasoning);
+  const reasoningPlan = resolveReasoningSelection({ provider: providerId, model, effort: reasoning });
   return {
     spaceName, slug, count, baseIndex, namePattern, labelPattern, providerId, model,
-    reasoning: String(raw.reasoning || "medium").trim() || "medium",
+    reasoning,
+    reasoningPlan,
     brand: String(raw.brand || "feishu").trim().toLowerCase(),
     codexHome,
     initializeAgents,
@@ -150,7 +154,7 @@ function createWorkspaceFactoryQueue(raw, options) {
     atomicWrite(configPath, `${TOML.stringify({
       model: preview.factory.model,
       model_provider: preview.factory.providerId,
-      model_reasoning_effort: preview.factory.reasoning,
+      model_reasoning_effort: preview.factory.reasoningPlan.effectiveEffort,
       model_providers: { [preview.factory.providerId]: provider.definition },
     }).trim()}\n`);
     if (preview.factory.initializeAgents) {
@@ -174,6 +178,10 @@ function createWorkspaceFactoryQueue(raw, options) {
           model: preview.factory.model,
           envKey: provider.envKey,
           wireApi: String(provider.definition.wire_api || "responses"),
+          reasoning: preview.factory.reasoning,
+          effectiveReasoning: preview.factory.reasoningPlan.effectiveEffort,
+          upstreamReasoning: preview.factory.reasoningPlan.upstreamValue,
+          reasoningCapability: preview.factory.reasoningPlan.capabilityName,
         },
       },
       sourceProviderConfig: provider.configPath,

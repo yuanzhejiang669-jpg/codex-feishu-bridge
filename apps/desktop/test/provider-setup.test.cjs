@@ -25,6 +25,49 @@ test("normalizes a third-party Responses provider", () => {
   assert.equal(provider.baseUrl, "https://example.test/v1");
   assert.equal(provider.envKey, "CODEX_FEISHU_ASSISTANT_1_API_KEY");
   assert.equal(provider.wireApi, "responses");
+  assert.equal(provider.reasoning, "medium");
+});
+
+test("accepts every supported reasoning effort and rejects unknown values", () => {
+  const base = {
+    mode: "global",
+    id: "example",
+    model: "gpt-test",
+  };
+  for (const reasoning of ["none", "minimal", "low", "medium", "high", "xhigh", "max"]) {
+    assert.equal(normalizeProviderInput({ ...base, reasoning }).reasoning, reasoning);
+  }
+  assert.throws(() => normalizeProviderInput({ ...base, reasoning: "super" }), /推理强度/);
+});
+
+test("writes the effective model effort while retaining the requested effort", () => {
+  const root = tempRoot();
+  try {
+    const transactionRoot = path.join(root, "transaction");
+    const codexHome = path.join(root, "codex-home");
+    fs.mkdirSync(transactionRoot, { recursive: true });
+    const plan = prepareProviderConfiguration({
+      name: "assistant-reasoning",
+      codexHome,
+      codexHomeMode: "isolated",
+    }, {
+      id: "deepseek",
+      baseUrl: "https://example.test/v1",
+      model: "deepseek-v4-preview",
+      apiKey: "plain-secret",
+      reasoning: "medium",
+    }, {
+      transactionRoot,
+      encryptSecret: (value) => Buffer.from(`encrypted:${value.length}`, "utf8"),
+    });
+    plan.commit();
+    const config = TOML.parse(fs.readFileSync(path.join(codexHome, "config.toml"), "utf8"));
+    assert.equal(config.model_reasoning_effort, "high");
+    assert.equal(plan.publicConfig.reasoning, "medium");
+    assert.equal(plan.publicConfig.effectiveReasoning, "high");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("stages an encrypted secret and commits only public Provider config", () => {
