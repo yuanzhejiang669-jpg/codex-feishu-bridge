@@ -1265,4 +1265,14 @@ Adversarial review and fixes:
 
 Completion boundary:
 
-- GitHub publication, old-device synchronization, current-device idle Bot restarts, installed-client upgrade, and managed-Bot recovery remain required before this iteration is complete.
+- Completed end-to-end delivery on 2026-07-16.
+
+Delivery verification:
+
+- Commit `f85c8347e2335ce808d68666d6dc650eac072be3` was pushed to `origin/main` and tagged `v0.4.2`.
+- GitHub Actions run `29504630915` passed clean dependency installation, `119/119` desktop tests, Windows packaging, release verification, and publication.
+- Stable Release `v0.4.2` is public, neither draft nor prerelease, and contains the installer, blockmap, `latest.yml`, and checksums. The downloaded installer SHA-256 is `F8E6B986D8606F4F04B3250FBD709BB66858061D07A442188C4F6C33A16E22A8`, matching the published checksum.
+- The old device fast-forwarded to `f85c834`, preserved its unrelated Browser Control script modification, passed `47/47`, and restarted all 17 idle script-managed Bots. One Bot's first PID verification raced its startup; a focused retry confirmed PID `16752` alive.
+- The current device restarted all 13 idle script-managed Bots. The active conversation Bot was intentionally deferred until it remains idle for 15 seconds; a guarded helper records its post-turn result under the instance state directory.
+- The installed client upgraded from `0.4.1` to `0.4.2.0`; all three managed Bots restarted with new PIDs and remained stable for 61 seconds.
+- The installed Bridge entry is byte-identical to source. The installed shared formatter differs only by CRLF line endings, normalizes byte-for-byte to the source text, and the installed Node runtime prints the expected seven-line DeepSeek map.
