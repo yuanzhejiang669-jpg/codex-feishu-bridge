@@ -1276,3 +1276,30 @@ Delivery verification:
 - The current device restarted all 13 idle script-managed Bots. The active conversation Bot was intentionally deferred until it remains idle for 15 seconds; a guarded helper records its post-turn result under the instance state directory.
 - The installed client upgraded from `0.4.1` to `0.4.2.0`; all three managed Bots restarted with new PIDs and remained stable for 61 seconds.
 - The installed Bridge entry is byte-identical to source. The installed shared formatter differs only by CRLF line endings, normalizes byte-for-byte to the source text, and the installed Node runtime prints the expected seven-line DeepSeek map.
+
+## 0.4.3 watchdog empty-reasoning compatibility
+
+Discovery:
+
+- The post-release old-device Doctor showed all 17 script-managed Bots offline even though direct SSH-launched processes initially had live PIDs.
+- Direct launches died with the SSH session, and persistent scheduled watchdog tasks then failed every restart with `MissingArgument,start-codex-feishu-bridge.ps1` because they passed a bare `-Reasoning` when the configured value was empty.
+
+Fix:
+
+- Removed unconditional `-Reasoning`, empty-value emission from the watchdog start argument list.
+- Added `-Reasoning <value>` only when the watchdog input is non-empty, preserving the intended precedence introduced in `0.4.1`.
+- Added a source-contract regression test. A real stub launch confirms the empty case does not bind `Reasoning` while retaining all other startup arguments.
+
+Completion boundary:
+
+- Root checks pass `48/48`, desktop checks pass `119/119`, watchdog PowerShell parsing passes, and Windows x64 packaging/proxy/release verification pass for `0.4.3`.
+
+Adversarial review and fixes:
+
+1. Three-month failure: the default reasoning remains empty by design, but a watchdog builds a positional native command containing a bare `-Reasoning`. A real old-device scheduled-task restart reproduced `MissingArgument`. Fix: append the option/value pair only when non-empty; a source-contract test and real stub launch verify the bound parameter is absent for the empty case.
+2. Three-month failure: remote synchronization reports live PIDs even though SSH-owned child processes die as soon as the session closes. The post-sync Doctor reproduced `17/17` offline. Fix/verification rule: old-device recovery must run through its persistent scheduled watchdog tasks and pass a later Doctor; transient SSH PID checks are not accepted as completion evidence.
+3. Three-month failure: a local clean install uses `npm ci --ignore-scripts`, leaving the packaged Node dependency without `node.exe`; tests pass but proxy packaging fails. The protocol-proxy smoke reproduced the missing runtime. Fix/guard: standard `npm ci` restores the binary, and `dist:win` must pass proxy smoke before producing or publishing an installer.
+
+Completion boundary:
+
+- Commit/tag publication, persistent old-device recovery, current-device verification, and installed-client upgrade remain required.

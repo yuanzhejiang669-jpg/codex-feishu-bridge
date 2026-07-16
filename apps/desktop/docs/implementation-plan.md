@@ -378,6 +378,8 @@ This list is the durable parity checklist against the existing local control pan
 
 `0.4.2 Complete reasoning-map visibility` acceptance: `/model capability` lists every canonical request value in the stable `request -> Codex -> upstream` order, marks the current request, and visibly labels unsupported model-specific values without changing execution or persistence behavior. `/model effort` without a value renders the same current Provider/model-specific map and a concrete switching example instead of a fixed seven-value usage string. The script-hosted Bridge and packaged desktop engine use the same shared formatter and registry.
 
+`0.4.3 Empty-reasoning watchdog compatibility` acceptance: a watchdog restart omits `-Reasoning` when the configured value is empty so the Bridge can fall back to session, environment, `config.toml`, or `medium`; an explicit reasoning value is still forwarded unchanged. Script-managed Bots must remain persistently online after remote synchronization through their existing scheduled watchdog tasks.
+
 ## 8. Verification strategy
 
 Every phase records:

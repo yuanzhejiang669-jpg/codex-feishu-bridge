@@ -25,6 +25,12 @@ import {
 } from "../src/runtime/run-activity.mjs";
 import { recordsMatchColumns } from "../src/utils/json.mjs";
 
+test("watchdog omits an empty reasoning argument and preserves explicit values", () => {
+  const script = fs.readFileSync(new URL("../watch-codex-feishu-bridge.ps1", import.meta.url), "utf8");
+  assert.doesNotMatch(script, /"-Reasoning",\s*\r?\n\s*\$Reasoning,/);
+  assert.match(script, /if \(\$Reasoning\.Trim\(\)\) \{ \$startArgs \+= @\("-Reasoning", \$Reasoning\.Trim\(\)\) \}/);
+});
+
 test("active run state preserves the previous JSON when an atomic write fails", (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-feishu-state-"));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));

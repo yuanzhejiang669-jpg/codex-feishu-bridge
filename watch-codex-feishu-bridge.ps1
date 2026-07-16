@@ -382,8 +382,6 @@ function Restart-Bridge {
       $Sandbox,
       "-RunMode",
       $RunMode,
-      "-Reasoning",
-      $Reasoning,
       "-EventKeys",
       $EventKeys,
       "-CodexTimeoutSeconds",
@@ -393,6 +391,7 @@ function Restart-Bridge {
       "-ListLimit",
       $ListLimit
     )
+    if ($Reasoning.Trim()) { $startArgs += @("-Reasoning", $Reasoning.Trim()) }
     if ($safeName) { $startArgs += @("-Name", $safeName) }
     if ($LarkProfile.Trim()) { $startArgs += @("-LarkProfile", $LarkProfile.Trim()) }
     if ($Workspace.Trim()) { $startArgs += @("-Workspace", $Workspace) }
