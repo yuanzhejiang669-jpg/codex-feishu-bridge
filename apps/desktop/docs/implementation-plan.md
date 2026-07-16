@@ -380,6 +380,8 @@ This list is the durable parity checklist against the existing local control pan
 
 `0.4.3 Empty-reasoning watchdog compatibility` acceptance: a watchdog restart omits `-Reasoning` when the configured value is empty so the Bridge can fall back to session, environment, `config.toml`, or `medium`; an explicit reasoning value is still forwarded unchanged. Script-managed Bots must remain persistently online after remote synchronization through their existing scheduled watchdog tasks.
 
+`0.4.3` delivery is complete: the source checkout, public GitHub Release, old-device script-managed deployment, current-device script-managed deployment, and installed Windows client are synchronized to the same fix. Persistent scheduled-task recovery, installed-client recovery, and the downloaded public installer checksum were independently verified.
+
 ## 8. Verification strategy
 
 Every phase records:

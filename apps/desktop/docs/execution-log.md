@@ -1302,4 +1302,13 @@ Adversarial review and fixes:
 
 Completion boundary:
 
-- Commit/tag publication, persistent old-device recovery, current-device verification, and installed-client upgrade remain required.
+- Completed end-to-end delivery on 2026-07-16.
+
+Delivery verification:
+
+- Commit `01b7c15e3b365f74b75e3292712e0c87b2c126cb` was pushed to `origin/main` and tagged `v0.4.3`.
+- GitHub Actions run `29507408049` passed the clean Windows build, root `48/48` checks, desktop `119/119` checks, packaging verification, and stable Release publication.
+- The public `v0.4.3` installer is `169711789` bytes. A fresh download produced SHA-256 `E6473A97413CC0A9105F4A66BF85F9FD6BDAB5AE837FE6E68334E875BD11649C`, exactly matching the published checksum.
+- The old device fast-forwarded to `01b7c15`, preserved its unrelated Browser Control script modification, and recovered all `17/17` script-managed Bots through persistent scheduled watchdog tasks. A later Doctor reported `113` checks, `96` OK, `17` warnings, `0` bad, no active runs, and both managed proxies online.
+- The current device source and `origin/main` both resolve to `01b7c15`. All idle script-managed Bots were restarted; the active conversation Bot uses a guarded post-turn helper so synchronization never interrupts its task.
+- The installed Windows client upgraded in place from `0.4.2` to `0.4.3.0`. Its three managed Bots restarted with new PIDs and recovered online; the installed engine contains the conditional empty-`Reasoning` forwarding fix.
