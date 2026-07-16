@@ -159,7 +159,7 @@
           <p id="provider-catalog-error" class="readiness-summary hidden"></p>
           <div class="table-wrap">
             <table class="provider-table">
-              <thead><tr><th>Provider</th><th>Base URL</th><th>接口</th><th>环境变量</th><th>Key</th></tr></thead>
+              <thead><tr><th>Provider</th><th>Base URL</th><th>接口</th><th>环境变量</th><th>Key</th><th>操作</th></tr></thead>
               <tbody id="provider-catalog-body"></tbody>
             </table>
           </div>
@@ -224,11 +224,17 @@
         <section id="migration-preview" class="migration-preview hidden"></section>
         <div class="two-column">
           <section class="content-section">
-            <div class="section-heading"><h2>MCP</h2><span id="mcp-count" class="section-meta"></span></div>
+            <div class="section-heading">
+              <h2>MCP</h2>
+              <div class="selection-tools"><span id="mcp-count" class="section-meta"></span><button id="select-all-mcp" class="link-button" type="button">全选</button><button id="clear-all-mcp" class="link-button" type="button">清空选择</button></div>
+            </div>
             <div id="mcp-list" class="capability-list"></div>
           </section>
           <section class="content-section">
-            <div class="section-heading"><h2>Skills</h2><span id="skill-count" class="section-meta"></span></div>
+            <div class="section-heading">
+              <h2>Skills</h2>
+              <div class="selection-tools"><span id="skill-count" class="section-meta"></span><button id="select-all-skills" class="link-button" type="button">全选</button><button id="clear-all-skills" class="link-button" type="button">清空选择</button></div>
+            </div>
             <div id="skill-list" class="capability-list"></div>
           </section>
         </div>
@@ -351,6 +357,23 @@
       <div class="dialog-actions">
         <button id="cancel-removal-button" class="secondary-button" type="button">取消</button>
         <button id="apply-removal-button" class="danger-button" type="submit">确认删除</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="provider-removal-dialog" class="bot-dialog removal-dialog">
+    <form id="provider-removal-form" method="dialog">
+      <div class="dialog-heading">
+        <div><h2 id="provider-removal-title">删除 Provider</h2><span>先核对 Bot、空间、代理和环境变量影响</span></div>
+        <button id="close-provider-removal-dialog" class="icon-button" type="button" aria-label="关闭" title="关闭">×</button>
+      </div>
+      <div id="provider-removal-error" class="error-band hidden" role="alert"></div>
+      <div id="provider-removal-impact" class="removal-impact"></div>
+      <label class="checkbox-field"><input id="provider-removal-spaces" type="checkbox"><span>同时从客户端管理的隔离空间删除该 Provider 定义</span></label>
+      <label class="checkbox-field"><input id="provider-removal-key" type="checkbox"><span id="provider-removal-key-label">同时删除对应的 Windows 用户环境变量</span></label>
+      <label class="checkbox-field"><input id="provider-removal-confirm" type="checkbox" required><span>我已核对影响范围并确认删除</span></label>
+      <div class="dialog-actions">
+        <button id="cancel-provider-removal" class="secondary-button" type="button">取消</button>
+        <button id="apply-provider-removal" class="danger-button" type="submit">确认删除</button>
       </div>
     </form>
   </dialog>

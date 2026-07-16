@@ -52,6 +52,21 @@ test("decorates only client-managed proxy Providers", () => {
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+test("prepares managed proxy removal without changing the registry before commit", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cfb-proxy-"));
+  try {
+    fs.mkdirSync(path.join(root, "protocol-proxy"), { recursive: true });
+    fs.writeFileSync(path.join(root, "protocol-proxy", "registry.json"), JSON.stringify({
+      port: 18788,
+      providers: [{ id: "qwen", envKey: "QWEN_API_KEY", defaultModel: "qwen-test" }],
+    }));
+    const service = createProtocolProxyService({ dataRoot: root, nodePath: "", proxyCliPath: "" });
+    assert.ok(service.prepareProviderRemoval("qwen"));
+    assert.equal(service.prepareProviderRemoval("missing"), null);
+    assert.deepEqual(readRegistry(root).providers.map((provider) => provider.id), ["qwen"]);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test("selects another managed port when the default is occupied", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "cfb-proxy-"));
   const blocker = net.createServer();

@@ -91,6 +91,50 @@ function providerBlock(provider) {
   ].join("\n");
 }
 
+function providerTablePaths(id) {
+  return [
+    `model_providers.${id}`,
+    `model_providers.${JSON.stringify(id)}`,
+    `model_providers.'${String(id).replaceAll("'", "''")}'`,
+  ];
+}
+
+function removeTopLevelAssignment(lines, name) {
+  let insideTable = false;
+  return lines.filter((line) => {
+    if (/^\s*\[/.test(line)) insideTable = true;
+    return insideTable || !new RegExp(`^\\s*${name}\\s*=`).test(line);
+  });
+}
+
+function removeProviderDefinition(text, id, clearSelection = false) {
+  const paths = providerTablePaths(id);
+  const lines = String(text || "").replace(/^\uFEFF/, "").split(/\r?\n/);
+  let start = -1;
+  let end = lines.length;
+  for (let index = 0; index < lines.length; index += 1) {
+    const match = lines[index].match(/^\s*\[([^\]]+)\]\s*(?:#.*)?$/);
+    if (!match) continue;
+    const tablePath = match[1].trim();
+    if (start < 0 && paths.includes(tablePath)) {
+      start = index;
+      continue;
+    }
+    if (start >= 0 && !paths.some((item) => tablePath === item || tablePath.startsWith(`${item}.`))) {
+      end = index;
+      break;
+    }
+  }
+  if (start < 0) throw new Error(`无法安全定位 Provider 配置段：${id}`);
+  let next = [...lines.slice(0, start), ...lines.slice(end)];
+  while (start > 0 && next[start - 1] === "" && next[start] === "") next.splice(start, 1);
+  if (clearSelection) {
+    next = removeTopLevelAssignment(next, "model_provider");
+    next = removeTopLevelAssignment(next, "model");
+  }
+  return `${next.join("\n").trimEnd()}\n`;
+}
+
 function writeTextAtomic(destination, text) {
   const temporary = `${destination}.${crypto.randomUUID()}.tmp`;
   const backup = `${destination}.${crypto.randomUUID()}.bak`;
@@ -263,6 +307,155 @@ async function replaceGlobalProviderKey(raw, options) {
   return { provider: { ...provider, credentialAvailable: true }, modelCount: models.models.length, probe };
 }
 
+function uniqueManagedHomes(dataRoot) {
+  const homes = new Map();
+  for (const bot of readManagedBots(dataRoot).filter((item) => item.codexHomeMode === "isolated" && item.codexHome)) {
+    const resolved = path.resolve(bot.codexHome);
+    const key = resolved.toLowerCase();
+    if (!homes.has(key)) homes.set(key, { codexHome: resolved, bots: [] });
+    homes.get(key).bots.push(bot);
+  }
+  return [...homes.values()];
+}
+
+function previewGlobalProviderRemoval(raw, options) {
+  const id = String(raw?.id || raw || "").trim();
+  const rawCatalog = inspectProviderCatalog(options.codexHome);
+  if (rawCatalog.error) throw new Error(rawCatalog.error);
+  const catalog = options.decorateProviderCatalog?.(rawCatalog) || rawCatalog;
+  const provider = catalog.providers.find((item) => item.id === id);
+  if (!provider) throw new Error(`找不到 Provider：${id}`);
+  const managedBots = readManagedBots(options.dataRoot);
+  const homes = uniqueManagedHomes(options.dataRoot).map((home) => {
+    const configPath = configPathFor(home.codexHome);
+    const read = readConfig(configPath);
+    const definitions = read.config.model_providers && typeof read.config.model_providers === "object"
+      ? read.config.model_providers
+      : {};
+    return {
+      ...home,
+      configPath,
+      containsProvider: Object.hasOwn(definitions, id),
+      selected: String(read.config.model_provider || "") === id,
+      envReferences: Object.entries(definitions)
+        .filter(([providerId, definition]) => providerId !== id && String(definition?.env_key || "") === provider.envKey)
+        .map(([providerId]) => providerId),
+    };
+  });
+  const otherGlobalReferences = catalog.providers
+    .filter((item) => item.id !== id && item.envKey && item.envKey === provider.envKey)
+    .map((item) => item.id);
+  const otherEnvironmentReferences = [...new Set([
+    ...otherGlobalReferences,
+    ...homes.flatMap((home) => home.envReferences),
+  ])];
+  const referencedBotNames = new Set([
+    ...managedBots.filter((bot) => String(bot.provider?.id || "") === id).map((bot) => bot.name),
+    ...managedBots.filter((bot) => (
+      provider.selected === true
+      && bot.codexHomeMode === "shared"
+      && path.resolve(bot.codexHome || options.codexHome).toLowerCase() === path.resolve(options.codexHome).toLowerCase()
+      && (String(bot.provider?.mode || "current") === "current" || !bot.provider?.id)
+    )).map((bot) => bot.name),
+    ...homes.filter((home) => home.selected).flatMap((home) => home.bots.map((bot) => bot.name)),
+  ]);
+  const referencedBots = managedBots.filter((bot) => referencedBotNames.has(bot.name));
+  return {
+    id,
+    provider,
+    configPath: rawCatalog.configPath,
+    selected: provider.selected === true,
+    managedProxy: provider.managedProxy === true,
+    referencedBots: referencedBots.map((bot) => ({ name: bot.name, label: bot.label || bot.name, codexHome: bot.codexHome })),
+    managedSpaces: homes.filter((home) => home.containsProvider).map((home) => ({
+      codexHome: home.codexHome,
+      configPath: home.configPath,
+      selected: home.selected,
+      bots: home.bots.map((bot) => bot.name),
+    })),
+    envKey: provider.envKey,
+    otherEnvironmentReferences,
+    canDeleteApiKey: Boolean(provider.envKey) && otherEnvironmentReferences.length === 0,
+    blockers: referencedBots.length
+      ? [`仍有 ${referencedBots.length} 个客户端 Bot 引用该 Provider，请先迁移或删除这些 Bot`]
+      : [],
+    defaults: {
+      removeFromManagedSpaces: true,
+      deleteApiKey: Boolean(provider.envKey) && otherEnvironmentReferences.length === 0,
+    },
+  };
+}
+
+async function applyGlobalProviderRemoval(raw, options) {
+  const preview = previewGlobalProviderRemoval(raw, options);
+  if (preview.blockers.length) throw new Error(preview.blockers.join("；"));
+  const removeFromManagedSpaces = raw?.removeFromManagedSpaces !== false;
+  const deleteApiKey = raw?.deleteApiKey === true;
+  if (deleteApiKey && !preview.canDeleteApiKey) {
+    throw new Error(`环境变量 ${preview.envKey} 仍被其他 Provider 引用：${preview.otherEnvironmentReferences.join("、")}`);
+  }
+  if (deleteApiKey && !removeFromManagedSpaces && preview.managedSpaces.length) {
+    throw new Error("保留隔离空间 Provider 时不能删除对应 API Key");
+  }
+
+  const writeConfig = options.writeTextAtomic || writeTextAtomic;
+  const source = readConfig(preview.configPath);
+  const writes = [{
+    path: preview.configPath,
+    original: source.text,
+    next: removeProviderDefinition(source.text, preview.id, preview.selected),
+  }];
+  if (removeFromManagedSpaces) {
+    for (const space of preview.managedSpaces) {
+      const target = readConfig(space.configPath);
+      writes.push({
+        path: space.configPath,
+        original: target.text,
+        next: removeProviderDefinition(target.text, preview.id, space.selected),
+      });
+    }
+  }
+  const proxyTransaction = preview.managedProxy
+    ? options.prepareProtocolProxyRemoval?.(preview.id)
+    : null;
+  if (preview.managedProxy && !proxyTransaction) throw new Error("托管协议代理删除事务不可用");
+  const readUserEnv = options.readUserEnvironmentVariable || readUserEnvironmentVariable;
+  const setUserEnv = options.setUserEnvironmentVariable || setUserEnvironmentVariable;
+  const previousKey = deleteApiKey ? await readUserEnv(preview.envKey) : "";
+  const completed = [];
+  let proxyCommitted = false;
+  let keyDeleted = false;
+  try {
+    for (const item of writes) {
+      writeConfig(item.path, item.next);
+      completed.push(item);
+    }
+    await proxyTransaction?.commit();
+    proxyCommitted = Boolean(proxyTransaction);
+    if (deleteApiKey) {
+      await setUserEnv(preview.envKey, null);
+      keyDeleted = true;
+    }
+  } catch (error) {
+    const rollbackErrors = [];
+    if (keyDeleted) await setUserEnv(preview.envKey, previousKey || null).catch((rollback) => rollbackErrors.push(rollback.message));
+    if (proxyCommitted) await proxyTransaction.rollback().catch((rollback) => rollbackErrors.push(rollback.message));
+    for (const item of completed.reverse()) {
+      try { writeConfig(item.path, item.original); } catch (rollback) { rollbackErrors.push(`${item.path}: ${rollback.message}`); }
+    }
+    throw new Error(`Provider 删除失败：${error.message}${rollbackErrors.length ? `；回滚失败：${rollbackErrors.join("；")}` : "；已回滚"}`);
+  }
+  return {
+    ok: true,
+    id: preview.id,
+    removedFromManagedSpaces: removeFromManagedSpaces ? preview.managedSpaces.length : 0,
+    apiKeyDeleted: deleteApiKey,
+    envKey: preview.envKey,
+    proxyRemoved: preview.managedProxy,
+    selectionCleared: preview.selected,
+  };
+}
+
 function hasInlineSecret(value) {
   if (!value || typeof value !== "object") return false;
   return Object.entries(value).some(([key, nested]) => (
@@ -346,11 +539,14 @@ function providerSyncPlan(options, apply = false) {
 
 module.exports = {
   addGlobalProvider,
+  applyGlobalProviderRemoval,
   inspectProviderCatalog,
   listProviderModels,
   normalizeDefinition,
   probeProvider,
+  previewGlobalProviderRemoval,
   providerSyncPlan,
   readUserEnvironmentVariable,
+  removeProviderDefinition,
   replaceGlobalProviderKey,
 };

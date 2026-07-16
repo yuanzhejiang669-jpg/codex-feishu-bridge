@@ -3,7 +3,7 @@ const fs = require("node:fs");
 const http = require("node:http");
 const os = require("node:os");
 const path = require("node:path");
-const { createProtocolProxyService } = require("../src/main/services/protocol-proxy.cjs");
+const { createProtocolProxyService, readRegistry } = require("../src/main/services/protocol-proxy.cjs");
 
 function listen(server) {
   return new Promise((resolve, reject) => {
@@ -89,6 +89,11 @@ async function main() {
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
     assert.equal(recovered, true, "managed proxy did not recover after an unexpected exit");
+    const removal = service.prepareProviderRemoval("smoke");
+    assert.ok(removal, "managed proxy removal transaction is missing");
+    await removal.commit();
+    assert.deepEqual(readRegistry(root).providers, []);
+    assert.equal(service.snapshot().status, "unused");
     process.stdout.write(`protocol proxy smoke passed on 127.0.0.1:${proxyPort}\n`);
   } finally {
     await service.stop().catch(() => {});

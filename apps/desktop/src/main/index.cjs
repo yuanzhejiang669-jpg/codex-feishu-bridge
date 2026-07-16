@@ -26,9 +26,11 @@ const { applyCapabilityMigration, previewCapabilityMigration } = require("./serv
 const { inspectProvider, testProvider } = require("./services/provider-setup.cjs");
 const {
   addGlobalProvider,
+  applyGlobalProviderRemoval,
   inspectProviderCatalog,
   listProviderModels,
   probeProvider,
+  previewGlobalProviderRemoval,
   providerSyncPlan,
   readUserEnvironmentVariable,
   replaceGlobalProviderKey,
@@ -60,6 +62,7 @@ const capturePath = process.env.CFB_DESKTOP_CAPTURE_PATH || "";
 const captureSetup = process.env.CFB_DESKTOP_CAPTURE_SETUP === "1";
 const captureView = String(process.env.CFB_DESKTOP_CAPTURE_VIEW || "").trim();
 const captureReadiness = process.env.CFB_DESKTOP_CAPTURE_READINESS === "1";
+const captureProviderRemoval = process.env.CFB_DESKTOP_CAPTURE_PROVIDER_REMOVAL === "1";
 const captureDataRoot = capturePath
   ? String(process.env.CFB_DESKTOP_CAPTURE_DATA_ROOT || "").trim()
   : "";
@@ -165,6 +168,7 @@ function providerManagerOptions() {
     dataRoot: managedDataRoot(),
     timeoutMs: 30_000,
     prepareProtocolProxyProvider: (provider, model) => protocolProxyService?.prepareProvider(provider, model),
+    prepareProtocolProxyRemoval: (id) => protocolProxyService?.prepareProviderRemoval(id),
     restartProtocolProxy: () => protocolProxyService?.restart(),
     decorateProviderCatalog: (catalog) => protocolProxyService?.decorateCatalog(catalog) || catalog,
   };
@@ -396,6 +400,10 @@ function createWindow() {
             await mainWindow.webContents.executeJavaScript('document.querySelector(".managed-bot-readiness")?.click();');
             await new Promise((resolve) => setTimeout(resolve, 1500));
           }
+          if (captureProviderRemoval) {
+            await mainWindow.webContents.executeJavaScript('document.querySelector(".provider-remove")?.click();');
+            await new Promise((resolve) => setTimeout(resolve, 800));
+          }
           const image = await mainWindow.webContents.capturePage();
           fs.mkdirSync(path.dirname(capturePath), { recursive: true });
           fs.writeFileSync(capturePath, image.toPNG());
@@ -558,6 +566,15 @@ if (!singleInstance) {
     ipcMain.handle("desktop:replace-global-provider-key", async (_event, input) => {
       assertStartupReady();
       const result = await replaceGlobalProviderKey(input, providerManagerOptions());
+      await loadState();
+      return result;
+    });
+    ipcMain.handle("desktop:preview-global-provider-removal", (_event, input) => (
+      previewGlobalProviderRemoval(input, providerManagerOptions())
+    ));
+    ipcMain.handle("desktop:apply-global-provider-removal", async (_event, input) => {
+      assertStartupReady();
+      const result = await applyGlobalProviderRemoval(input, providerManagerOptions());
       await loadState();
       return result;
     });

@@ -18,6 +18,8 @@ contextBridge.exposeInMainWorld("bridgeDesktop", Object.freeze({
   probeProvider: (value) => ipcRenderer.invoke("desktop:probe-provider", value),
   addGlobalProvider: (value) => ipcRenderer.invoke("desktop:add-global-provider", value),
   replaceGlobalProviderKey: (value) => ipcRenderer.invoke("desktop:replace-global-provider-key", value),
+  previewGlobalProviderRemoval: (value) => ipcRenderer.invoke("desktop:preview-global-provider-removal", value),
+  applyGlobalProviderRemoval: (value) => ipcRenderer.invoke("desktop:apply-global-provider-removal", value),
   previewProviderSync: () => ipcRenderer.invoke("desktop:preview-provider-sync"),
   applyProviderSync: () => ipcRenderer.invoke("desktop:apply-provider-sync"),
   startBot: (name) => ipcRenderer.invoke("desktop:start-bot", name),

@@ -1142,3 +1142,47 @@ GitHub publication verification:
 - Public stable Release `v0.3.0` is neither draft nor prerelease and contains the exact installer, blockmap, `latest.yml`, and checksums assets.
 - Public `latest.yml` reports `0.3.0` and references the exact GitHub asset `Codex-Feishu-Bridge-Setup-0.3.0.exe` with size `169702315` bytes.
 - An anonymous download of the published installer produced SHA-256 `FAF298B3E04FDD5AFF6D08768F55123E773AF9189A0CE7311E07D1743F50F97D`, exactly matching the published `checksums.txt`; the temporary verification directory was removed afterward.
+
+## Node 23 - Provider removal and capability batch selection
+
+Date: 2026-07-16
+
+Status: completed and verified locally; GitHub Release verification follows the tag workflow
+
+Confirmed requirements:
+
+- Complete the Provider lifecycle with deletion of its definition and optional deletion of its Windows user API-key environment variable.
+- Show the actual impact before deletion and refuse to break any client-managed Bot that still references the Provider.
+- Remove synchronized definitions from client-managed isolated Codex Homes without touching MCP, Skills, unrelated TOML sections, legacy Bots, or script-hosted Bridge files.
+- Add independent select-all and clear-selection commands for the MCP and Skills lists, with visible selected counts.
+
+Implementation completed:
+
+- Added Provider deletion preview and apply IPC contracts, a dedicated confirmation dialog, per-row delete actions, shared-environment-variable detection, managed-Bot reference blocking, and optional managed-space/API-key cleanup.
+- Added a transactional proxy-registry removal contract. Removing the last managed Chat Provider writes an empty secret-free route file and stops `mimo2codex`.
+- Added section-preserving TOML deletion for plain and quoted Provider IDs, including nested Provider tables, while retaining adjacent comments and MCP configuration.
+- Added MCP and Skills selected/eligible counts with independent select-all and clear-selection controls. MCP entries with unavailable commands or entry paths remain disabled.
+- Added a development-only read-only Provider-removal capture mode; it opens the impact dialog but never submits deletion.
+
+Verification completed so far:
+
+- Desktop syntax/unit/integration suite passed `111/111`; existing script-hosted Bridge syntax/static/unit tests passed `41/41` without modifying its source.
+- Real local proxy smoke translated Responses to Chat Completions, recovered from a killed process, removed its final route, stopped, and reported `unused`.
+- `out/visual-v040-capabilities.png`, `out/visual-v040-providers.png`, and `out/visual-v040-provider-removal.png` passed visual inspection after correcting danger-link color, checkbox layout, and confirmation-button state.
+- Final packaged desktop smoke passed; packaged Bridge engine was healthy on isolated port `18329`; packaged Node and `mimo2codex` passed translation, crash recovery, final-route deletion, and shutdown smoke.
+- Release verification confirmed client/installer/update metadata version `0.4.0`, pinned `mimo2codex 0.5.28`, its non-empty MIT license, and the expected engine/tools/proxy payload.
+- High-confidence source scan found no API keys, app secrets, or access tokens.
+
+Adversarial review and fixes:
+
+1. Three-month failure: a shared Bot records `provider.mode = current` instead of a concrete Provider ID, so deleting the selected global Provider silently breaks that Bot. Validation changed the regression fixture to the real shared-current shape. Fix: selected-global deletion now treats every matching shared-current Bot as a blocking reference.
+2. Three-month failure: the second managed-space write fails after the global Provider block was removed, leaving configuration split across locations. Validation injects a disk failure on the second write. Fix: every completed write is rolled back in reverse order; the test confirms global and isolated files remain byte-identical to their originals.
+3. Three-month failure: an API key is shared or the last Chat Provider route is removed only from TOML while a stale proxy route/process survives. Validation covers shared environment references and performs real final-route removal against bundled `mimo2codex`. Fix: shared keys cannot be selected for deletion, and proxy removal atomically writes the reduced registry/providers file, restarts remaining routes, or stops when empty.
+
+Final local release artifact before GitHub publication:
+
+```text
+apps/desktop/out/Codex-Feishu-Bridge-Setup-0.4.0.exe
+Size: 169705016 bytes
+SHA-256: A1C3EB0B86CA5D099192E5B3EAF337473C1D07D13E965F80E8CA62C69C58A672
+```

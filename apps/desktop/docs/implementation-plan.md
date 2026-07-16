@@ -347,6 +347,11 @@ This list is the durable parity checklist against the existing local control pan
 88. [x] Preview and remove one isolated space together with all affected managed Bots.
 89. [x] Never delete shared/global Codex Home data or Feishu cloud applications implicitly.
 90. [x] Block a Release when the pinned protocol proxy or its MIT license is missing from the packaged client.
+91. [x] Preview and remove one global Provider definition from global and client-managed isolated configuration files.
+92. [x] Delete a Provider API Key only when no retained Provider or isolated space references the same environment variable.
+93. [x] Remove a client-managed Chat Provider from the proxy registry and stop the proxy when no managed routes remain.
+94. [x] Add independent select-all, clear-selection, and selected-count controls for MCP and Skills migration.
+95. [x] Preserve unrelated TOML sections and comments during Provider removal and block deletion while a managed Bot still depends on it.
 
 `0.1.6 Provider center` acceptance: items 26-35 are implemented; API keys never enter TOML, renderer state, IPC results, or logs; synchronization is previewable and transactional; only client-managed isolated Codex Homes are eligible; existing Bridge processes and legacy Bot files remain unchanged.
 
@@ -361,6 +366,8 @@ This list is the durable parity checklist against the existing local control pan
 `0.2.0 GitHub distribution and updates` acceptance: a matching `v*` tag builds and tests the Windows x64 client on a clean GitHub runner and publishes the installer, blockmap, `latest.yml`, and checksums to a public stable Release; packaged clients display current/latest versions and download progress; installation is refused while any client-managed Bot has an active task; online managed Bots are stopped transactionally and restored after relaunch; legacy/script-managed Bots and persistent client data remain untouched. The release is explicitly described as unsigned until Authenticode signing is configured.
 
 `0.3.0 Provider translation and managed removal` acceptance: the Provider center can validate and save either native Responses endpoints or OpenAI-compatible Chat Completions endpoints; Chat endpoints are routed through the pinned MIT-licensed `mimo2codex` runtime bundled and supervised by the desktop client, without storing API keys in TOML, proxy JSON, renderer state, IPC results, or logs. Bot and isolated-space removal always previews affected processes and paths, refuses active tasks, preserves user workspaces by default, never touches legacy Bots or Feishu cloud applications, and requires explicit confirmation before deleting client-owned runtime or isolated Codex Home data.
+
+`0.4.0 Provider removal and capability selection` acceptance: Provider deletion shows global configuration, managed-space, Bot, proxy, and environment-variable impact before confirmation; it refuses to break any client-managed Bot, preserves unrelated TOML content, removes managed proxy routes transactionally, and deletes a Windows user environment variable only when no retained definition references it. MCP and Skills each expose independent select-all, clear-selection, and selected/eligible counts; missing-path MCP entries remain unselected and disabled.
 
 ## 8. Verification strategy
 

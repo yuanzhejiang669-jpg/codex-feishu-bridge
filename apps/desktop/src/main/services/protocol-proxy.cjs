@@ -304,6 +304,34 @@ function createProtocolProxyService(options) {
     };
   }
 
+  function prepareProviderRemoval(id) {
+    const providerId = String(id || "").trim();
+    const previous = readRegistry(options.dataRoot);
+    if (!previous.providers.some((provider) => provider.id === providerId)) return null;
+    const next = {
+      ...previous,
+      providers: previous.providers.filter((provider) => provider.id !== providerId),
+    };
+    const runtimePaths = paths();
+    async function applyRegistry(registry) {
+      atomicWriteJson(registryPath(options.dataRoot), registry);
+      atomicWriteJson(runtimePaths.providers, providersFileValue(registry));
+      await restart();
+    }
+    return {
+      async commit() {
+        try { await applyRegistry(next); }
+        catch (error) {
+          await applyRegistry(previous).catch(() => {});
+          throw error;
+        }
+      },
+      async rollback() {
+        await applyRegistry(previous);
+      },
+    };
+  }
+
   function decorateCatalog(catalog) {
     const registry = readRegistry(options.dataRoot);
     const managed = new Map(registry.providers.map((provider) => [provider.id, provider]));
@@ -323,7 +351,7 @@ function createProtocolProxyService(options) {
     };
   }
 
-  return { decorateCatalog, prepareProvider, restart, snapshot, start, stop };
+  return { decorateCatalog, prepareProvider, prepareProviderRemoval, restart, snapshot, start, stop };
 }
 
 module.exports = {

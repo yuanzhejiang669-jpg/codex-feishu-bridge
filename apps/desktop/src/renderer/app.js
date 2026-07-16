@@ -21,8 +21,12 @@ const elements = {
   workspaceTableBody: document.querySelector("#workspace-table-body"),
   mcpCount: document.querySelector("#mcp-count"),
   mcpList: document.querySelector("#mcp-list"),
+  selectAllMcp: document.querySelector("#select-all-mcp"),
+  clearAllMcp: document.querySelector("#clear-all-mcp"),
   skillCount: document.querySelector("#skill-count"),
   skillList: document.querySelector("#skill-list"),
+  selectAllSkills: document.querySelector("#select-all-skills"),
+  clearAllSkills: document.querySelector("#clear-all-skills"),
   setupMode: document.querySelector("#setup-mode"),
   createBot: document.querySelector("#create-bot-button"),
   botDialog: document.querySelector("#bot-dialog"),
@@ -117,10 +121,23 @@ const elements = {
   closeRemovalDialog: document.querySelector("#close-removal-dialog"),
   cancelRemoval: document.querySelector("#cancel-removal-button"),
   applyRemoval: document.querySelector("#apply-removal-button"),
+  providerRemovalDialog: document.querySelector("#provider-removal-dialog"),
+  providerRemovalForm: document.querySelector("#provider-removal-form"),
+  providerRemovalTitle: document.querySelector("#provider-removal-title"),
+  providerRemovalError: document.querySelector("#provider-removal-error"),
+  providerRemovalImpact: document.querySelector("#provider-removal-impact"),
+  providerRemovalSpaces: document.querySelector("#provider-removal-spaces"),
+  providerRemovalKey: document.querySelector("#provider-removal-key"),
+  providerRemovalKeyLabel: document.querySelector("#provider-removal-key-label"),
+  providerRemovalConfirm: document.querySelector("#provider-removal-confirm"),
+  closeProviderRemovalDialog: document.querySelector("#close-provider-removal-dialog"),
+  cancelProviderRemoval: document.querySelector("#cancel-provider-removal"),
+  applyProviderRemoval: document.querySelector("#apply-provider-removal"),
 };
 
 let state = null;
 let removalPreview = null;
+let providerRemovalPreview = null;
 
 function text(value, fallback = "-") {
   const result = String(value ?? "").trim();
@@ -402,13 +419,11 @@ function renderCapabilities(capabilities, setup) {
   elements.capabilitySourceHome.textContent = capabilities.codexHome || "-";
   elements.capabilitySourceConfig.textContent = capabilities.configPath || "-";
   elements.capabilitySourceSkills.textContent = capabilities.skillsRoot || "-";
-  elements.mcpCount.textContent = `${mcpServers.length} 个`;
-  elements.skillCount.textContent = `${skills.length} 个`;
   elements.mcpList.innerHTML = mcpServers.length
     ? mcpServers.map((item) => {
       const missing = item.commandAvailable === false || item.entryAvailable === false;
       return `<div class="capability-row capability-detail-row">
-        <label class="capability-selector"><input class="migration-mcp" type="checkbox" value="${escapeHtml(item.name)}"><strong>${escapeHtml(item.name)}</strong><span class="${badgeClass(missing ? "bad" : "good")}">${missing ? "路径缺失" : "已定位"}</span></label>
+        <label class="capability-selector"><input class="migration-mcp" type="checkbox" value="${escapeHtml(item.name)}" ${missing ? "disabled" : ""}><strong>${escapeHtml(item.name)}</strong><span class="${badgeClass(missing ? "bad" : "good")}">${missing ? "路径缺失" : "已定位"}</span></label>
         ${pathLine("配置", item.configPath)}
         <div class="capability-path"><span>配置段</span><code>${escapeHtml(item.configSection)}</code></div>
         ${pathLine("命令", item.commandPath || item.command)}
@@ -432,6 +447,7 @@ function renderCapabilities(capabilities, setup) {
     }).join("");
   elements.migrationTargetDetail.classList.add("hidden");
   elements.migrationPreview.classList.add("hidden");
+  updateCapabilitySelectionCounts();
 }
 
 function renderProviderCatalog(catalog = {}, setup = {}) {
@@ -447,8 +463,9 @@ function renderProviderCatalog(catalog = {}, setup = {}) {
         <td>${escapeHtml(provider.wireApi || "未设置")}</td>
         <td>${escapeHtml(provider.envKey || "未设置")}</td>
         <td><span class="${badgeClass(provider.credentialAvailable ? "good" : "warn")}">${provider.credentialAvailable ? "可用" : "未找到"}</span></td>
+        <td><button class="link-button danger-link provider-remove" data-provider-id="${escapeHtml(provider.id)}" type="button">删除</button></td>
       </tr>`).join("")
-    : '<tr><td colspan="5" class="empty-row">全局 config.toml 中没有 Provider</td></tr>';
+    : '<tr><td colspan="6" class="empty-row">全局 config.toml 中没有 Provider</td></tr>';
   const select = elements.providerReplaceForm.elements.id;
   const selected = select.value;
   select.innerHTML = '<option value="">请选择</option>' + providers
@@ -606,6 +623,23 @@ function capabilitySelection() {
     mcpServers: [...document.querySelectorAll(".migration-mcp:checked")].map((item) => item.value),
     skills: [...document.querySelectorAll(".migration-skill:checked")].map((item) => item.value),
   };
+}
+
+function updateCapabilitySelectionCounts() {
+  const mcp = [...document.querySelectorAll(".migration-mcp:not(:disabled)")];
+  const skills = [...document.querySelectorAll(".migration-skill:not(:disabled)")];
+  elements.mcpCount.textContent = `已选 ${mcp.filter((item) => item.checked).length}/${mcp.length}`;
+  elements.skillCount.textContent = `已选 ${skills.filter((item) => item.checked).length}/${skills.length}`;
+  elements.selectAllMcp.disabled = mcp.length === 0;
+  elements.clearAllMcp.disabled = !mcp.some((item) => item.checked);
+  elements.selectAllSkills.disabled = skills.length === 0;
+  elements.clearAllSkills.disabled = !skills.some((item) => item.checked);
+}
+
+function setCapabilitySelection(selector, checked) {
+  document.querySelectorAll(`${selector}:not(:disabled)`).forEach((item) => { item.checked = checked; });
+  elements.migrationPreview.classList.add("hidden");
+  updateCapabilitySelectionCounts();
 }
 
 function migrationStatusText(items) {
@@ -847,6 +881,66 @@ async function openRemovalDialog(kind, id) {
   }
 }
 
+function updateProviderRemovalOptions() {
+  if (!providerRemovalPreview) return;
+  const spacesRetained = providerRemovalPreview.managedSpaces.length > 0 && !elements.providerRemovalSpaces.checked;
+  const keyUnavailable = !providerRemovalPreview.canDeleteApiKey || spacesRetained;
+  if (keyUnavailable) elements.providerRemovalKey.checked = false;
+  elements.providerRemovalKey.disabled = keyUnavailable;
+  if (providerRemovalPreview.otherEnvironmentReferences.length) {
+    elements.providerRemovalKeyLabel.textContent = `保留环境变量 ${providerRemovalPreview.envKey}（仍被 ${providerRemovalPreview.otherEnvironmentReferences.join("、")} 引用）`;
+  } else if (spacesRetained) {
+    elements.providerRemovalKeyLabel.textContent = `保留环境变量 ${providerRemovalPreview.envKey}（隔离空间仍需要）`;
+  } else {
+    elements.providerRemovalKeyLabel.textContent = `同时删除 Windows 用户环境变量 ${providerRemovalPreview.envKey}`;
+  }
+  updateProviderRemovalSubmitState();
+}
+
+function updateProviderRemovalSubmitState() {
+  elements.applyProviderRemoval.disabled = !providerRemovalPreview
+    || providerRemovalPreview.blockers.length > 0
+    || !elements.providerRemovalConfirm.checked;
+}
+
+async function openProviderRemovalDialog(id) {
+  providerRemovalPreview = null;
+  elements.providerRemovalError.classList.add("hidden");
+  elements.providerRemovalImpact.innerHTML = "正在读取影响范围…";
+  elements.providerRemovalConfirm.checked = false;
+  elements.providerRemovalSpaces.checked = true;
+  elements.providerRemovalKey.checked = false;
+  elements.providerRemovalKey.disabled = true;
+  elements.applyProviderRemoval.disabled = true;
+  elements.providerRemovalDialog.showModal();
+  try {
+    providerRemovalPreview = await window.bridgeDesktop.previewGlobalProviderRemoval({ id });
+    const preview = providerRemovalPreview;
+    elements.providerRemovalTitle.textContent = `删除 ${preview.provider.name}（${preview.id}）`;
+    elements.providerRemovalSpaces.checked = preview.defaults.removeFromManagedSpaces;
+    elements.providerRemovalKey.checked = preview.defaults.deleteApiKey;
+    const referenced = preview.referencedBots.map((bot) => `${bot.label}（${bot.name}）`).join("、");
+    const spacePaths = preview.managedSpaces.map((space) => space.codexHome).join("；");
+    const blocking = preview.blockers.length > 0;
+    elements.providerRemovalImpact.innerHTML = [
+      `<strong>全局 Provider 定义</strong><code>${escapeHtml(preview.configPath)}</code>`,
+      `<span>隔离空间：${preview.managedSpaces.length} 个${spacePaths ? ` · ${escapeHtml(spacePaths)}` : ""}</span>`,
+      `<span>托管转换代理：${preview.managedProxy ? "将删除对应路由并重启代理" : "不涉及"}</span>`,
+      `<span>API Key：${escapeHtml(preview.envKey || "未配置")}</span>`,
+      preview.selected ? '<span class="bad">它是当前全局 Provider，删除时会同时清除全局 Provider 和模型选择。</span>' : "",
+      referenced ? `<span class="bad">引用 Bot：${escapeHtml(referenced)}</span>` : "<span>没有客户端 Bot 引用该 Provider。</span>",
+      preview.otherEnvironmentReferences.length ? `<span>同一环境变量还被以下 Provider 使用：${escapeHtml(preview.otherEnvironmentReferences.join("、"))}</span>` : "",
+      blocking ? `<span class="bad">${escapeHtml(preview.blockers.join("；"))}</span>` : "<span>影响检查通过，可以执行删除。</span>",
+    ].filter(Boolean).join("");
+    updateProviderRemovalOptions();
+    updateProviderRemovalSubmitState();
+  } catch (error) {
+    elements.providerRemovalError.textContent = error.message || String(error);
+    elements.providerRemovalError.classList.remove("hidden");
+    elements.applyProviderRemoval.disabled = true;
+  }
+}
+
 elements.refresh.addEventListener("click", refresh);
 elements.checkUpdate.addEventListener("click", async () => {
   elements.checkUpdate.disabled = true;
@@ -950,6 +1044,34 @@ elements.removalForm.addEventListener("submit", async (event) => {
     elements.removalError.textContent = error.message || String(error);
     elements.removalError.classList.remove("hidden");
     elements.applyRemoval.disabled = false;
+  }
+});
+elements.providerCatalogBody.addEventListener("click", async (event) => {
+  const button = event.target.closest(".provider-remove");
+  if (button) await openProviderRemovalDialog(button.dataset.providerId);
+});
+elements.closeProviderRemovalDialog.addEventListener("click", () => elements.providerRemovalDialog.close());
+elements.cancelProviderRemoval.addEventListener("click", () => elements.providerRemovalDialog.close());
+elements.providerRemovalSpaces.addEventListener("change", updateProviderRemovalOptions);
+elements.providerRemovalConfirm.addEventListener("change", updateProviderRemovalSubmitState);
+elements.providerRemovalForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!providerRemovalPreview || !elements.providerRemovalConfirm.checked || providerRemovalPreview.blockers.length) return;
+  elements.applyProviderRemoval.disabled = true;
+  elements.providerRemovalError.classList.add("hidden");
+  try {
+    const result = await window.bridgeDesktop.applyGlobalProviderRemoval({
+      id: providerRemovalPreview.id,
+      removeFromManagedSpaces: elements.providerRemovalSpaces.checked,
+      deleteApiKey: elements.providerRemovalKey.checked,
+    });
+    elements.providerRemovalDialog.close();
+    await refresh();
+    showProviderResult("Provider 已删除", `${result.id} 已从全局配置删除${result.removedFromManagedSpaces ? `，并清理 ${result.removedFromManagedSpaces} 个隔离空间` : ""}${result.apiKeyDeleted ? `；环境变量 ${result.envKey} 已删除` : "；API Key 已保留"}`);
+  } catch (error) {
+    elements.providerRemovalError.textContent = error.message || String(error);
+    elements.providerRemovalError.classList.remove("hidden");
+    updateProviderRemovalSubmitState();
   }
 });
 elements.botList.addEventListener("change", async (event) => {
@@ -1174,6 +1296,18 @@ elements.providerSyncApply.addEventListener("click", () => {
     elements.providerSyncApply.classList.add("hidden");
     await refresh();
   }).catch(() => {});
+});
+elements.selectAllMcp.addEventListener("click", () => setCapabilitySelection(".migration-mcp", true));
+elements.clearAllMcp.addEventListener("click", () => setCapabilitySelection(".migration-mcp", false));
+elements.selectAllSkills.addEventListener("click", () => setCapabilitySelection(".migration-skill", true));
+elements.clearAllSkills.addEventListener("click", () => setCapabilitySelection(".migration-skill", false));
+elements.mcpList.addEventListener("change", () => {
+  elements.migrationPreview.classList.add("hidden");
+  updateCapabilitySelectionCounts();
+});
+elements.skillList.addEventListener("change", () => {
+  elements.migrationPreview.classList.add("hidden");
+  updateCapabilitySelectionCounts();
 });
 elements.launchAtLoginSetting.addEventListener("change", async () => {
   elements.launchAtLoginSetting.disabled = true;

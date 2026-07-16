@@ -6,9 +6,12 @@ const test = require("node:test");
 const TOML = require("smol-toml");
 const {
   addGlobalProvider,
+  applyGlobalProviderRemoval,
   inspectProviderCatalog,
   listProviderModels,
+  previewGlobalProviderRemoval,
   providerSyncPlan,
+  removeProviderDefinition,
   replaceGlobalProviderKey,
 } = require("../src/main/services/provider-manager.cjs");
 
@@ -45,6 +48,158 @@ test("lists every global Provider without exposing key values", () => {
     assert.equal(catalog.providers.length, 1);
     assert.equal(catalog.providers[0].credentialAvailable, true);
     assert.equal(JSON.stringify(catalog).includes("top-secret"), false);
+  } finally { fs.rmSync(value.root, { recursive: true, force: true }); }
+});
+
+test("removes one Provider block without rewriting unrelated TOML", () => {
+  const value = fixture();
+  try {
+    const original = fs.readFileSync(path.join(value.codexHome, "config.toml"), "utf8");
+    const next = removeProviderDefinition(original, "existing", true);
+    assert.doesNotMatch(next, /model_providers\.existing|model_provider\s*=|model\s*=/);
+    assert.match(next, /\[mcp_servers\.keep\]\ncommand = "keep\.exe"/);
+  } finally { fs.rmSync(value.root, { recursive: true, force: true }); }
+});
+
+test("removes a quoted Provider and its nested tables without touching the next table", () => {
+  const source = [
+    '# keep this comment',
+    '[model_providers."company.api"]',
+    'name = "Company"',
+    '[model_providers."company.api".http_headers]',
+    'x-client = "desktop"',
+    '[model_providers.other]',
+    'name = "Other"',
+    '',
+  ].join("\n");
+  const next = removeProviderDefinition(source, "company.api");
+  assert.doesNotMatch(next, /company\.api|x-client/);
+  assert.match(next, /# keep this comment/);
+  assert.match(next, /\[model_providers\.other\]\nname = "Other"/);
+});
+
+test("deletes an unused Provider from global and managed-space configs with its exclusive key", async () => {
+  const value = fixture();
+  const targetHome = path.join(value.root, "target");
+  const botRoot = path.join(value.dataRoot, "managed-bots", "assistant-1");
+  const environmentWrites = [];
+  try {
+    fs.mkdirSync(targetHome, { recursive: true });
+    fs.mkdirSync(botRoot, { recursive: true });
+    fs.writeFileSync(path.join(targetHome, "config.toml"), [
+      'model_provider = "other"',
+      '[model_providers.existing]',
+      'name = "Existing"',
+      'base_url = "https://existing.example/v1"',
+      'wire_api = "responses"',
+      'env_key = "EXISTING_API_KEY"',
+      '[mcp_servers.keep]',
+      'command = "keep.exe"',
+      '',
+    ].join("\n"));
+    fs.writeFileSync(path.join(botRoot, "bot.json"), JSON.stringify({
+      name: "assistant-1", codexHomeMode: "isolated", codexHome: targetHome,
+      provider: { mode: "global", id: "other" },
+    }));
+    const preview = previewGlobalProviderRemoval("existing", {
+      codexHome: value.codexHome,
+      dataRoot: value.dataRoot,
+    });
+    assert.equal(preview.managedSpaces.length, 1);
+    assert.equal(preview.canDeleteApiKey, true);
+    assert.deepEqual(preview.blockers, []);
+    const result = await applyGlobalProviderRemoval({
+      id: "existing", removeFromManagedSpaces: true, deleteApiKey: true,
+    }, {
+      codexHome: value.codexHome,
+      dataRoot: value.dataRoot,
+      readUserEnvironmentVariable: async () => "old-secret",
+      setUserEnvironmentVariable: async (name, secret) => environmentWrites.push([name, secret]),
+    });
+    assert.equal(result.removedFromManagedSpaces, 1);
+    assert.equal(result.apiKeyDeleted, true);
+    assert.deepEqual(environmentWrites, [["EXISTING_API_KEY", null]]);
+    for (const configPath of [path.join(value.codexHome, "config.toml"), path.join(targetHome, "config.toml")]) {
+      const content = fs.readFileSync(configPath, "utf8");
+      assert.doesNotMatch(content, /model_providers\.existing/);
+      assert.match(content, /mcp_servers\.keep/);
+    }
+  } finally { fs.rmSync(value.root, { recursive: true, force: true }); }
+});
+
+test("blocks Provider removal while a managed Bot still references it", async () => {
+  const value = fixture();
+  const botRoot = path.join(value.dataRoot, "managed-bots", "assistant-1");
+  try {
+    fs.mkdirSync(botRoot, { recursive: true });
+    fs.writeFileSync(path.join(botRoot, "bot.json"), JSON.stringify({
+      name: "assistant-1", codexHomeMode: "shared", codexHome: value.codexHome,
+      provider: { mode: "current" },
+    }));
+    const preview = previewGlobalProviderRemoval("existing", { codexHome: value.codexHome, dataRoot: value.dataRoot });
+    assert.equal(preview.referencedBots.length, 1);
+    await assert.rejects(() => applyGlobalProviderRemoval({ id: "existing" }, {
+      codexHome: value.codexHome, dataRoot: value.dataRoot,
+    }), /仍有 1 个客户端 Bot 引用/);
+    assert.match(fs.readFileSync(path.join(value.codexHome, "config.toml"), "utf8"), /model_providers\.existing/);
+  } finally { fs.rmSync(value.root, { recursive: true, force: true }); }
+});
+
+test("does not delete an API key shared by another Provider", async () => {
+  const value = fixture();
+  try {
+    fs.appendFileSync(path.join(value.codexHome, "config.toml"), [
+      '[model_providers.other]',
+      'name = "Other"',
+      'base_url = "https://other.example/v1"',
+      'wire_api = "responses"',
+      'env_key = "EXISTING_API_KEY"',
+      '',
+    ].join("\n"));
+    const preview = previewGlobalProviderRemoval("existing", { codexHome: value.codexHome, dataRoot: value.dataRoot });
+    assert.equal(preview.canDeleteApiKey, false);
+    assert.deepEqual(preview.otherEnvironmentReferences, ["other"]);
+    await assert.rejects(() => applyGlobalProviderRemoval({ id: "existing", deleteApiKey: true }, {
+      codexHome: value.codexHome, dataRoot: value.dataRoot,
+    }), /仍被其他 Provider 引用/);
+  } finally { fs.rmSync(value.root, { recursive: true, force: true }); }
+});
+
+test("rolls back global configuration when managed-space Provider removal fails", async () => {
+  const value = fixture();
+  const targetHome = path.join(value.root, "target");
+  const botRoot = path.join(value.dataRoot, "managed-bots", "assistant-1");
+  try {
+    fs.mkdirSync(targetHome, { recursive: true });
+    fs.mkdirSync(botRoot, { recursive: true });
+    const targetText = [
+      'model_provider = "other"',
+      '[model_providers.existing]',
+      'name = "Existing"',
+      'base_url = "https://existing.example/v1"',
+      'wire_api = "responses"',
+      'env_key = "EXISTING_API_KEY"',
+      '',
+    ].join("\n");
+    fs.writeFileSync(path.join(targetHome, "config.toml"), targetText);
+    fs.writeFileSync(path.join(botRoot, "bot.json"), JSON.stringify({
+      name: "assistant-1", codexHomeMode: "isolated", codexHome: targetHome,
+      provider: { mode: "global", id: "other" },
+    }));
+    const globalPath = path.join(value.codexHome, "config.toml");
+    const globalText = fs.readFileSync(globalPath, "utf8");
+    let writes = 0;
+    await assert.rejects(() => applyGlobalProviderRemoval({ id: "existing" }, {
+      codexHome: value.codexHome,
+      dataRoot: value.dataRoot,
+      writeTextAtomic: (destination, content) => {
+        writes += 1;
+        if (writes === 2) throw new Error("disk full");
+        fs.writeFileSync(destination, content);
+      },
+    }), /已回滚/);
+    assert.equal(fs.readFileSync(globalPath, "utf8"), globalText);
+    assert.equal(fs.readFileSync(path.join(targetHome, "config.toml"), "utf8"), targetText);
   } finally { fs.rmSync(value.root, { recursive: true, force: true }); }
 });
 
