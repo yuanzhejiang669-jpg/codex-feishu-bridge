@@ -1067,4 +1067,6 @@ Final GitHub and installed verification:
 - Downloaded the actual GitHub asset, verified its SHA-256, and completed a silent in-place upgrade on this device from the previous installed client to `0.2.0`.
 - Installed executable reports `0.2.0.0`; Windows uninstall registration reports `0.2.0`; both normalize to the expected release.
 - All three client-managed drawing Bots were idle before upgrade and online afterward. `codex-assistant-1-drawing` restarted with a new PID; the other two remained online with their existing PIDs.
+- A later health poll observed the remaining pre-upgrade Bot processes exit and recover sequentially through the rate-limited supervisor. The upgrade verifier was strengthened to require all managed Bots to remain online with an unchanged PID set for 60 continuous seconds before reporting success.
+- Re-ran the in-place upgrade with the strengthened verifier: all three managed Bots restarted with new PIDs and remained stable for `62` continuous seconds before the verification returned success.
 - The temporary GitHub download directory under `%TEMP%\cfb-release-v0.2.0-verify` was removed after verification.

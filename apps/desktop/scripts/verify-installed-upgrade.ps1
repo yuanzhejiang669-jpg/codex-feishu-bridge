@@ -110,6 +110,8 @@ do {
 if (-not $desktopMain) { throw 'Upgraded desktop client did not start' }
 
 $recoveryDeadline = (Get-Date).AddMinutes(5)
+$stableSince = $null
+$stableSignature = ''
 do {
     $botRows = foreach ($name in $before.Keys | Sort-Object) {
         $pidPath = Join-Path (Join-Path (Join-Path $runtimeRoot $name) 'state') 'bridge.pid'
@@ -129,12 +131,23 @@ do {
             restarted = $null -ne $bridgeProcess -and [int]$bridgePidText -ne $before[$name]
         }
     }
-    if (@($botRows | Where-Object { -not $_.online }).Count -eq 0) { break }
+    $offlineCount = @($botRows | Where-Object { -not $_.online }).Count
+    $signature = (@($botRows | Sort-Object name | ForEach-Object { "$($_.name):$($_.processId)" })) -join '|'
+    if ($offlineCount -eq 0) {
+        if ($stableSignature -ne $signature) {
+            $stableSignature = $signature
+            $stableSince = Get-Date
+        }
+        if (((Get-Date) - $stableSince).TotalSeconds -ge 60) { break }
+    } else {
+        $stableSince = $null
+        $stableSignature = ''
+    }
     Start-Sleep -Seconds 2
 } while ((Get-Date) -lt $recoveryDeadline)
-if (@($botRows | Where-Object { -not $_.online }).Count -gt 0) {
+if (@($botRows | Where-Object { -not $_.online }).Count -gt 0 -or $null -eq $stableSince -or ((Get-Date) - $stableSince).TotalSeconds -lt 60) {
     $offlineNames = ($botRows | Where-Object { -not $_.online } | Select-Object -ExpandProperty name) -join ', '
-    throw "Managed Bots did not recover after upgrade: $offlineNames"
+    throw "Managed Bots did not remain stable for 60 seconds after upgrade: $offlineNames"
 }
 
 [pscustomobject]@{
@@ -143,5 +156,6 @@ if (@($botRows | Where-Object { -not $_.online }).Count -gt 0) {
     uninstallVersion = $uninstall.DisplayVersion
     desktopProcessId = $desktopMain.ProcessId
     recoveryMode = 'restart-after-client-upgrade'
+    stableSeconds = [int]((Get-Date) - $stableSince).TotalSeconds
     managedBots = $botRows
 } | ConvertTo-Json -Depth 4
