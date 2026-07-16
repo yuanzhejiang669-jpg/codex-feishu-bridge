@@ -1057,3 +1057,14 @@ First published-asset audit:
 - Run `29463196922` passed all clean-runner tests, build verification, and Release publication.
 - The post-publication audit found that GitHub normalized the space-containing installer asset to a dotted name while electron-builder's `latest.yml` referenced a hyphenated safe name. No download had occurred, but automatic updates would have returned 404.
 - Fixed all build, checksum, verification, and workflow paths to use the exact `Codex-Feishu-Bridge-Setup-<version>.exe` artifact name before recreating the release.
+
+Final GitHub and installed verification:
+
+- Clean GitHub Actions run `29463507635` completed successfully at commit `c5a3e7cdb3ad8667ddf679509d338ccffdf46160`.
+- Public stable Release `v0.2.0` contains the exact installer, blockmap, `latest.yml`, and checksums assets; it is neither draft nor prerelease.
+- Remote `latest.yml` references `Codex-Feishu-Bridge-Setup-0.2.0.exe`, and an anonymous redirected HEAD request returned `200` with the exact `165244215` byte content length.
+- Remote installer SHA-256: `40FAD90DB8FBD480E124CE93492F9981D1567E79DF702CA711A04F04B7123901`.
+- Downloaded the actual GitHub asset, verified its SHA-256, and completed a silent in-place upgrade on this device from the previous installed client to `0.2.0`.
+- Installed executable reports `0.2.0.0`; Windows uninstall registration reports `0.2.0`; both normalize to the expected release.
+- All three client-managed drawing Bots were idle before upgrade and online afterward. `codex-assistant-1-drawing` restarted with a new PID; the other two remained online with their existing PIDs.
+- The temporary GitHub download directory under `%TEMP%\cfb-release-v0.2.0-verify` was removed after verification.
