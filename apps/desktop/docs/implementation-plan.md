@@ -295,10 +295,10 @@ This list is the durable parity checklist against the existing local control pan
 36. [ ] Select and apply a global default Provider/model.
 37. [ ] Edit or remove a global Provider definition safely.
 38. [ ] Restart selected idle Bots after an environment-key replacement.
-39. [ ] Identify the approved non-GPT translation proxy and license.
-40. [ ] Bundle and supervise the approved translation proxy.
-41. [ ] Configure proxy credentials through DPAPI.
-42. [ ] Allocate and diagnose proxy ports.
+39. [x] Identify the approved non-GPT translation proxy and license.
+40. [x] Bundle and supervise the approved translation proxy.
+41. [x] Keep proxy credentials outside configuration files in Windows user environment variables.
+42. [x] Allocate and diagnose proxy ports.
 43. [ ] Verify one real non-GPT upstream end to end.
 44. [x] Inventory global MCP servers and Skills.
 45. [x] Preview selected MCP/Skill migration.
@@ -316,9 +316,9 @@ This list is the durable parity checklist against the existing local control pan
 57. [ ] Roll back a partially failed batch operation.
 58. [ ] Batch start, stop, and restart selected idle Bots.
 59. [ ] Rename a client-managed Bot without breaking Profile/runtime references.
-60. [ ] Remove one client-managed Bot with an explicit residual-file preview.
-61. [ ] Remove one client-managed workspace only after ownership checks.
-62. [ ] Preserve user workspace content during Bot uninstall by default.
+60. [x] Remove one client-managed Bot with an explicit residual-file preview.
+61. [x] Remove one client-managed workspace only after ownership checks.
+62. [x] Preserve user workspace content during Bot uninstall by default.
 63. [x] Version and migrate persistent desktop data atomically.
 64. [x] Report bundled dependency and protocol compatibility.
 65. [ ] Complete clean-Windows install-to-first-reply E2E.
@@ -341,6 +341,12 @@ This list is the durable parity checklist against the existing local control pan
 82. [x] Let a new isolated space initialize its shared `AGENTS.md` from the user's global Codex Home with visible source and destination paths.
 83. [x] Keep the desktop sidebar fixed while only the main content area scrolls.
 84. [x] De-emphasize user reauthorization after a Lark CLI user identity is already verified.
+85. [x] Let Provider creation select Responses API or client-managed Chat Completions translation.
+86. [x] Show the managed proxy version, health, endpoint, and actionable port/startup failures.
+87. [x] Preview and remove one managed Bot while preserving its workspace by default.
+88. [x] Preview and remove one isolated space together with all affected managed Bots.
+89. [x] Never delete shared/global Codex Home data or Feishu cloud applications implicitly.
+90. [x] Block a Release when the pinned protocol proxy or its MIT license is missing from the packaged client.
 
 `0.1.6 Provider center` acceptance: items 26-35 are implemented; API keys never enter TOML, renderer state, IPC results, or logs; synchronization is previewable and transactional; only client-managed isolated Codex Homes are eligible; existing Bridge processes and legacy Bot files remain unchanged.
 
@@ -353,6 +359,8 @@ This list is the durable parity checklist against the existing local control pan
 `0.1.12 Space completion and readiness` acceptance: a managed Bot with non-empty `state/seen-events.json` is shown as message-event verified with the file's last-update time; the single-Bot dialog requires either global configuration or one existing isolated space and inherits the selected space's Codex Home, Provider, and naming context without modifying existing members; new spaces can copy the visible global `AGENTS.md` into the shared isolated Codex Home without overwriting an existing target; the sidebar remains fixed while main content scrolls; and an already verified Lark CLI user identity no longer presents reauthorization as the primary action.
 
 `0.2.0 GitHub distribution and updates` acceptance: a matching `v*` tag builds and tests the Windows x64 client on a clean GitHub runner and publishes the installer, blockmap, `latest.yml`, and checksums to a public stable Release; packaged clients display current/latest versions and download progress; installation is refused while any client-managed Bot has an active task; online managed Bots are stopped transactionally and restored after relaunch; legacy/script-managed Bots and persistent client data remain untouched. The release is explicitly described as unsigned until Authenticode signing is configured.
+
+`0.3.0 Provider translation and managed removal` acceptance: the Provider center can validate and save either native Responses endpoints or OpenAI-compatible Chat Completions endpoints; Chat endpoints are routed through the pinned MIT-licensed `mimo2codex` runtime bundled and supervised by the desktop client, without storing API keys in TOML, proxy JSON, renderer state, IPC results, or logs. Bot and isolated-space removal always previews affected processes and paths, refuses active tasks, preserves user workspaces by default, never touches legacy Bots or Feishu cloud applications, and requires explicit confirmation before deleting client-owned runtime or isolated Codex Home data.
 
 ## 8. Verification strategy
 

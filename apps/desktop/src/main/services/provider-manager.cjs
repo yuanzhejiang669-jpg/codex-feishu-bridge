@@ -32,7 +32,7 @@ function normalizeDefinition(raw = {}) {
   const envKey = String(raw.envKey || raw.env_key || "").trim().toUpperCase();
   if (!ENV_PATTERN.test(envKey)) throw new Error("Provider 环境变量名称格式无效");
   const wireApi = String(raw.wireApi || raw.wire_api || "responses").trim();
-  if (wireApi !== "responses") throw new Error("当前 Provider 中心只支持 Responses 兼容接口");
+  if (!new Set(["responses", "chat"]).has(wireApi)) throw new Error("Provider 接口只能是 Responses 或 Chat Completions");
   return {
     id,
     name: String(raw.name || id).trim().slice(0, 120) || id,
@@ -184,53 +184,82 @@ async function probeProvider(raw, options = {}) {
   const model = String(raw?.model || "").trim();
   if (!model) throw new Error("测试模型不能为空");
   const startedAt = Date.now();
-  const response = await fetchWithTimeout(`${provider.baseUrl}/responses`, {
+  const chat = provider.wireApi === "chat";
+  const response = await fetchWithTimeout(`${provider.baseUrl}/${chat ? "chat/completions" : "responses"}`, {
     method: "POST",
     headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
-    body: JSON.stringify({ model, input: "Reply with OK only.", max_output_tokens: 16, store: false }),
+    body: JSON.stringify(chat
+      ? { model, messages: [{ role: "user", content: "Reply with OK only." }], max_tokens: 16, stream: false }
+      : { model, input: "Reply with OK only.", max_output_tokens: 16, store: false }),
   }, options);
   const body = await response.text();
-  if (!response.ok) throw new Error(`POST /responses 失败（HTTP ${response.status}）：${body.replaceAll(key, "[redacted]").slice(0, 400)}`);
+  if (!response.ok) throw new Error(`POST /${chat ? "chat/completions" : "responses"} 失败（HTTP ${response.status}）：${body.replaceAll(key, "[redacted]").slice(0, 400)}`);
   let parsed = {};
   try { parsed = JSON.parse(body); } catch { parsed = {}; }
-  return { ok: true, provider: provider.id, model, status: response.status, elapsedMs: Date.now() - startedAt, responseId: String(parsed?.id || "") };
+  if (chat && !Array.isArray(parsed?.choices)) throw new Error("Chat Completions 测试响应缺少 choices");
+  return { ok: true, provider: provider.id, model, wireApi: provider.wireApi, status: response.status, elapsedMs: Date.now() - startedAt, responseId: String(parsed?.id || "") };
 }
 
 async function addGlobalProvider(raw, options) {
   const provider = normalizeDefinition(raw);
   const key = secretFrom(raw);
+  if (provider.wireApi === "chat") {
+    await probeProvider(raw, options);
+  }
   const configPath = configPathFor(options.codexHome);
   const { text, config } = readConfig(configPath);
   if (config.model_providers?.[provider.id]) throw new Error(`Provider 已存在：${provider.id}`);
   const readUserEnv = options.readUserEnvironmentVariable || readUserEnvironmentVariable;
   const setUserEnv = options.setUserEnvironmentVariable || setUserEnvironmentVariable;
   const writeConfig = options.writeTextAtomic || writeTextAtomic;
+  const proxyTransaction = provider.wireApi === "chat"
+    ? await options.prepareProtocolProxyProvider?.(provider, raw.model)
+    : null;
+  if (provider.wireApi === "chat" && !proxyTransaction) throw new Error("客户端托管协议代理不可用");
+  const codexProvider = proxyTransaction?.codexProvider || provider;
   const previous = await readUserEnv(provider.envKey);
   await setUserEnv(provider.envKey, key);
+  let configWritten = false;
   try {
     const prefix = text.trimEnd();
-    writeConfig(configPath, `${prefix ? `${prefix}\n\n` : ""}${providerBlock(provider)}\n`);
+    writeConfig(configPath, `${prefix ? `${prefix}\n\n` : ""}${providerBlock(codexProvider)}\n`);
+    configWritten = true;
+    await proxyTransaction?.commit();
   } catch (error) {
+    if (configWritten) {
+      try { writeConfig(configPath, text); } catch {}
+    }
+    await proxyTransaction?.rollback().catch(() => {});
     await setUserEnv(provider.envKey, previous || null).catch(() => {});
     throw error;
   }
   return { provider: publicProvider(provider.id, {
     name: provider.name, base_url: provider.baseUrl, wire_api: provider.wireApi, env_key: provider.envKey,
     service_tier_passthrough: provider.serviceTierPassthrough,
-  }, "", { [provider.envKey]: "available" }), configPath };
+  }, "", { [provider.envKey]: "available" }), managedProxy: provider.wireApi === "chat", configPath };
 }
 
 async function replaceGlobalProviderKey(raw, options) {
   const id = String(raw?.id || "").trim();
   const key = secretFrom(raw);
-  const catalog = inspectProviderCatalog(options.codexHome);
+  const rawCatalog = inspectProviderCatalog(options.codexHome);
+  const catalog = options.decorateProviderCatalog?.(rawCatalog) || rawCatalog;
   const provider = catalog.providers.find((item) => item.id === id);
   if (!provider) throw new Error(`找不到 Provider：${id}`);
   const definition = { ...provider, apiKey: key, model: raw.model };
   const models = await listProviderModels(definition, options);
   const probe = await probeProvider(definition, options);
+  const readUserEnv = options.readUserEnvironmentVariable || readUserEnvironmentVariable;
   const setUserEnv = options.setUserEnvironmentVariable || setUserEnvironmentVariable;
+  const previous = await readUserEnv(provider.envKey);
   await setUserEnv(provider.envKey, key);
+  try {
+    if (provider.managedProxy) await options.restartProtocolProxy?.();
+  } catch (error) {
+    await setUserEnv(provider.envKey, previous || null).catch(() => {});
+    await options.restartProtocolProxy?.().catch(() => {});
+    throw error;
+  }
   return { provider: { ...provider, credentialAvailable: true }, modelCount: models.models.length, probe };
 }
 
@@ -322,5 +351,6 @@ module.exports = {
   normalizeDefinition,
   probeProvider,
   providerSyncPlan,
+  readUserEnvironmentVariable,
   replaceGlobalProviderKey,
 };

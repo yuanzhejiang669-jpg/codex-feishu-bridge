@@ -30,6 +30,10 @@ extraResources:
     to: tools/node.exe
   - from: resources/licenses/node-LICENSE
     to: licenses/node-LICENSE
+  - from: proxy-runtime/node_modules
+    to: proxy/node_modules
+    filter:
+      - "**/*"
 
 win:
   icon: resources/icon.ico

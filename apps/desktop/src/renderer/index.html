@@ -142,7 +142,7 @@
           <div class="section-heading"><h2>已发现工作空间</h2><span id="workspace-count" class="section-meta"></span></div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th>Bot</th><th>工作空间</th><th>Codex Home</th></tr></thead>
+              <thead><tr><th>空间 / Bot</th><th>工作空间</th><th>Codex Home</th><th>操作</th></tr></thead>
               <tbody id="workspace-table-body"></tbody>
             </table>
           </div>
@@ -150,6 +150,10 @@
       </section>
 
       <section id="providers-view" class="view hidden">
+        <section class="content-section">
+          <div class="section-heading"><h2>协议转换代理</h2><span id="protocol-proxy-status" class="section-meta"></span></div>
+          <p id="protocol-proxy-detail" class="readiness-summary"></p>
+        </section>
         <section class="content-section">
           <div class="section-heading"><h2>全局 Provider</h2><span id="provider-catalog-count" class="section-meta"></span></div>
           <p id="provider-catalog-error" class="readiness-summary hidden"></p>
@@ -163,14 +167,15 @@
 
         <div class="two-column provider-workbench">
           <section class="content-section">
-            <div class="section-heading"><h2>添加 Provider</h2><span class="section-meta">Responses API</span></div>
+            <div class="section-heading"><h2>添加 Provider</h2><span class="section-meta">Responses / Chat Completions</span></div>
             <form id="provider-add-form" class="stack-form">
+              <label><span>接口协议</span><select name="wireApi"><option value="responses">OpenAI Responses</option><option value="chat">OpenAI Chat Completions · 客户端转换</option></select></label>
               <label><span>Provider 标识</span><input name="id" required maxlength="64" placeholder="例如 company-api"></label>
               <label><span>显示名称</span><input name="name" maxlength="120" placeholder="例如 Company API"></label>
               <label><span>Base URL</span><input name="baseUrl" required type="url" placeholder="https://api.example.com/v1"></label>
               <label><span>环境变量名</span><input name="envKey" required pattern="[A-Z_][A-Z0-9_]*" placeholder="COMPANY_API_KEY"></label>
               <label><span>API Key</span><input name="apiKey" required type="password" autocomplete="new-password"></label>
-              <label><span>测试模型</span><input name="model" placeholder="先拉取模型后选择或填写"></label>
+              <label><span>测试模型</span><input name="model" placeholder="Chat Completions 必填；可先拉取模型"></label>
               <div class="inline-actions">
                 <button id="provider-add-models" class="secondary-button" type="button">拉取模型</button>
                 <button id="provider-add-probe" class="secondary-button" type="button">测试请求</button>
@@ -329,6 +334,23 @@
         <button id="cancel-registration-button" class="secondary-button hidden" type="button">取消扫码</button>
         <button id="create-with-credentials-button" class="secondary-button" type="button">使用已有应用创建</button>
         <button id="create-with-qr-button" class="primary-button" type="button">扫码自动创建</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="removal-dialog" class="bot-dialog removal-dialog">
+    <form id="removal-form" method="dialog">
+      <div class="dialog-heading">
+        <div><h2 id="removal-title">删除客户端资源</h2><span>飞书云端应用始终保留</span></div>
+        <button id="close-removal-dialog" class="icon-button" type="button" aria-label="关闭" title="关闭">×</button>
+      </div>
+      <div id="removal-error" class="error-band hidden" role="alert"></div>
+      <div id="removal-impact" class="removal-impact"></div>
+      <label class="checkbox-field"><input id="removal-delete-workspaces" type="checkbox"><span>同时删除工作空间文件（默认不选，用户文件将保留）</span></label>
+      <label id="removal-delete-home-field" class="checkbox-field hidden"><input id="removal-delete-home" type="checkbox"><span>同时删除该空间的隔离 Codex Home、MCP 和 Skills</span></label>
+      <label class="checkbox-field"><input id="removal-confirm" type="checkbox" required><span>我已核对影响范围并确认删除</span></label>
+      <div class="dialog-actions">
+        <button id="cancel-removal-button" class="secondary-button" type="button">取消</button>
+        <button id="apply-removal-button" class="danger-button" type="submit">确认删除</button>
       </div>
     </form>
   </dialog>

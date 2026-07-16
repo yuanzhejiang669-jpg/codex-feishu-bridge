@@ -13,6 +13,8 @@ const installerName = `Codex-Feishu-Bridge-Setup-${version}.exe`;
 const installerPath = path.join(outRoot, installerName);
 const unpackedPath = path.join(outRoot, "win-unpacked", "Codex Feishu Bridge.exe");
 const latestYmlPath = path.join(outRoot, "latest.yml");
+const proxyManifestPath = path.join(outRoot, "win-unpacked", "resources", "proxy", "node_modules", "mimo2codex", "package.json");
+const proxyLicensePath = path.join(outRoot, "win-unpacked", "resources", "proxy", "node_modules", "mimo2codex", "LICENSE");
 
 function sha256(filePath) {
   return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex").toUpperCase();
@@ -30,8 +32,18 @@ function windowsProductVersion(filePath) {
   })).trim();
 }
 
-for (const required of [installerPath, unpackedPath, latestYmlPath]) {
+for (const required of [installerPath, unpackedPath, latestYmlPath, proxyManifestPath, proxyLicensePath]) {
   if (!fs.existsSync(required)) throw new Error(`Release artifact is missing: ${required}`);
+}
+
+const proxyRuntimeManifest = JSON.parse(fs.readFileSync(path.join(desktopRoot, "proxy-runtime", "package.json"), "utf8"));
+const packagedProxyManifest = JSON.parse(fs.readFileSync(proxyManifestPath, "utf8"));
+const expectedProxyVersion = String(proxyRuntimeManifest.dependencies?.mimo2codex || "").trim();
+if (!expectedProxyVersion || packagedProxyManifest.version !== expectedProxyVersion) {
+  throw new Error(`Packaged proxy version mismatch: expected=${expectedProxyVersion || "missing"}, packaged=${packagedProxyManifest.version || "missing"}`);
+}
+if (String(packagedProxyManifest.license || "").toUpperCase() !== "MIT" || fs.statSync(proxyLicensePath).size === 0) {
+  throw new Error("Packaged proxy license is missing or is not MIT");
 }
 
 const unpackedVersion = windowsProductVersion(unpackedPath);

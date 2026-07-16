@@ -1,0 +1,9 @@
+{
+  "name": "codex-feishu-bridge-proxy-runtime",
+  "version": "0.3.0",
+  "private": true,
+  "license": "MIT",
+  "dependencies": {
+    "mimo2codex": "0.5.28"
+  }
+}

@@ -103,9 +103,24 @@ const elements = {
   botConfigurationSummary: document.querySelector("#bot-configuration-summary"),
   botProviderSection: document.querySelector("#bot-provider-section"),
   workspaceAgentsPaths: document.querySelector("#workspace-agents-paths"),
+  protocolProxyStatus: document.querySelector("#protocol-proxy-status"),
+  protocolProxyDetail: document.querySelector("#protocol-proxy-detail"),
+  removalDialog: document.querySelector("#removal-dialog"),
+  removalForm: document.querySelector("#removal-form"),
+  removalTitle: document.querySelector("#removal-title"),
+  removalError: document.querySelector("#removal-error"),
+  removalImpact: document.querySelector("#removal-impact"),
+  removalDeleteWorkspaces: document.querySelector("#removal-delete-workspaces"),
+  removalDeleteHomeField: document.querySelector("#removal-delete-home-field"),
+  removalDeleteHome: document.querySelector("#removal-delete-home"),
+  removalConfirm: document.querySelector("#removal-confirm"),
+  closeRemovalDialog: document.querySelector("#close-removal-dialog"),
+  cancelRemoval: document.querySelector("#cancel-removal-button"),
+  applyRemoval: document.querySelector("#apply-removal-button"),
 };
 
 let state = null;
+let removalPreview = null;
 
 function text(value, fallback = "-") {
   const result = String(value ?? "").trim();
@@ -197,7 +212,7 @@ function renderBots(bridge, setup = {}) {
     elements.tableBody.innerHTML = '<tr><td colspan="6" class="empty-row">未发现本机 Bridge 实例</td></tr>';
     elements.botList.innerHTML = managedBots.length ? "" : '<div class="empty-row">未发现本机 Bridge 实例</div>';
     elements.workspaceCount.textContent = "0 个工作空间";
-    elements.workspaceTableBody.innerHTML = '<tr><td colspan="3" class="empty-row">未发现工作空间</td></tr>';
+    elements.workspaceTableBody.innerHTML = '<tr><td colspan="4" class="empty-row">未发现工作空间</td></tr>';
     if (!managedBots.length) return;
   }
 
@@ -226,6 +241,7 @@ function renderBots(bridge, setup = {}) {
         <label class="auto-start-toggle" title="Windows 登录后启动，并在意外离线时自动恢复"><input class="managed-bot-autostart" data-managed-index="${index}" type="checkbox" ${bot.autoStart ? "checked" : ""}>自启</label>
         <button class="link-button managed-bot-readiness" data-managed-index="${index}" type="button">检查</button>
         <button class="link-button managed-bot-action" data-managed-index="${index}" type="button">${bot.online ? "停止" : "启动"}</button>
+        <button class="link-button danger-link managed-bot-remove" data-managed-index="${index}" type="button">删除</button>
       </div>
     </div>`;
   }).join("") + legacyBots.map((instance) => `
@@ -237,11 +253,14 @@ function renderBots(bridge, setup = {}) {
       <span></span>
     </div>`).join("");
 
-  const workspaces = allBots.filter((instance) => instance.workspace);
-  elements.workspaceCount.textContent = `${workspaces.length} 个工作空间`;
-  elements.workspaceTableBody.innerHTML = workspaces.length
-    ? workspaces.map((instance) => `<tr><td>${escapeHtml(instance.name)}</td><td title="${escapeHtml(instance.workspace)}">${escapeHtml(instance.workspace)}</td><td title="${escapeHtml(instance.codexHome)}">${escapeHtml(instance.codexHome)}</td></tr>`).join("")
-    : '<tr><td colspan="3" class="empty-row">未发现工作空间</td></tr>';
+  const spaces = setup.managedSpaces || [];
+  const managedHomes = new Set(spaces.map((space) => String(space.codexHome || "").toLowerCase()));
+  const otherWorkspaces = allBots.filter((instance) => instance.workspace && !managedHomes.has(String(instance.codexHome || "").toLowerCase()));
+  elements.workspaceCount.textContent = `${spaces.length} 个客户端空间 · ${otherWorkspaces.length} 个其他工作空间`;
+  elements.workspaceTableBody.innerHTML = spaces.length || otherWorkspaces.length
+    ? spaces.map((space, index) => `<tr><td><strong>${escapeHtml(space.spaceName)}</strong><small>${space.bots.length} 个 Bot</small></td><td>${escapeHtml(space.bots.map((bot) => bot.workspace).join("；"))}</td><td title="${escapeHtml(space.codexHome)}">${escapeHtml(space.codexHome)}</td><td><button class="link-button danger-link managed-space-remove" data-space-index="${index}" type="button">删除空间</button></td></tr>`).join("")
+      + otherWorkspaces.map((instance) => `<tr><td>${escapeHtml(instance.name)}</td><td title="${escapeHtml(instance.workspace)}">${escapeHtml(instance.workspace)}</td><td title="${escapeHtml(instance.codexHome)}">${escapeHtml(instance.codexHome)}</td><td><span class="section-meta">只读</span></td></tr>`).join("")
+    : '<tr><td colspan="4" class="empty-row">未发现工作空间</td></tr>';
 }
 
 function renderBotReadiness(result) {
@@ -424,7 +443,7 @@ function renderProviderCatalog(catalog = {}, setup = {}) {
     ? providers.map((provider) => `
       <tr>
         <td title="${escapeHtml(provider.id)}"><strong>${escapeHtml(provider.name)}</strong>${provider.selected ? '<span class="selected-mark">当前</span>' : ""}<small>${escapeHtml(provider.id)}</small></td>
-        <td title="${escapeHtml(provider.baseUrl)}">${escapeHtml(provider.baseUrl)}</td>
+        <td title="${escapeHtml(provider.localBaseUrl || provider.baseUrl)}">${escapeHtml(provider.baseUrl)}${provider.managedProxy ? `<small>本地转换：${escapeHtml(provider.localBaseUrl)}</small>` : ""}</td>
         <td>${escapeHtml(provider.wireApi || "未设置")}</td>
         <td>${escapeHtml(provider.envKey || "未设置")}</td>
         <td><span class="${badgeClass(provider.credentialAvailable ? "good" : "warn")}">${provider.credentialAvailable ? "可用" : "未找到"}</span></td>
@@ -446,6 +465,15 @@ function renderProviderCatalog(catalog = {}, setup = {}) {
     if (!elements.botGlobalModel.value) elements.botGlobalModel.value = catalog.selectedModel || "";
   }
   elements.providerSyncTargetCount.textContent = `${(setup.managedBots || []).filter((bot) => bot.codexHomeMode === "isolated").length} 个可同步目标`;
+}
+
+function renderProtocolProxy(proxy = {}) {
+  const labels = { online: "运行中", starting: "启动中", failed: "异常", unused: "尚未使用", stopped: "已停止", unavailable: "不可用" };
+  const kind = proxy.status === "online" ? "good" : proxy.status === "failed" || proxy.status === "unavailable" ? "bad" : "neutral";
+  elements.protocolProxyStatus.innerHTML = `<span class="${badgeClass(kind)}">${escapeHtml(labels[proxy.status] || proxy.status || "未知")}</span>`;
+  elements.protocolProxyDetail.textContent = proxy.providerCount
+    ? `mimo2codex ${text(proxy.version)} · ${proxy.providerCount} 个 Chat Provider · ${text(proxy.baseUrl)}${proxy.error ? ` · ${proxy.error}` : ""}`
+    : `mimo2codex ${text(proxy.version)} 已随客户端提供；添加 Chat Completions Provider 后自动启动。`;
 }
 
 function renderWorkspaceFactory(factoryState = {}, catalog = {}) {
@@ -513,6 +541,7 @@ function render(currentState) {
   renderCompatibility(currentState.compatibility);
   renderCapabilities(currentState.capabilities, currentState.setup);
   renderProviderCatalog(currentState.providerCatalog, currentState.setup);
+  renderProtocolProxy(currentState.setup.protocolProxy);
   renderWorkspaceFactory(currentState.setup.workspaceFactory, currentState.providerCatalog);
   renderBotCreationTargets(currentState.setup);
   renderWorkspaceAgentsPaths();
@@ -535,7 +564,7 @@ function addProviderInput() {
     envKey: text(data.get("envKey"), ""),
     apiKey: text(data.get("apiKey"), ""),
     model: text(data.get("model"), ""),
-    wireApi: "responses",
+    wireApi: text(data.get("wireApi"), "responses"),
   };
 }
 
@@ -546,6 +575,7 @@ function replacementProviderInput() {
   if (!provider) throw new Error("请先选择已有 Provider");
   return {
     ...provider,
+    wireApi: provider.managedProxy ? "chat" : provider.wireApi,
     apiKey: text(data.get("apiKey"), ""),
     model: text(data.get("model"), ""),
   };
@@ -791,6 +821,32 @@ async function refresh() {
   }
 }
 
+async function openRemovalDialog(kind, id) {
+  removalPreview = null;
+  elements.removalError.classList.add("hidden");
+  elements.removalImpact.innerHTML = "正在读取影响范围…";
+  elements.removalConfirm.checked = false;
+  elements.removalDeleteWorkspaces.checked = false;
+  elements.removalDeleteHome.checked = kind === "space";
+  elements.applyRemoval.disabled = false;
+  elements.removalDeleteHomeField.classList.toggle("hidden", kind !== "space");
+  elements.removalDialog.showModal();
+  try {
+    removalPreview = await window.bridgeDesktop.previewManagedRemoval({ kind, id });
+    elements.removalTitle.textContent = removalPreview.title;
+    const active = removalPreview.bots.filter((bot) => bot.activeRunCount > 0);
+    const pathRows = removalPreview.kind === "space"
+      ? `<span>隔离 Codex Home</span><code>${escapeHtml(removalPreview.paths.codexHome)}</code><span>工作空间</span><code>${escapeHtml(removalPreview.paths.workspaces.join("；"))}</code>`
+      : `<span>工作空间</span><code>${escapeHtml(removalPreview.paths.workspace)}</code><span>Codex Home</span><code>${escapeHtml(removalPreview.paths.codexHome)}（保留）</code>`;
+    elements.removalImpact.innerHTML = `<strong>影响 ${removalPreview.bots.length} 个客户端 Bot</strong><span>${escapeHtml(removalPreview.bots.map((bot) => `${bot.label}（${bot.name}）`).join("、"))}</span>${pathRows}<span class="${active.length ? "bad" : ""}">${active.length ? `有活动任务：${escapeHtml(active.map((bot) => bot.name).join("、"))}，当前不能删除` : "没有活动任务，可以执行删除"}</span><span>飞书开放平台中的应用不会删除。</span>`;
+    elements.applyRemoval.disabled = active.length > 0;
+  } catch (error) {
+    elements.removalError.textContent = error.message || String(error);
+    elements.removalError.classList.remove("hidden");
+    elements.applyRemoval.disabled = true;
+  }
+}
+
 elements.refresh.addEventListener("click", refresh);
 elements.checkUpdate.addEventListener("click", async () => {
   elements.checkUpdate.disabled = true;
@@ -827,6 +883,12 @@ document.addEventListener("click", async (event) => {
   }
 });
 elements.botList.addEventListener("click", async (event) => {
+  const removeButton = event.target.closest(".managed-bot-remove");
+  if (removeButton && state) {
+    const bot = state.setup.managedBots[Number(removeButton.dataset.managedIndex)];
+    if (bot) await openRemovalDialog("bot", bot.name);
+    return;
+  }
   const readinessButton = event.target.closest(".managed-bot-readiness");
   if (readinessButton && state) {
     const bot = state.setup.managedBots[Number(readinessButton.dataset.managedIndex)];
@@ -859,6 +921,35 @@ elements.botList.addEventListener("click", async (event) => {
     elements.error.classList.remove("hidden");
   } finally {
     button.disabled = false;
+  }
+});
+elements.workspaceTableBody.addEventListener("click", async (event) => {
+  const button = event.target.closest(".managed-space-remove");
+  if (!button || !state) return;
+  const space = state.setup.managedSpaces[Number(button.dataset.spaceIndex)];
+  if (space) await openRemovalDialog("space", space.codexHome);
+});
+elements.closeRemovalDialog.addEventListener("click", () => elements.removalDialog.close());
+elements.cancelRemoval.addEventListener("click", () => elements.removalDialog.close());
+elements.removalForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!removalPreview || !elements.removalConfirm.checked) return;
+  elements.applyRemoval.disabled = true;
+  elements.removalError.classList.add("hidden");
+  try {
+    await window.bridgeDesktop.applyManagedRemoval({
+      kind: removalPreview.kind,
+      id: removalPreview.id,
+      deleteRuntime: true,
+      deleteWorkspaces: elements.removalDeleteWorkspaces.checked,
+      deleteCodexHome: removalPreview.kind === "space" && elements.removalDeleteHome.checked,
+    });
+    elements.removalDialog.close();
+    await refresh();
+  } catch (error) {
+    elements.removalError.textContent = error.message || String(error);
+    elements.removalError.classList.remove("hidden");
+    elements.applyRemoval.disabled = false;
   }
 });
 elements.botList.addEventListener("change", async (event) => {

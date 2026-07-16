@@ -23,6 +23,8 @@ contextBridge.exposeInMainWorld("bridgeDesktop", Object.freeze({
   startBot: (name) => ipcRenderer.invoke("desktop:start-bot", name),
   stopBot: (name) => ipcRenderer.invoke("desktop:stop-bot", name),
   setBotAutoStart: (value) => ipcRenderer.invoke("desktop:set-bot-autostart", value),
+  previewManagedRemoval: (value) => ipcRenderer.invoke("desktop:preview-managed-removal", value),
+  applyManagedRemoval: (value) => ipcRenderer.invoke("desktop:apply-managed-removal", value),
   setSettings: (value) => ipcRenderer.invoke("desktop:set-settings", value),
   checkBotReadiness: (name) => ipcRenderer.invoke("desktop:check-bot-readiness", name),
   copyPermissionPolicy: (name) => ipcRenderer.invoke("desktop:copy-permission-policy", name),

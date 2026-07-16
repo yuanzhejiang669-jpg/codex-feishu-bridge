@@ -990,7 +990,7 @@ Installation note:
 
 Date: 2026-07-16
 
-Status: completed locally; GitHub Release verification follows the tag workflow
+Status: completed and verified locally; GitHub Release verification follows the tag workflow
 
 Confirmed requirements:
 
@@ -1070,3 +1070,67 @@ Final GitHub and installed verification:
 - A later health poll observed the remaining pre-upgrade Bot processes exit and recover sequentially through the rate-limited supervisor. The upgrade verifier was strengthened to require all managed Bots to remain online with an unchanged PID set for 60 continuous seconds before reporting success.
 - Re-ran the in-place upgrade with the strengthened verifier: all three managed Bots restarted with new PIDs and remained stable for `62` continuous seconds before the verification returned success.
 - The temporary GitHub download directory under `%TEMP%\cfb-release-v0.2.0-verify` was removed after verification.
+
+## Node 22 - Managed Chat Completions and removal lifecycle
+
+Date: 2026-07-16
+
+Status: completed locally; GitHub Release verification follows the tag workflow
+
+Confirmed requirements:
+
+- Add client-managed support for upstreams that expose OpenAI Chat Completions but not Responses.
+- Add Bot and isolated-space removal with an impact preview and conservative data ownership boundaries.
+- Keep the existing script-hosted Bridge and every legacy Bot unchanged.
+- Publish the completed work as `v0.3.0` so installed `v0.2.0` clients can update through the System view.
+
+Translation-proxy decision:
+
+- The already working local ports `8788` and `8789` are served by the npm package `mimo2codex 0.5.28` from `https://github.com/7as0nch/mimo2codex`.
+- The package is MIT licensed and explicitly supports Responses-to-Chat translation, streaming, tool calls, reasoning, generic OpenAI-compatible providers, Node.js 18+, and local-only binding.
+- The desktop will pin and bundle this audited package instead of copying the user's global npm installation or maintaining a second partial protocol translator.
+- Managed provider definitions contain endpoint/model metadata only. API keys remain in Windows user environment variables and are injected into the child process at launch.
+
+Removal boundaries:
+
+- A managed Bot removal stops only that Bot, removes only its client Profile/registration/runtime records, and preserves its workspace unless the user explicitly selects local-data deletion.
+- Removing one Bot never deletes an isolated Codex Home still referenced by another Bot.
+- Isolated-space removal previews every member Bot and may remove the shared Codex Home only after all member Bots pass the active-task guard.
+- No removal operation deletes a Feishu cloud application or any legacy/script-managed Bridge instance.
+
+Implementation completed:
+
+- Added a Responses / Chat Completions protocol selector to Provider creation. Chat endpoints are probed through `/chat/completions`, then stored as a local Responses endpoint backed by the managed proxy.
+- Added the pinned `mimo2codex 0.5.28` runtime and complete production dependency tree as an `extraResources` payload, including the upstream MIT license.
+- Added a local-only proxy service with secret-free `providers.json`, Windows user-environment credential injection, update-check suppression, health polling, bounded crash recovery, first-use port allocation across `18788-18807`, and visible status/paths.
+- Added duplicate-model rejection so two managed Chat Providers cannot silently route the same model ID to the wrong upstream.
+- Added Bot and isolated-space deletion previews, a second active-run check at apply time, recovery-supervisor suspension, Lark Profile removal, client-state/runtime cleanup, strict owned-root checks, optional workspace deletion, and optional isolated Codex Home deletion.
+- Kept workspaces by default and never touched global Codex Home, legacy Bots, or Feishu cloud applications.
+
+Verification completed before publication:
+
+- Desktop syntax/unit/integration tests: final suite `104/104` passed, including proxy cancellation and removal-time active-task regression coverage.
+- Existing Bridge syntax/static/unit tests: `41/41` passed without changing the script-hosted Bridge.
+- A real bundled-runtime smoke started `mimo2codex`, translated a Responses request into Chat Completions against a local upstream, returned the translated response, killed the proxy process, and verified automatic recovery with a new PID.
+- Packaged desktop smoke passed; packaged Bridge engine smoke passed on port `18329`; the packaged Node and `mimo2codex` files passed the same protocol smoke after the final rebuild.
+- The Provider view screenshot passed visual inspection with no overlap or clipped text. Development capture is isolated from production client data and bypasses the production single-instance lock.
+- Secret scanning found no high-confidence App ID, API key, or App Secret values in source/workflow files.
+- Windows unpacked output contains `engine`, `tools`, `proxy`, scripts, and licenses; `mimo2codex` and its MIT license are present under the proxy payload.
+
+Adversarial review and fixes:
+
+1. Three-month failure: quit/update races with a proxy start that is still reading credentials or waiting for health, leaving an orphan process or letting an old exit callback corrupt the new status. Validation reproduced the lifecycle window and repeated real crash recovery three times. Fix: add a lifecycle generation guard, cancel health waiting after stop, ignore stale child exit callbacks, and cover stop-during-start with a regression test.
+2. Three-month failure: a stale deletion preview says a Bot is idle, but a task starts before the user confirms. Validation writes a real `active-runs.json` after preview and applies removal. Fix/guard: apply always rebuilds the preview from disk and refuses the operation before stopping the Bot or removing its Profile/configuration; regression coverage confirms the files remain.
+3. Three-month failure: a packaging edit omits `mimo2codex` or its license while version/update checks still pass. Validation inspects the final unpacked payload. Fix: release verification now requires the packaged proxy manifest, exact pinned version `0.5.28`, MIT metadata, and a non-empty license before publication.
+
+Final local release artifact before GitHub publication:
+
+```text
+apps/desktop/out/Codex-Feishu-Bridge-Setup-0.3.0.exe
+Size: 169701946 bytes
+SHA-256: 8DA665392927FBCAC2752C80DAFAF30FC919E00BC8D4807F5157674189367C31
+```
+
+Remaining deliberate gap:
+
+- Item 43 remains open until a newly created client-managed Chat Provider is exercised against a real paid/non-GPT upstream. The packaged translator itself has been verified end to end against a local protocol-accurate upstream, and the user's legacy `mimo2codex-apideepseek` path remains outside client ownership.

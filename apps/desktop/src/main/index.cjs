@@ -7,7 +7,7 @@ const { discoverBridge } = require("./services/bridge-discovery.cjs");
 const { inspectCapabilities } = require("./services/capabilities.cjs");
 const { inspectEngine } = require("./services/engine.cjs");
 const { collectKnownPaths, isKnownPath } = require("./services/known-paths.cjs");
-const { createManagedBot, previewBot, readManagedBots } = require("./services/bot-setup.cjs");
+const { createManagedBot, previewBot, readManagedBots, runLarkCli } = require("./services/bot-setup.cjs");
 const { registerBotWithQr } = require("./services/feishu-registration.cjs");
 const { authorizeLarkUser } = require("./services/lark-user-auth.cjs");
 const {
@@ -30,8 +30,16 @@ const {
   listProviderModels,
   probeProvider,
   providerSyncPlan,
+  readUserEnvironmentVariable,
   replaceGlobalProviderKey,
 } = require("./services/provider-manager.cjs");
+const { createProtocolProxyService } = require("./services/protocol-proxy.cjs");
+const {
+  applyManagedRemoval,
+  isolatedSpaces,
+  previewManagedBotRemoval,
+  previewManagedSpaceRemoval,
+} = require("./services/managed-removal.cjs");
 const { inspectDataSchema, migrateDesktopData } = require("./services/data-migrations.cjs");
 const { assessCompatibility } = require("./services/compatibility.cjs");
 const { createUpdaterService } = require("./services/updater.cjs");
@@ -61,7 +69,7 @@ if (!app.isPackaged || smokeTest || capturePath) {
   app.setPath("userData", path.join(process.env.LOCALAPPDATA || app.getPath("appData"), "CodexFeishuBridgeDesktopDev"));
 }
 
-const singleInstance = app.requestSingleInstanceLock();
+const singleInstance = capturePath ? true : app.requestSingleInstanceLock();
 let mainWindow = null;
 let currentState = null;
 let cancelRegistration = null;
@@ -71,6 +79,8 @@ let tray = null;
 let isQuitting = false;
 let recoverySupervisor = null;
 let updaterService = null;
+let protocolProxyService = null;
+let proxyStoppedForQuit = false;
 let desktopSettings = { launchAtLogin: false, closeToTray: true, error: "" };
 const windowsStartup = createWindowsStartup(app);
 
@@ -154,6 +164,9 @@ function providerManagerOptions() {
     codexHome: path.join(app.getPath("home"), ".codex"),
     dataRoot: managedDataRoot(),
     timeoutMs: 30_000,
+    prepareProtocolProxyProvider: (provider, model) => protocolProxyService?.prepareProvider(provider, model),
+    restartProtocolProxy: () => protocolProxyService?.restart(),
+    decorateProviderCatalog: (catalog) => protocolProxyService?.decorateCatalog(catalog) || catalog,
   };
 }
 
@@ -164,6 +177,20 @@ function workspaceFactoryOptions() {
     codexHomeRoot: codexHomeRoot(),
     sourceCodexHome: path.join(app.getPath("home"), ".codex"),
     existingNames: currentState?.bridge?.instances?.map((item) => item.name) || [],
+  };
+}
+
+function removalOptions() {
+  return {
+    dataRoot: managedDataRoot(),
+    localAppData: runtimeLocalAppData(),
+    workspaceRoot: workspaceRoot(),
+    codexHomeRoot: codexHomeRoot(),
+    stopBot: (name) => stopManagedBot(name, supervisorOptions()),
+    startBot: (name) => startManagedBot(name, supervisorOptions()),
+    removeProfile: (bot) => runLarkCli(currentState?.engine?.larkCliPath || "", ["profile", "remove", bot.profile], {
+      profileHome: path.join(managedDataRoot(), "profile-home"),
+    }),
   };
 }
 
@@ -194,12 +221,14 @@ async function prepareUpdateInstall(restartNames, targetVersion) {
       await stopManagedBot(name, supervisorOptions());
       stoppedNames.push(name);
     }
+    await protocolProxyService?.stop();
   } catch (error) {
     for (const name of stoppedNames) {
       try { await startManagedBot(name, supervisorOptions()); } catch {}
     }
     clearRecoveryMarker(managedDataRoot());
     recoverySupervisor?.start();
+    await protocolProxyService?.start().catch(() => {});
     throw error;
   }
   return {
@@ -209,6 +238,7 @@ async function prepareUpdateInstall(restartNames, targetVersion) {
       }
       clearRecoveryMarker(managedDataRoot());
       recoverySupervisor?.start();
+      await protocolProxyService?.start().catch(() => {});
     },
   };
 }
@@ -251,6 +281,7 @@ async function loadState() {
     inspectEngine({ packaged: app.isPackaged, resourcesPath: process.resourcesPath, desktopRoot }),
     Promise.resolve(inspectCapabilities()),
   ]);
+  const providerCatalog = inspectProviderCatalog(path.join(app.getPath("home"), ".codex"));
   currentState = {
     generatedAt: new Date().toISOString(),
     app: { version: app.getVersion(), packaged: app.isPackaged },
@@ -259,7 +290,7 @@ async function loadState() {
     engine,
     capabilities,
     provider: inspectProvider(path.join(app.getPath("home"), ".codex")),
-    providerCatalog: inspectProviderCatalog(path.join(app.getPath("home"), ".codex")),
+    providerCatalog: protocolProxyService?.decorateCatalog(providerCatalog) || providerCatalog,
     settings: inspectDesktopSettings(),
     setup: {
       mode: app.isPackaged ? "production" : "development-sandbox",
@@ -268,11 +299,13 @@ async function loadState() {
       codexHomeRoot: codexHomeRoot(),
       runtimeLocalAppData: runtimeLocalAppData(),
       managedBots: inspectManagedBots(managedDataRoot(), runtimeLocalAppData()),
+      managedSpaces: isolatedSpaces(managedDataRoot()),
       permissionPolicy: publicPermissionPolicy(),
       dataSchema: inspectDataSchema(managedDataRoot()),
       startupError,
       recovery: recoverySupervisor?.snapshot() || {},
       workspaceFactory: readWorkspaceFactoryQueue(managedDataRoot()),
+      protocolProxy: protocolProxyService?.snapshot() || { supported: false, status: "unavailable", providerCount: 0 },
     },
     update: updaterService?.snapshot() || {
       supported: false,
@@ -409,6 +442,17 @@ if (!singleInstance) {
       return;
     }
     if (!capturePath) {
+      await loadState();
+      const proxyCliPath = app.isPackaged
+        ? path.join(process.resourcesPath, "proxy", "node_modules", "mimo2codex", "dist", "cli.js")
+        : path.join(__dirname, "..", "..", "..", "proxy-runtime", "node_modules", "mimo2codex", "dist", "cli.js");
+      protocolProxyService = createProtocolProxyService({
+        dataRoot: managedDataRoot(),
+        nodePath: currentState?.engine?.nodePath || "",
+        proxyCliPath,
+        readUserEnvironmentVariable,
+      });
+      await protocolProxyService.start().catch(() => {});
       createTray();
       updaterService = createDesktopUpdater();
       if (!startupError && app.isPackaged) {
@@ -566,6 +610,22 @@ if (!singleInstance) {
       if (enabled) void recoverySupervisor?.tick();
       return result;
     });
+    ipcMain.handle("desktop:preview-managed-removal", (_event, input) => (
+      input?.kind === "space"
+        ? previewManagedSpaceRemoval(input?.id, removalOptions())
+        : previewManagedBotRemoval(input?.id, removalOptions())
+    ));
+    ipcMain.handle("desktop:apply-managed-removal", async (_event, input) => {
+      assertStartupReady();
+      recoverySupervisor?.stop();
+      try {
+        const result = await applyManagedRemoval(input, removalOptions());
+        await loadState();
+        return result;
+      } finally {
+        recoverySupervisor?.start();
+      }
+    });
     ipcMain.handle("desktop:set-settings", async (_event, patch) => {
       assertStartupReady();
       const next = {};
@@ -632,10 +692,18 @@ if (!singleInstance) {
     createWindow();
   });
 
-  app.on("before-quit", () => {
+  app.on("before-quit", (event) => {
     isQuitting = true;
     recoverySupervisor?.stop();
     updaterService?.stop();
+    const proxyStatus = protocolProxyService?.snapshot().status;
+    if (!proxyStoppedForQuit && new Set(["online", "starting"]).has(proxyStatus)) {
+      event.preventDefault();
+      void protocolProxyService.stop().finally(() => {
+        proxyStoppedForQuit = true;
+        app.quit();
+      });
+    }
   });
   app.on("window-all-closed", () => {
     if (!desktopSettings.closeToTray || !tray) app.quit();

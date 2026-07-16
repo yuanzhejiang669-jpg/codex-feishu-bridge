@@ -71,6 +71,39 @@ test("adds a Provider atomically and stores its key outside TOML", async () => {
   } finally { fs.rmSync(value.root, { recursive: true, force: true }); }
 });
 
+test("validates Chat Completions and stores a client-proxy Responses endpoint", async () => {
+  const value = fixture();
+  const writes = [];
+  let committed = false;
+  try {
+    const fetchImpl = async (url) => url.endsWith("/models")
+      ? response(200, { data: [{ id: "qwen-test" }] })
+      : response(200, { id: "chat_1", choices: [{ message: { content: "OK" } }] });
+    const input = {
+      id: "qwen", name: "Qwen", baseUrl: "https://chat.example/v1", envKey: "QWEN_API_KEY",
+      apiKey: "secret", model: "qwen-test", wireApi: "chat",
+    };
+    const probe = await require("../src/main/services/provider-manager.cjs").probeProvider(input, { fetchImpl });
+    assert.equal(probe.wireApi, "chat");
+    await addGlobalProvider(input, {
+      codexHome: value.codexHome,
+      fetchImpl,
+      readUserEnvironmentVariable: async () => "",
+      setUserEnvironmentVariable: async (name, secret) => writes.push([name, secret]),
+      prepareProtocolProxyProvider: () => ({
+        codexProvider: { id: "qwen", name: "Qwen", baseUrl: "http://127.0.0.1:18788/v1", envKey: "QWEN_API_KEY", wireApi: "responses" },
+        commit: async () => { committed = true; }, rollback: async () => {},
+      }),
+    });
+    const text = fs.readFileSync(path.join(value.codexHome, "config.toml"), "utf8");
+    assert.match(text, /base_url = "http:\/\/127\.0\.0\.1:18788\/v1"/);
+    assert.match(text, /wire_api = "responses"/);
+    assert.doesNotMatch(text, /chat\.example|secret/);
+    assert.equal(committed, true);
+    assert.deepEqual(writes, [["QWEN_API_KEY", "secret"]]);
+  } finally { fs.rmSync(value.root, { recursive: true, force: true }); }
+});
+
 test("restores an absent user key when writing a new Provider fails", async () => {
   const value = fixture();
   const writes = [];
