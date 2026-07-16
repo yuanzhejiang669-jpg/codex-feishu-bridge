@@ -1045,3 +1045,9 @@ Adversarial review and fixes:
 1. Three-month failure: a private repository or mismatched updater feed makes every installed client report update errors. Validation: query repository visibility and inspect packaged `app-update.yml`. Result/fix: the repository is public and the generated owner/repository fields match the release workflow; clean GitHub Action validation remains the final external check.
 2. Three-month failure: installation begins after an earlier idle check while a Bot has since started work, or a partial stop strands online Bots. Validation: updater and supervisor tests exercise both stages. Fix: inspect active runs again at install time, let `stopManagedBot` enforce the same guard during shutdown, roll back already stopped Bots on any failure, and persist the pre-update online set for relaunch recovery.
 3. Three-month failure: Windows reports equivalent versions as `0.2`, `0.2.0`, or `0.2.0.0`, causing a valid release to fail verification; a stale recovery marker also blocks a later update. Validation: both failures were reproduced during packaging. Fix: normalize only equivalent numeric Windows versions while rejecting non-zero fourth components, and atomically replace stale generated recovery markers with focused regression tests.
+
+First clean GitHub run:
+
+- Run `29463004050` passed checkout, dependency installation, tag/version validation, and all desktop tests.
+- The build produced the installer but electron-builder attempted implicit publishing because it detected the `v0.2.0` tag before the explicit Release step. No Release was created.
+- Fixed the build contract by adding `--publish never`; GitHub publication remains exclusively owned by the final authenticated `gh release create` step.

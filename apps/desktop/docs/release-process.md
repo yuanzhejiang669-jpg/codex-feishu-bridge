@@ -14,6 +14,7 @@ The Windows client is published from this repository through GitHub Actions. Git
 8. Verify the GitHub Release is public and contains the installer, blockmap, `latest.yml`, and checksums.
 
 The updater compares the packaged application version with the latest stable GitHub Release. It never installs source from the `main` branch.
+The build command always passes `--publish never`; only the final workflow step may create or upload a Release, preventing electron-builder's tag-triggered implicit publishing from producing partial assets.
 
 ## Runtime safety
 

@@ -15,7 +15,7 @@
     "start": "npm run stage:engine && electron .",
     "pack": "npm run generate:icons && npm run stage:engine && electron-builder --dir",
     "verify:release": "node scripts/verify-release.cjs",
-    "dist:win": "npm run generate:icons && npm run stage:engine && electron-builder --win --x64 && npm run checksums && npm run verify:release"
+    "dist:win": "npm run generate:icons && npm run stage:engine && electron-builder --win --x64 --publish never && npm run checksums && npm run verify:release"
   },
   "devDependencies": {
     "electron": "43.1.0",
