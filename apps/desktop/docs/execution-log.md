@@ -1134,3 +1134,11 @@ SHA-256: 8DA665392927FBCAC2752C80DAFAF30FC919E00BC8D4807F5157674189367C31
 Remaining deliberate gap:
 
 - Item 43 remains open until a newly created client-managed Chat Provider is exercised against a real paid/non-GPT upstream. The packaged translator itself has been verified end to end against a local protocol-accurate upstream, and the user's legacy `mimo2codex-apideepseek` path remains outside client ownership.
+
+GitHub publication verification:
+
+- Commit `9e20212adba498974526bd8a01eafa295cf08f10` was pushed to `main` and tagged `v0.3.0`.
+- Clean Windows Actions run `29473072339` passed dependency installation, `104/104` desktop tests, final packaging verification, and Release publication.
+- Public stable Release `v0.3.0` is neither draft nor prerelease and contains the exact installer, blockmap, `latest.yml`, and checksums assets.
+- Public `latest.yml` reports `0.3.0` and references the exact GitHub asset `Codex-Feishu-Bridge-Setup-0.3.0.exe` with size `169702315` bytes.
+- An anonymous download of the published installer produced SHA-256 `FAF298B3E04FDD5AFF6D08768F55123E773AF9189A0CE7311E07D1743F50F97D`, exactly matching the published `checksums.txt`; the temporary verification directory was removed afterward.
