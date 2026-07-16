@@ -1186,3 +1186,11 @@ apps/desktop/out/Codex-Feishu-Bridge-Setup-0.4.0.exe
 Size: 169705016 bytes
 SHA-256: A1C3EB0B86CA5D099192E5B3EAF337473C1D07D13E965F80E8CA62C69C58A672
 ```
+
+GitHub publication verification:
+
+- Commit `5f6b2d6ea3988713eb398486e0bcb3fdc7fd16ac` was pushed to `main` and tagged `v0.4.0`.
+- Clean Windows Actions run `29474368526` passed tag/version validation, dependency installation, all `111` desktop tests, packaging verification, and Release publication.
+- Public stable Release `v0.4.0` is neither draft nor prerelease and contains the exact installer, blockmap, `latest.yml`, and checksums assets.
+- Public `latest.yml` reports `0.4.0` and references `Codex-Feishu-Bridge-Setup-0.4.0.exe` with size `169705334` bytes.
+- An anonymous download produced SHA-256 `83F80CF8FFAF73B42BA611CF994D2567D0EF9D2C99EC8F62B5CA5A96F27CEFAD`, exactly matching the published `checksums.txt`; the temporary verification directory was removed afterward.
