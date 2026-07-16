@@ -5,7 +5,7 @@ const path = require("node:path");
 const desktopRoot = path.resolve(__dirname, "..");
 const outRoot = path.join(desktopRoot, "out");
 const { version } = JSON.parse(fs.readFileSync(path.join(desktopRoot, "package.json"), "utf8"));
-const installer = `Codex Feishu Bridge Setup ${version}.exe`;
+const installer = `Codex-Feishu-Bridge-Setup-${version}.exe`;
 const included = [installer, `${installer}.blockmap`, "latest.yml"]
   .filter((name) => fs.existsSync(path.join(outRoot, name)));
 

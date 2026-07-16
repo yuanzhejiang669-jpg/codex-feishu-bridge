@@ -1,5 +1,6 @@
 appId: io.github.codex-feishu-bridge.desktop
 productName: Codex Feishu Bridge
+artifactName: Codex-Feishu-Bridge-Setup-${version}.${ext}
 copyright: Copyright 2026 Codex Feishu Bridge contributors
 
 directories:

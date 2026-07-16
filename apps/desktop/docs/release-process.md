@@ -13,6 +13,8 @@ The Windows client is published from this repository through GitHub Actions. Git
 7. `.github/workflows/release-windows.yml` builds on a clean Windows runner and publishes the verified assets.
 8. Verify the GitHub Release is public and contains the installer, blockmap, `latest.yml`, and checksums.
 
+The published installer uses the fixed `Codex-Feishu-Bridge-Setup-<version>.exe` artifact pattern. The filename must exactly match the URL recorded in `latest.yml`; do not upload a space-normalized alias.
+
 The updater compares the packaged application version with the latest stable GitHub Release. It never installs source from the `main` branch.
 The build command always passes `--publish never`; only the final workflow step may create or upload a Release, preventing electron-builder's tag-triggered implicit publishing from producing partial assets.
 

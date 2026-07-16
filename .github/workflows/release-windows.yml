@@ -56,7 +56,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $package = Get-Content -LiteralPath package.json -Raw | ConvertFrom-Json
-          $installer = "out/Codex Feishu Bridge Setup $($package.version).exe"
+          $installer = "out/Codex-Feishu-Bridge-Setup-$($package.version).exe"
           $assets = @(
             $installer,
             "$installer.blockmap",

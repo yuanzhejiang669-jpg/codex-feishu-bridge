@@ -1051,3 +1051,9 @@ First clean GitHub run:
 - Run `29463004050` passed checkout, dependency installation, tag/version validation, and all desktop tests.
 - The build produced the installer but electron-builder attempted implicit publishing because it detected the `v0.2.0` tag before the explicit Release step. No Release was created.
 - Fixed the build contract by adding `--publish never`; GitHub publication remains exclusively owned by the final authenticated `gh release create` step.
+
+First published-asset audit:
+
+- Run `29463196922` passed all clean-runner tests, build verification, and Release publication.
+- The post-publication audit found that GitHub normalized the space-containing installer asset to a dotted name while electron-builder's `latest.yml` referenced a hyphenated safe name. No download had occurred, but automatic updates would have returned 404.
+- Fixed all build, checksum, verification, and workflow paths to use the exact `Codex-Feishu-Bridge-Setup-<version>.exe` artifact name before recreating the release.
