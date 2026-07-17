@@ -1414,3 +1414,7 @@ Verification so far:
 - Local Windows `0.6.0` packaging passed PowerShell parsing, protocol-proxy smoke, engine staging, NSIS packaging, checksums, and release-version verification.
 - macOS Runner packaging, public Release assets, and physical-Mac E2E remain pending and are not claimed complete.
 - The powered-off old Windows device remains intentionally untouched.
+
+First clean-runner finding:
+
+- GitHub Actions run `29592273684` passed the complete Windows job but stopped the macOS job before packaging because three test fixtures encoded Windows path semantics or allowed a Provider test to fall back to PowerShell. The product implementation was not bypassed: compatibility fixtures now build native paths with `path.join`, and the Provider transaction test injects its credential reader explicitly. The corrected release version is `0.6.1`; the failed `v0.6.0` tag has no public Release.

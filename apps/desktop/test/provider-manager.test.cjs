@@ -295,6 +295,7 @@ test("previews models and probes before replacing a key", async () => {
     const result = await replaceGlobalProviderKey({ id: "existing", apiKey: "new-secret", model: "gpt-test" }, {
       codexHome: value.codexHome,
       fetchImpl,
+      readUserEnvironmentVariable: async () => "old-secret",
       setUserEnvironmentVariable: async (name, secret) => writes.push([name, secret]),
     });
     assert.equal(result.probe.ok, true);

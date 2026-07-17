@@ -1,8 +1,11 @@
 const assert = require("node:assert/strict");
+const os = require("node:os");
+const path = require("node:path");
 const test = require("node:test");
 const { assessCompatibility, majorVersion } = require("../src/main/services/compatibility.cjs");
 
 function healthyState() {
+  const dataRoot = path.join(os.tmpdir(), "CodexFeishuBridgeDesktop");
   return {
     app: { version: "0.1.2" },
     engine: {
@@ -26,8 +29,8 @@ function healthyState() {
       requiresOpenaiAuth: false,
     },
     setup: {
-      dataRoot: "C:\\Users\\Test\\AppData\\Local\\CodexFeishuBridgeDesktop",
-      runtimeLocalAppData: "C:\\Users\\Test\\AppData\\Local\\CodexFeishuBridgeDesktop\\runtime-localappdata",
+      dataRoot,
+      runtimeLocalAppData: path.join(dataRoot, "runtime-localappdata"),
       dataSchema: { status: "ready", currentVersion: 1, supportedVersion: 1 },
     },
   };
@@ -49,7 +52,7 @@ test("reports a healthy third-party Provider stack as compatible", () => {
 test("reports unsupported protocol and unisolated runtime as incompatible", () => {
   const state = healthyState();
   state.engine.protocolVersion = 99;
-  state.setup.runtimeLocalAppData = "C:\\Users\\Test\\AppData\\Local";
+  state.setup.runtimeLocalAppData = path.join(os.tmpdir(), "unmanaged-runtime");
   const result = assessCompatibility(state);
   assert.equal(result.status, "bad");
   assert.equal(result.items.find((item) => item.id === "engine-protocol").status, "bad");
