@@ -1370,3 +1370,22 @@ Verification so far:
 - Root syntax, static, capability, and unit checks pass `56/56`; desktop syntax, unit, and integration checks pass `124/124`.
 - Playwright opened the real isolated script panel, selected `mimo2codex-apideepseek`, entered a confirmation draft, waited twelve seconds across the automatic refresh boundary, and verified the selection, text, and expanded state remained intact.
 - Script-panel and Electron capture screenshots show the primary login action and collapsed advanced Provider control without overlap at `1440x1100`.
+
+Adversarial review and fixes:
+
+1. Three-month failure: expired login timers or superseded login children survive and prevent the next browser login. Validation reproduced the stale `codex.exe login` PID, stopped only that exact process, and exercised restart and timeout paths in unit tests. Fix: every exit, error, restart, cancellation, and expiry path clears its timer and process reference before another login starts.
+2. Three-month failure: a refresh draft still points at a Provider that was removed or became unavailable, causing the UI to display a false pending target. Validation covers state replacement after provider discovery. Fix: draft restoration accepts only a target present in the refreshed selectable Provider set; otherwise it falls back to the real current Provider.
+3. Three-month failure: the script source and packaged client engine drift, so one surface contains the lifecycle fix while the other does not. Validation built the release from staged commit `5fce0bd1bd2affc38d086dc55fae2997fbe57165` and passed both root and desktop suites before packaging. Guard: release packaging continues to stage the shared engine from the checked-out commit and runs the complete verification suite.
+
+Completion boundary:
+
+- Completed end-to-end delivery on 2026-07-17.
+
+Delivery verification:
+
+- Commit `5fce0bd1bd2affc38d086dc55fae2997fbe57165` was pushed to `origin/main` and tagged `v0.5.1`.
+- GitHub Actions run `29551367139` passed in 2m42s and published the stable public Release at `https://github.com/yuanzhejiang669-jpg/codex-feishu-bridge/releases/tag/v0.5.1`.
+- A fresh public installer download produced SHA-256 `2BAF33E1E0C8CDCB6B502E52901421EC7B5BC71C4E722929ACBEE6EEA8B6E9C3`.
+- The current-device script panel restarted from PID `40376` to PID `50800` and displayed the new OpenAI official-login UI. The stale login PID `43132` was removed, zero `codex.exe login` processes remained, and the active `codex.exe app-server` process was not touched. The 15 script-hosted Bots were intentionally left running because this control-panel-only change does not alter their message path.
+- The installed client upgraded in place to file version `0.5.1.0`; its uninstall entry reports `0.5.1`. Managed Bots `codex-assistant-1-drawing`, `codex-assistant-2-drawing`, and `codex-assistant-3-drawing` all restarted with new PIDs `39516`, `27072`, and `50396` and remained online for 61 seconds.
+- The powered-off old device was intentionally not contacted or synchronized. It remains a deferred follow-up after the user starts it and explicitly requests synchronization.

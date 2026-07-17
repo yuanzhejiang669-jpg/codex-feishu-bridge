@@ -372,7 +372,7 @@ This list is the durable parity checklist against the existing local control pan
 113. [x] Preserve each Home's unsubmitted Provider target, confirmation text, expanded state, and focused field across status refreshes.
 114. [x] Keep the desktop client manual-refresh-first while retaining its two-second login-status polling without losing drafts.
 115. [x] Present OpenAI official login as the primary local action and move whole-Home Provider switching into advanced management.
-116. [ ] Verify `0.5.1` packaging, public Release, current-device script panel, installed upgrade, and managed Bot recovery; intentionally defer the powered-off old device.
+116. [x] Verify `0.5.1` packaging, public Release, current-device script panel, installed upgrade, and managed Bot recovery; intentionally defer the powered-off old device.
 
 `0.1.6 Provider center` acceptance: items 26-35 are implemented; API keys never enter TOML, renderer state, IPC results, or logs; synchronization is previewable and transactional; only client-managed isolated Codex Homes are eligible; existing Bridge processes and legacy Bot files remain unchanged.
 
