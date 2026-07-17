@@ -59,7 +59,7 @@ async function main() {
   const service = createProtocolProxyService({
     dataRoot: root,
     nodePath: process.env.CFB_PROXY_SMOKE_NODE
-      || path.join(__dirname, "..", "node_modules", "node", "bin", "node.exe"),
+      || path.join(__dirname, "..", "node_modules", "node", "bin", process.platform === "win32" ? "node.exe" : "node"),
     proxyCliPath: process.env.CFB_PROXY_SMOKE_CLI
       || path.join(__dirname, "..", "proxy-runtime", "node_modules", "mimo2codex", "dist", "cli.js"),
     readUserEnvironmentVariable: async () => "smoke-secret",

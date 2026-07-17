@@ -1418,3 +1418,4 @@ Verification so far:
 First clean-runner finding:
 
 - GitHub Actions run `29592273684` passed the complete Windows job but stopped the macOS job before packaging because three test fixtures encoded Windows path semantics or allowed a Provider test to fall back to PowerShell. The product implementation was not bypassed: compatibility fixtures now build native paths with `path.join`, and the Provider transaction test injects its credential reader explicitly. The corrected release version is `0.6.1`; the failed `v0.6.0` tag has no public Release.
+- GitHub Actions run `29592578081` then passed all macOS tests and the complete Windows job, but the pre-package protocol-proxy smoke still selected development Node as `node.exe`. The smoke now selects `node.exe` only on Windows and `node` on macOS. The next immutable release attempt is `0.6.2`; `v0.6.1` also has no public Release.
