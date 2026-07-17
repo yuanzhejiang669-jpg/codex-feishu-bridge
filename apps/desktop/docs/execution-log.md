@@ -1419,3 +1419,25 @@ First clean-runner finding:
 
 - GitHub Actions run `29592273684` passed the complete Windows job but stopped the macOS job before packaging because three test fixtures encoded Windows path semantics or allowed a Provider test to fall back to PowerShell. The product implementation was not bypassed: compatibility fixtures now build native paths with `path.join`, and the Provider transaction test injects its credential reader explicitly. The corrected release version is `0.6.1`; the failed `v0.6.0` tag has no public Release.
 - GitHub Actions run `29592578081` then passed all macOS tests and the complete Windows job, but the pre-package protocol-proxy smoke still selected development Node as `node.exe`. The smoke now selects `node.exe` only on Windows and `node` on macOS. The next immutable release attempt is `0.6.2`; `v0.6.1` also has no public Release.
+
+Adversarial review and fixes:
+
+1. Three-month failure: an Apple Silicon DMG accidentally carries Intel Node or Lark CLI, so the interface opens but every Bot fails at launch. Fix: the build downloads each architecture explicitly, verifies upstream SHA-256 values, and the clean macOS job uses `file` on both unpacked apps to require matching Node and Lark architectures.
+2. Three-month failure: a Windows-only path survives in a test or smoke command and future macOS releases stop before packaging. The first two clean-runner attempts reproduced Windows fixture paths, PowerShell fallback, and a `node.exe` smoke path. Fix: tests use native `path.join`, credential operations are injected, and the proxy smoke selects the executable name by platform.
+3. Three-month failure: users mistake an unsigned Mac build for a notarized production release, Gatekeeper blocks it, or in-app replacement fails signature checks. Fix: documentation labels the Mac assets as unsigned test builds and macOS in-app installation remains disabled until Developer ID signing, hardened runtime, and notarization are configured.
+
+Completion boundary:
+
+- Cross-platform source, clean-runner packaging, GitHub distribution, and current Windows synchronization completed on 2026-07-17.
+- Physical-Mac installation, Codex discovery, OAuth, Feishu registration, and real-message E2E remain deliberately open acceptance item 126.
+
+Delivery verification:
+
+- Release source commit `1e7d2a8c94d7edeb26b1abf025297cccde6230b4` is identical across local `main`, `origin/main`, and tag `v0.6.2`.
+- GitHub Actions run `29592889142` passed: macOS `131/131` tests, protocol-proxy smoke, checksum-gated native tools, x64/arm64 packaging and unpacked architecture verification; Windows tests, packaging, and release verification also passed. The atomic publish job completed only after both build jobs.
+- Stable public Release `v0.6.2` is neither draft nor prerelease and contains Windows x64 plus macOS Intel and Apple Silicon DMG/ZIP assets, blockmaps, update metadata, and platform checksums.
+- Apple Silicon DMG: `230639870` bytes, SHA-256 `B65AED68570685941401B072A1F73687C6CE10F0FB9AD9130FD661DD6C95B3F4`.
+- Intel DMG: `234088738` bytes, SHA-256 `B9A8FED17CA4357C1B863DB418040915312380E37474DC43B220581847A102EB`.
+- The public Windows installer SHA-256 is `1BED7BF05F7C89FBD308FAC1ED9ACFC7DCB8CD7CF19822EAC81E0A059D568139`.
+- The current Windows client upgraded in place to file version `0.6.2.0`; its uninstall entry reports `0.6.2`. Drawing Bots 1, 2, and 3 restarted with new PIDs `13584`, `38300`, and `22308`, and remained online for 61 seconds. Persistent data was preserved.
+- Script-hosted Bots were not restarted because the shared Bridge engine source did not change in this macOS client iteration. The powered-off old Windows device was not contacted.

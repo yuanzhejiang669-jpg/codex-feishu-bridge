@@ -381,7 +381,7 @@ This list is the durable parity checklist against the existing local control pan
 122. [x] Produce separate macOS `arm64` and `x64` DMG/ZIP assets without changing Windows artifact names or persistent data paths.
 123. [x] Replace the Windows-only tag workflow with a gated Windows/macOS build and one atomic GitHub Release publication job.
 124. [x] Pass the cross-platform desktop test suite and rebuild the Windows `0.6.0` installer locally.
-125. [ ] Pass the clean GitHub macOS runner build and verify both unpacked application architectures and release assets.
+125. [x] Pass the clean GitHub macOS runner build and verify both unpacked application architectures and release assets.
 126. [ ] Complete a real Mac install, Codex discovery, OpenAI/Provider login, Feishu registration, Bot start, and message E2E before calling macOS production-ready.
 
 `0.1.6 Provider center` acceptance: items 26-35 are implemented; API keys never enter TOML, renderer state, IPC results, or logs; synchronization is previewable and transactional; only client-managed isolated Codex Homes are eligible; existing Bridge processes and legacy Bot files remain unchanged.
