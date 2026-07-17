@@ -136,6 +136,7 @@ function runLarkCli(larkCliPath, args, { input = "", profileHome, timeoutMs = 60
       env: {
         ...process.env,
         USERPROFILE: profileHome,
+        HOME: profileHome,
         LARKSUITE_CLI_NO_UPDATE_NOTIFIER: "1",
         LARKSUITE_CLI_NO_SKILLS_NOTIFIER: "1",
       },

@@ -264,7 +264,7 @@ function renderBots(bridge, setup = {}) {
       <span>${bot.activeRunCount} 个任务</span>
       <span class="path-text">${escapeHtml(bot.workspace)}</span>
       <div class="bot-actions">
-        <label class="auto-start-toggle" title="Windows 登录后启动，并在意外离线时自动恢复"><input class="managed-bot-autostart" data-managed-index="${index}" type="checkbox" ${bot.autoStart ? "checked" : ""}>自启</label>
+        <label class="auto-start-toggle" title="系统登录后启动，并在意外离线时自动恢复"><input class="managed-bot-autostart" data-managed-index="${index}" type="checkbox" ${bot.autoStart ? "checked" : ""}>自启</label>
         <button class="link-button managed-bot-readiness" data-managed-index="${index}" type="button">检查</button>
         <button class="link-button managed-bot-action" data-managed-index="${index}" type="button">${bot.online ? "停止" : "启动"}</button>
         <button class="link-button danger-link managed-bot-remove" data-managed-index="${index}" type="button">删除</button>
@@ -1118,7 +1118,7 @@ function updateProviderRemovalOptions() {
   } else if (spacesRetained) {
     elements.providerRemovalKeyLabel.textContent = `保留环境变量 ${providerRemovalPreview.envKey}（隔离空间仍需要）`;
   } else {
-    elements.providerRemovalKeyLabel.textContent = `同时删除 Windows 用户环境变量 ${providerRemovalPreview.envKey}`;
+    elements.providerRemovalKeyLabel.textContent = `同时删除系统安全凭据 ${providerRemovalPreview.envKey}`;
   }
   updateProviderRemovalSubmitState();
 }
@@ -1498,7 +1498,7 @@ elements.providerAddForm.addEventListener("submit", (event) => {
   runProviderAction(button, async () => {
     const result = await window.bridgeDesktop.addGlobalProvider(addProviderInput());
     elements.providerAddForm.reset();
-    showProviderResult("Provider 已保存", `${result.provider.id} 的定义已写入全局配置，Key 已写入 Windows 用户环境变量`);
+    showProviderResult("Provider 已保存", `${result.provider.id} 的定义已写入全局配置，Key 已写入系统安全凭据存储`);
     await refresh();
   }).catch(() => {});
 });

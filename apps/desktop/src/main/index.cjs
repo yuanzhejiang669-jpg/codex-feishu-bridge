@@ -21,7 +21,8 @@ const { checkBotReadiness } = require("./services/bot-readiness.cjs");
 const { permissionImportJson, publicPermissionPolicy } = require("./services/permission-policy.cjs");
 const { createRecoverySupervisor } = require("./services/recovery-supervisor.cjs");
 const { readDesktopSettings, writeDesktopSettings } = require("./services/desktop-settings.cjs");
-const { createWindowsStartup } = require("./services/windows-startup.cjs");
+const { createDesktopStartup } = require("./services/windows-startup.cjs");
+const { createCredentialStore } = require("./services/credential-store.cjs");
 const { applyCapabilityMigration, previewCapabilityMigration } = require("./services/capability-migration.cjs");
 const { inspectProvider, testProvider } = require("./services/provider-setup.cjs");
 const { reasoningRegistry } = require("./services/reasoning-effort.cjs");
@@ -92,7 +93,8 @@ let updaterService = null;
 let protocolProxyService = null;
 let proxyStoppedForQuit = false;
 let desktopSettings = { launchAtLogin: false, closeToTray: true, error: "" };
-const windowsStartup = createWindowsStartup(app);
+const desktopStartup = createDesktopStartup(app);
+let providerCredentialStore = null;
 
 function assertStartupReady() {
   if (startupError) throw new Error(`客户端数据初始化失败：${startupError}`);
@@ -120,7 +122,7 @@ function runtimeLocalAppData() {
 
 function inspectDesktopSettings() {
   const saved = readDesktopSettings(managedDataRoot());
-  const login = windowsStartup.inspect();
+  const login = desktopStartup.inspect();
   return {
     ...saved,
     launchAtLogin: login.supported ? login.enabled : saved.launchAtLogin,
@@ -140,9 +142,10 @@ function setupOptions() {
     larkCliPath: currentState?.engine?.larkCliPath || "",
     existingNames: currentState?.bridge?.instances?.map((item) => item.name) || [],
     encryptSecret: (value) => {
-      if (!safeStorage.isEncryptionAvailable()) throw new Error("Windows 安全存储暂不可用");
+      if (!safeStorage.isEncryptionAvailable()) throw new Error("系统安全存储暂不可用");
       return safeStorage.encryptString(value);
     },
+    credentialStorage: process.platform === "darwin" ? "macos-keychain" : "windows-dpapi",
   };
 }
 
@@ -153,10 +156,13 @@ function supervisorOptions() {
     engineRoot: currentState?.engine?.engineRoot || "",
     nodePath: currentState?.engine?.nodePath || "",
     larkCliPath: currentState?.engine?.larkCliPath || "",
+    bridgeEntry: currentState?.engine?.bridgeEntry || "",
+    codexPath: currentState?.codex?.runtimePath || "",
+    platform: process.platform,
     defaultCodexHome: path.join(app.getPath("home"), ".codex"),
     codexAvailable: Boolean(currentState?.codex?.runtimeFound),
     decryptSecret: (value) => {
-      if (!safeStorage.isEncryptionAvailable()) throw new Error("Windows 安全存储暂不可用");
+      if (!safeStorage.isEncryptionAvailable()) throw new Error("系统安全存储暂不可用");
       return safeStorage.decryptString(value);
     },
   };
@@ -170,7 +176,7 @@ function migrationOptions() {
 }
 
 function providerManagerOptions() {
-  return {
+  const options = {
     codexHome: path.join(app.getPath("home"), ".codex"),
     dataRoot: managedDataRoot(),
     timeoutMs: 30_000,
@@ -179,6 +185,11 @@ function providerManagerOptions() {
     restartProtocolProxy: () => protocolProxyService?.restart(),
     decorateProviderCatalog: (catalog) => protocolProxyService?.decorateCatalog(catalog) || catalog,
   };
+  if (providerCredentialStore) {
+    options.readUserEnvironmentVariable = providerCredentialStore.read;
+    options.setUserEnvironmentVariable = providerCredentialStore.set;
+  }
+  return options;
 }
 
 function modelSourceOptions() {
@@ -269,7 +280,7 @@ async function prepareUpdateInstall(restartNames, targetVersion) {
 
 function createDesktopUpdater() {
   return createUpdaterService({
-    supported: app.isPackaged && !smokeTest && !capturePath,
+    supported: app.isPackaged && !smokeTest && !capturePath && process.platform === "win32",
     updater: autoUpdater,
     currentVersion: app.getVersion(),
     inspectBots: async () => inspectManagedBots(managedDataRoot(), runtimeLocalAppData()),
@@ -301,14 +312,20 @@ async function loadState() {
   const desktopRoot = path.join(__dirname, "..", "..");
   const [codex, bridge, engine, capabilities] = await Promise.all([
     inspectCodex(detectorScriptPath()),
-    Promise.resolve(discoverBridge()),
+    Promise.resolve(discoverBridge(process.platform === "win32" ? undefined : path.join(runtimeLocalAppData(), "CodexFeishuBridge"))),
     inspectEngine({ packaged: app.isPackaged, resourcesPath: process.resourcesPath, desktopRoot }),
     Promise.resolve(inspectCapabilities()),
   ]);
   const providerCatalog = inspectProviderCatalog(path.join(app.getPath("home"), ".codex"));
   currentState = {
     generatedAt: new Date().toISOString(),
-    app: { version: app.getVersion(), packaged: app.isPackaged },
+    app: {
+      version: app.getVersion(),
+      packaged: app.isPackaged,
+      platform: process.platform,
+      arch: process.arch,
+      credentialStorage: process.platform === "darwin" ? "macOS Keychain" : "Windows user environment / DPAPI",
+    },
     codex,
     bridge,
     engine,
@@ -459,7 +476,15 @@ if (!singleInstance) {
         migrateDesktopData(managedDataRoot(), { appVersion: app.getVersion() });
         desktopSettings = readDesktopSettings(managedDataRoot());
         if (desktopSettings.error) throw new Error(`客户端设置损坏：${desktopSettings.error}`);
-        if (desktopSettings.launchAtLogin && windowsStartup.supported()) windowsStartup.setEnabled(true);
+        if (process.platform === "darwin" && safeStorage.isEncryptionAvailable()) {
+          providerCredentialStore = createCredentialStore({
+            root: path.join(managedDataRoot(), "provider-credentials"),
+            encrypt: (value) => safeStorage.encryptString(value),
+            decrypt: (value) => safeStorage.decryptString(value),
+          });
+          providerCredentialStore.hydrate();
+        }
+        if (desktopSettings.launchAtLogin && desktopStartup.supported()) desktopStartup.setEnabled(true);
       } catch (error) {
         startupError = error.message || String(error);
       }
@@ -480,7 +505,7 @@ if (!singleInstance) {
         dataRoot: managedDataRoot(),
         nodePath: currentState?.engine?.nodePath || "",
         proxyCliPath,
-        readUserEnvironmentVariable,
+        readUserEnvironmentVariable: providerCredentialStore?.read || readUserEnvironmentVariable,
       });
       await protocolProxyService.start().catch(() => {});
       createTray();
@@ -640,10 +665,10 @@ if (!singleInstance) {
       assertStartupReady();
       const enabled = input?.enabled === true;
       const previousSettings = desktopSettings;
-      const previousLogin = windowsStartup.inspect();
+      const previousLogin = desktopStartup.inspect();
       if (enabled) {
-        const login = windowsStartup.setEnabled(true);
-        if (!login.supported || !login.enabled) throw new Error("无法启用 Windows 登录启动");
+        const login = desktopStartup.setEnabled(true);
+        if (!login.supported || !login.enabled) throw new Error("无法启用系统登录启动");
       }
       let result;
       try {
@@ -653,7 +678,7 @@ if (!singleInstance) {
         });
       } catch (error) {
         if (enabled) {
-          windowsStartup.setEnabled(previousLogin.enabled);
+          desktopStartup.setEnabled(previousLogin.enabled);
           desktopSettings = writeDesktopSettings(managedDataRoot(), {
             launchAtLogin: previousSettings.launchAtLogin,
           });
@@ -690,8 +715,8 @@ if (!singleInstance) {
             .filter((bot) => bot.autoStart);
           if (automaticBots.length) throw new Error("请先关闭所有 Bot 的开机启动");
         }
-        const login = windowsStartup.setEnabled(enabled);
-        if (!login.supported) throw new Error("当前环境不支持 Windows 登录启动设置");
+        const login = desktopStartup.setEnabled(enabled);
+        if (!login.supported) throw new Error("当前环境不支持系统登录启动设置");
         next.launchAtLogin = login.enabled;
       }
       if (Object.prototype.hasOwnProperty.call(patch || {}, "closeToTray")) {

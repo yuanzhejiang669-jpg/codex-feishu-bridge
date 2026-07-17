@@ -33,3 +33,14 @@ test("does not mutate login settings outside packaged Windows", () => {
   assert.deepEqual(startup.setEnabled(true), { supported: false, enabled: false });
   assert.equal(called, false);
 });
+
+test("uses the native hidden login item contract on packaged macOS", () => {
+  let applied = null;
+  const startup = createWindowsStartup({
+    isPackaged: true,
+    setLoginItemSettings(value) { applied = value; },
+    getLoginItemSettings() { return { openAtLogin: true }; },
+  }, { packaged: true, platform: "darwin" });
+  assert.deepEqual(startup.setEnabled(true), { supported: true, enabled: true });
+  assert.deepEqual(applied, { openAtLogin: true, openAsHidden: true });
+});

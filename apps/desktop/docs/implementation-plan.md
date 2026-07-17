@@ -373,6 +373,16 @@ This list is the durable parity checklist against the existing local control pan
 114. [x] Keep the desktop client manual-refresh-first while retaining its two-second login-status polling without losing drafts.
 115. [x] Present OpenAI official login as the primary local action and move whole-Home Provider switching into advanced management.
 116. [x] Verify `0.5.1` packaging, public Release, current-device script panel, installed upgrade, and managed Bot recovery; intentionally defer the powered-off old device.
+117. [x] Preserve the existing Windows launcher while adding a native macOS Bridge supervisor that does not depend on PowerShell.
+118. [x] Discover the Codex macOS application and bundled CLI from system or per-user application locations with a PATH fallback.
+119. [x] Bundle architecture-matched Node.js and Lark CLI executables for both Apple Silicon and Intel packages with upstream checksum verification.
+120. [x] Store macOS Provider credentials through Electron safe storage backed by Keychain and hydrate only the client process environment.
+121. [x] Support macOS login items, isolated Lark Profiles, Codex Homes, workspaces, managed Bot recovery, and active-run-aware stop.
+122. [x] Produce separate macOS `arm64` and `x64` DMG/ZIP assets without changing Windows artifact names or persistent data paths.
+123. [x] Replace the Windows-only tag workflow with a gated Windows/macOS build and one atomic GitHub Release publication job.
+124. [x] Pass the cross-platform desktop test suite and rebuild the Windows `0.6.0` installer locally.
+125. [ ] Pass the clean GitHub macOS runner build and verify both unpacked application architectures and release assets.
+126. [ ] Complete a real Mac install, Codex discovery, OpenAI/Provider login, Feishu registration, Bot start, and message E2E before calling macOS production-ready.
 
 `0.1.6 Provider center` acceptance: items 26-35 are implemented; API keys never enter TOML, renderer state, IPC results, or logs; synchronization is previewable and transactional; only client-managed isolated Codex Homes are eligible; existing Bridge processes and legacy Bot files remain unchanged.
 
@@ -402,6 +412,8 @@ This list is the durable parity checklist against the existing local control pan
 
 `0.5.1 Login lifecycle and refresh safety` acceptance: an OpenAI login child is scoped to its exact Codex Home, expires after ten minutes, enters a visible warning state for its final two minutes, and is replaced only by a deliberate second login action. Login polling and ordinary script-panel refreshes must update server state without discarding an unsubmitted Provider target, confirmation text, advanced-section state, or focused field. Official login remains the primary action; whole-Home Provider switching is explicitly advanced administration, while daily switching is directed to Feishu.
 
+`0.6.0 macOS distribution` acceptance: one source tree preserves the verified Windows behavior and builds unsigned Intel and Apple Silicon macOS clients. Each Mac asset contains architecture-matched checksum-verified Node.js and Lark CLI tools, discovers Codex without fixed version paths, uses Keychain-backed safe storage, starts Bridge directly without PowerShell, uses native login items, and keeps client data outside the application bundle. A tag is publishable only after clean Windows and macOS jobs both pass. Unsigned Mac packages remain test releases: automatic in-app installation and production-ready claims are deferred until Developer ID signing, notarization, and a real-device Feishu message E2E pass.
+
 ## 8. Verification strategy
 
 Every phase records:
@@ -426,5 +438,6 @@ The strongest practical verification must run before a phase is marked complete.
 5. Feishu permissions differ across tenants.
 6. Unsigned installers trigger SmartScreen or antivirus warnings.
 7. A bundled translation proxy has incompatible licensing, unstable protocol translation, port conflicts, or leaks Provider credentials.
+8. An unsigned or unnotarized macOS bundle is blocked by Gatekeeper, or carries a helper binary for the wrong architecture.
 
 These risks are addressed with protocol versioning, active-run guards, transactional writes, runtime inspection, scope checks, license review, DPAPI secret storage, proxy health supervision, clean-VM testing, and signed artifacts.

@@ -1389,3 +1389,28 @@ Delivery verification:
 - The current-device script panel restarted from PID `40376` to PID `50800` and displayed the new OpenAI official-login UI. The stale login PID `43132` was removed, zero `codex.exe login` processes remained, and the active `codex.exe app-server` process was not touched. The 15 script-hosted Bots were intentionally left running because this control-panel-only change does not alter their message path.
 - The installed client upgraded in place to file version `0.5.1.0`; its uninstall entry reports `0.5.1`. Managed Bots `codex-assistant-1-drawing`, `codex-assistant-2-drawing`, and `codex-assistant-3-drawing` all restarted with new PIDs `39516`, `27072`, and `50396` and remained online for 61 seconds.
 - The powered-off old device was intentionally not contacted or synchronized. It remains a deferred follow-up after the user starts it and explicitly requests synchronization.
+
+## 0.6.0 macOS dual-architecture client
+
+Scope:
+
+- Add a macOS client without changing the script-hosted deployment or adopting any existing Bot.
+- Keep the Windows client behavior and artifact contract intact.
+- Target both Apple Silicon `arm64` and Intel `x64`; publish unsigned test assets until Apple signing credentials and a real Mac E2E are available.
+
+Implementation so far:
+
+- Added macOS Codex application/runtime discovery for `/Applications`, per-user applications, nested Resources layouts, and PATH fallback.
+- Added platform-native bundled tool resolution and a checksum-gated build script that downloads exact Node.js and Lark CLI binaries for both Mac architectures.
+- Added a direct detached macOS Bridge launcher with isolated `HOME`, `CODEX_HOME`, Lark Profile, state/log paths, launch metadata, graceful stop marker, and `SIGTERM` fallback. Windows continues to use the established PowerShell contract.
+- Added Keychain-backed Provider credential persistence through Electron `safeStorage`; plaintext keys remain outside TOML, renderer state, IPC results, and logs.
+- Extended login startup to native macOS login items and replaced Windows-specific UI language with system-neutral wording.
+- Added DMG/ZIP builder targets, platform checksums, unpacked-app architecture verification, and one gated GitHub workflow that publishes only after both Windows and macOS jobs succeed.
+- Disabled in-app update installation on unsigned macOS builds. Test users update manually until Developer ID signing and notarization are configured.
+
+Verification so far:
+
+- Desktop syntax, unit, and integration checks pass `131/131`, including a real child-process simulation of the direct macOS launcher and stop contract.
+- Local Windows `0.6.0` packaging passed PowerShell parsing, protocol-proxy smoke, engine staging, NSIS packaging, checksums, and release-version verification.
+- macOS Runner packaging, public Release assets, and physical-Mac E2E remain pending and are not claimed complete.
+- The powered-off old Windows device remains intentionally untouched.

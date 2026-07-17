@@ -58,16 +58,18 @@ function runPowerShell(scriptPath, args, options) {
 }
 
 function processEnvironment(options, bot = null) {
+  const profileHome = path.join(options.dataRoot, "profile-home");
   const toolDirs = [path.dirname(options.nodePath), path.dirname(options.larkCliPath)];
   const environment = {
     ...process.env,
     LOCALAPPDATA: options.localAppData,
-    USERPROFILE: path.join(options.dataRoot, "profile-home"),
+    USERPROFILE: profileHome,
+    HOME: profileHome,
     LARK_CLI_BIN: options.larkCliPath,
     PATH: [...toolDirs, process.env.PATH || ""].join(path.delimiter),
   };
   if (bot?.provider?.mode === "custom") {
-    if (typeof options.decryptSecret !== "function") throw new Error("Windows 安全存储不可用，无法读取 Provider API Key");
+    if (typeof options.decryptSecret !== "function") throw new Error("系统安全存储不可用，无法读取 Provider API Key");
     const secretPath = path.join(path.dirname(bot.configPath), "provider-secret.bin");
     let encrypted;
     try { encrypted = fs.readFileSync(secretPath); } catch { throw new Error("Provider API Key 文件缺失，请重新配置 Provider"); }
@@ -75,7 +77,110 @@ function processEnvironment(options, bot = null) {
     if (!apiKey) throw new Error("Provider API Key 解密结果为空");
     environment[bot.provider.envKey] = apiKey;
   }
+  if (options.codexPath) environment.CODEX_CLI_BIN = options.codexPath;
   return environment;
+}
+
+function writeJsonAtomic(destination, value) {
+  const temporary = `${destination}.${crypto.randomUUID()}.tmp`;
+  fs.mkdirSync(path.dirname(destination), { recursive: true });
+  fs.writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+  fs.rmSync(destination, { force: true });
+  fs.renameSync(temporary, destination);
+}
+
+function posixRuntimePaths(options, name) {
+  const runtimeRoot = managedRuntimeRoot(options.localAppData, name);
+  return {
+    runtimeRoot,
+    stateDir: path.join(runtimeRoot, "state"),
+    logDir: path.join(runtimeRoot, "logs"),
+  };
+}
+
+function posixBridgeEnvironment(bot, codexHome, options, paths) {
+  return {
+    ...processEnvironment(options, bot),
+    CODEX_FEISHU_WORKSPACE: bot.workspace,
+    CODEX_FEISHU_INSTANCE_NAME: bot.name,
+    CODEX_HOME: codexHome,
+    CODEX_FEISHU_LARK_PROFILE: bot.profile,
+    CODEX_FEISHU_SANDBOX: "danger-full-access",
+    CODEX_FEISHU_RUN_MODE: "app-server",
+    CODEX_FEISHU_EVENT_KEYS: "im.message.receive_v1",
+    CODEX_FEISHU_REASONING: String(bot.provider?.reasoning || ""),
+    CODEX_FEISHU_CODEX_TIMEOUT_MS: "0",
+    CODEX_FEISHU_CODEX_IDLE_TIMEOUT_MS: "3600000",
+    CODEX_FEISHU_LIST_LIMIT: "100",
+    CODEX_FEISHU_DISABLE_MCP: "0",
+    CODEX_FEISHU_MAX_CONCURRENT: "1",
+    CODEX_FEISHU_CARD_MODE: "1",
+    CODEX_FEISHU_CARD_THROTTLE_MS: "400",
+    CODEX_FEISHU_CARD_DEBUG: "0",
+    CODEX_FEISHU_SHOW_FINAL_STEPS: "1",
+    CODEX_FEISHU_REPLY_TO_MESSAGE: "0",
+    CODEX_FEISHU_REPLY_IN_THREAD: "0",
+    CODEX_FEISHU_STATE_DIR: paths.stateDir,
+    CODEX_FEISHU_LOG_DIR: paths.logDir,
+  };
+}
+
+async function startManagedBotPosix(bot, codexHome, options) {
+  const paths = posixRuntimePaths(options, bot.name);
+  fs.mkdirSync(bot.workspace, { recursive: true });
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.mkdirSync(paths.stateDir, { recursive: true });
+  fs.mkdirSync(paths.logDir, { recursive: true });
+  fs.rmSync(path.join(paths.stateDir, "bridge.stop"), { force: true });
+  writeJsonAtomic(path.join(paths.stateDir, "launch-config.json"), {
+    instance: bot.name,
+    workspace: bot.workspace,
+    larkProfile: bot.profile,
+    codexHome,
+    desktopCodexHome: "",
+    updatedAt: new Date().toISOString(),
+  });
+  const stdoutFd = fs.openSync(path.join(paths.logDir, "bridge.stdout.log"), "a");
+  const stderrFd = fs.openSync(path.join(paths.logDir, "bridge.stderr.log"), "a");
+  try {
+    await new Promise((resolve, reject) => {
+      const child = require("node:child_process").spawn(options.nodePath, [options.bridgeEntry], {
+        cwd: options.engineRoot,
+        detached: true,
+        env: posixBridgeEnvironment(bot, codexHome, options, paths),
+        stdio: ["ignore", stdoutFd, stderrFd],
+      });
+      child.once("error", reject);
+      child.once("spawn", () => {
+        child.unref();
+        resolve();
+      });
+    });
+  } finally {
+    fs.closeSync(stdoutFd);
+    fs.closeSync(stderrFd);
+  }
+}
+
+async function stopManagedBotPosix(current, options) {
+  const paths = posixRuntimePaths(options, current.name);
+  fs.mkdirSync(paths.stateDir, { recursive: true });
+  fs.writeFileSync(path.join(paths.stateDir, "bridge.stop"), `${new Date().toISOString()}\n`, "utf8");
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    if (!isProcessAlive(current.processId)) break;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  if (isProcessAlive(current.processId)) {
+    try { process.kill(current.processId, "SIGTERM"); } catch {}
+    const killDeadline = Date.now() + 5_000;
+    while (Date.now() < killDeadline && isProcessAlive(current.processId)) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    if (isProcessAlive(current.processId)) throw new Error(`Bridge process ${current.processId} did not stop after SIGTERM`);
+  }
+  fs.rmSync(path.join(paths.stateDir, "bridge.pid"), { force: true });
+  fs.rmSync(path.join(paths.stateDir, "bridge.stop"), { force: true });
 }
 
 function findManagedBot(name, options) {
@@ -125,11 +230,17 @@ async function startManagedBot(name, options) {
     throw new Error("客户端内置运行时不完整，请重新安装客户端");
   }
   if (!options.codexAvailable) throw new Error("未检测到可用的 Codex 桌面运行时");
-  const scriptPath = path.join(options.engineRoot, "start-codex-feishu-bridge.ps1");
-  if (!fs.existsSync(scriptPath)) throw new Error("客户端 Bridge 启动脚本缺失");
   const codexHome = bot.codexHome || options.defaultCodexHome;
-  const startArgs = managedBotStartArguments(bot, codexHome);
-  await runPowerShell(scriptPath, startArgs, { env: processEnvironment(options, bot), timeoutMs: 60_000 });
+  if ((options.platform || process.platform) === "win32") {
+    const scriptPath = path.join(options.engineRoot, "start-codex-feishu-bridge.ps1");
+    if (!fs.existsSync(scriptPath)) throw new Error("客户端 Bridge 启动脚本缺失");
+    const startArgs = managedBotStartArguments(bot, codexHome);
+    await runPowerShell(scriptPath, startArgs, { env: processEnvironment(options, bot), timeoutMs: 60_000 });
+  } else {
+    if (!fs.existsSync(options.bridgeEntry || "")) throw new Error("客户端 Bridge 入口缺失");
+    if (!options.codexPath) throw new Error("未检测到可用的 Codex 桌面运行时");
+    await startManagedBotPosix(bot, codexHome, options);
+  }
 
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
@@ -147,12 +258,16 @@ async function stopManagedBot(name, options) {
   if (current.activeRunCount > 0 && !options.force) {
     throw new Error(`Bot 仍有 ${current.activeRunCount} 个活动任务，已拒绝停止`);
   }
-  const scriptPath = path.join(options.engineRoot, "stop-codex-feishu-bridge.ps1");
-  if (!fs.existsSync(scriptPath)) throw new Error("客户端 Bridge 停止脚本缺失");
-  await runPowerShell(scriptPath, ["-Name", name], {
-    env: processEnvironment(options),
-    timeoutMs: 30_000,
-  });
+  if ((options.platform || process.platform) === "win32") {
+    const scriptPath = path.join(options.engineRoot, "stop-codex-feishu-bridge.ps1");
+    if (!fs.existsSync(scriptPath)) throw new Error("客户端 Bridge 停止脚本缺失");
+    await runPowerShell(scriptPath, ["-Name", name], {
+      env: processEnvironment(options),
+      timeoutMs: 30_000,
+    });
+  } else {
+    await stopManagedBotPosix(current, options);
+  }
   return inspectManagedBots(options.dataRoot, options.localAppData).find((item) => item.name === name);
 }
 
@@ -173,6 +288,8 @@ module.exports = {
   inspectManagedBots,
   managedBotStartArguments,
   managedRuntimeRoot,
+  posixBridgeEnvironment,
+  posixRuntimePaths,
   processEnvironment,
   runPowerShell,
   setManagedBotAutoStart,

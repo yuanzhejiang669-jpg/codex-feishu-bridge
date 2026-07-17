@@ -1,6 +1,5 @@
 appId: io.github.codex-feishu-bridge.desktop
 productName: Codex Feishu Bridge
-artifactName: Codex-Feishu-Bridge-Setup-${version}.${ext}
 copyright: Copyright 2026 Codex Feishu Bridge contributors
 
 directories:
@@ -22,12 +21,8 @@ extraResources:
     to: engine
     filter:
       - "**/*"
-  - from: node_modules/@larksuite/cli/bin/lark-cli.exe
-    to: tools/lark-cli.exe
   - from: node_modules/@larksuite/cli/LICENSE
     to: licenses/lark-cli-LICENSE
-  - from: node_modules/node/bin/node.exe
-    to: tools/node.exe
   - from: resources/licenses/node-LICENSE
     to: licenses/node-LICENSE
   - from: proxy-runtime/node_modules
@@ -36,7 +31,13 @@ extraResources:
       - "**/*"
 
 win:
+  artifactName: Codex-Feishu-Bridge-Setup-${version}.${ext}
   icon: resources/icon.ico
+  extraResources:
+    - from: node_modules/@larksuite/cli/bin/lark-cli.exe
+      to: tools/lark-cli.exe
+    - from: node_modules/node/bin/node.exe
+      to: tools/node.exe
   target:
     - target: nsis
       arch:
@@ -48,6 +49,31 @@ nsis:
   createDesktopShortcut: true
   createStartMenuShortcut: true
   deleteAppDataOnUninstall: false
+
+mac:
+  artifactName: Codex-Feishu-Bridge-${version}-mac-${arch}.${ext}
+  icon: resources/icon.png
+  category: public.app-category.developer-tools
+  identity: null
+  target:
+    - target: dmg
+      arch:
+        - x64
+        - arm64
+    - target: zip
+      arch:
+        - x64
+        - arm64
+  extraResources:
+    - from: generated/tools/darwin-${arch}/lark-cli
+      to: tools/lark-cli
+    - from: generated/tools/darwin-${arch}/node
+      to: tools/node
+    - from: generated/tools/darwin-${arch}/manifest.json
+      to: tools/manifest.json
+
+dmg:
+  sign: false
 
 publish:
   provider: github

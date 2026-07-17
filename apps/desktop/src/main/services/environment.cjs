@@ -20,18 +20,130 @@ function parseJsonOutput(stdout) {
   return JSON.parse(text.slice(start, end + 1));
 }
 
-function inspectRuntimeDirectory(runtimePath) {
+function inspectRuntimeDirectory(runtimePath, platform = process.platform) {
   if (!runtimePath) return { runtimeDirectory: "", runtimeExecutableCount: 0 };
   const runtimeDirectory = path.dirname(runtimePath);
   let runtimeExecutableCount = 0;
   try {
     runtimeExecutableCount = fs.readdirSync(runtimeDirectory, { withFileTypes: true })
-      .filter((entry) => entry.isFile() && path.extname(entry.name).toLowerCase() === ".exe")
+      .filter((entry) => {
+        if (!entry.isFile()) return false;
+        if (platform === "win32") return path.extname(entry.name).toLowerCase() === ".exe";
+        try {
+          fs.accessSync(path.join(runtimeDirectory, entry.name), fs.constants.X_OK);
+          return true;
+        } catch {
+          return false;
+        }
+      })
       .length;
   } catch {
     runtimeExecutableCount = 0;
   }
   return { runtimeDirectory, runtimeExecutableCount };
+}
+
+function firstExecutable(candidates) {
+  for (const candidate of candidates) {
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return candidate;
+    } catch {}
+  }
+  return "";
+}
+
+function macCodexCandidates(home = require("node:os").homedir()) {
+  const posixHome = String(home || "").replaceAll("\\", "/");
+  const bundles = [
+    "/Applications/Codex.app",
+    path.posix.join(posixHome, "Applications", "Codex.app"),
+  ];
+  const relativeCandidates = [
+    path.posix.join("Contents", "Resources", "codex"),
+    path.posix.join("Contents", "Resources", "bin", "codex"),
+    path.posix.join("Contents", "Resources", "codex-cli"),
+  ];
+  return bundles.flatMap((bundle) => relativeCandidates.map((relative) => path.posix.join(bundle, relative)));
+}
+
+function findMacBundleRuntime(bundlePath) {
+  const resourcesRoot = path.posix.join(bundlePath, "Contents", "Resources");
+  const matches = [];
+  const visit = (directory, depth) => {
+    if (depth > 4) return;
+    let entries = [];
+    try { entries = fs.readdirSync(directory, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      const candidate = path.posix.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        visit(candidate, depth + 1);
+        continue;
+      }
+      if (!entry.isFile() || !/^codex(?:-cli)?(?:-[\w.-]+)?$/.test(entry.name)) continue;
+      try {
+        fs.accessSync(candidate, fs.constants.X_OK);
+        matches.push(candidate);
+      } catch {}
+    }
+  };
+  visit(resourcesRoot, 0);
+  return matches.sort((left, right) => {
+    const leftExact = path.posix.basename(left) === "codex" ? 0 : 1;
+    const rightExact = path.posix.basename(right) === "codex" ? 0 : 1;
+    return leftExact - rightExact || left.length - right.length;
+  })[0] || "";
+}
+
+async function inspectMacCodex(options = {}) {
+  const candidates = options.candidates || macCodexCandidates(options.home);
+  let runtimePath = firstExecutable(candidates);
+  if (!runtimePath) {
+    const bundles = [...new Set(candidates
+      .filter((candidate) => candidate.includes(".app/"))
+      .map((candidate) => `${candidate.split(".app/")[0]}.app`))];
+    runtimePath = bundles.map(findMacBundleRuntime).find(Boolean) || "";
+  }
+  if (!runtimePath) {
+    try {
+      runtimePath = String((await execFileAsync("/usr/bin/which", ["codex"], {
+        timeout: 5_000,
+        encoding: "utf8",
+      })).stdout || "").trim();
+    } catch {
+      runtimePath = "";
+    }
+  }
+  const bundlePath = candidates
+    .map((candidate) => candidate.includes(".app/") ? `${candidate.split(".app/")[0]}.app` : "")
+    .find((candidate) => candidate && fs.existsSync(candidate)) || "";
+  let packageVersion = "";
+  if (bundlePath && fs.existsSync(bundlePath)) {
+    try {
+      packageVersion = String((await execFileAsync("/usr/bin/plutil", [
+        "-extract", "CFBundleShortVersionString", "raw", path.join(bundlePath, "Contents", "Info.plist"),
+      ], { timeout: 5_000, encoding: "utf8" })).stdout || "").trim();
+    } catch {
+      packageVersion = "";
+    }
+  }
+  const version = await runCodex(runtimePath, ["--version"], 8_000);
+  const auth = await runCodex(runtimePath, ["login", "status"], 10_000);
+  return {
+    supported: true,
+    platform: "darwin",
+    packageFound: Boolean(bundlePath && fs.existsSync(bundlePath)),
+    packageVersion,
+    installLocation: bundlePath && fs.existsSync(bundlePath) ? bundlePath : "",
+    sourceRuntimePath: runtimePath,
+    cachedRuntimePath: "",
+    runtimeFound: Boolean(runtimePath),
+    runtimePath,
+    ...inspectRuntimeDirectory(runtimePath, "darwin"),
+    cliVersion: cleanVersion(version.output),
+    loginState: loginState(auth.output, auth.ok),
+    loginSummary: auth.output.split(/\r?\n/).find(Boolean) || "",
+  };
 }
 
 async function runCodex(runtimePath, args, timeout) {
@@ -62,15 +174,17 @@ function loginState(output, ok) {
   return "unknown";
 }
 
-async function inspectCodex(scriptPath) {
-  if (process.platform !== "win32") {
+async function inspectCodex(scriptPath, options = {}) {
+  const platform = options.platform || process.platform;
+  if (platform === "darwin") return inspectMacCodex(options);
+  if (platform !== "win32") {
     return {
       supported: false,
       packageFound: false,
       runtimeFound: false,
       cliVersion: "",
       loginState: "unknown",
-      error: "Windows is required",
+      error: "Windows or macOS is required",
     };
   }
 
@@ -88,7 +202,7 @@ async function inspectCodex(scriptPath) {
     });
     const inspection = parseJsonOutput(result.stdout);
     const runtimePath = inspection.cachedRuntimePath || inspection.sourceRuntimePath || "";
-    const runtimeDirectory = inspectRuntimeDirectory(runtimePath);
+    const runtimeDirectory = inspectRuntimeDirectory(runtimePath, "win32");
     const version = await runCodex(runtimePath, ["--version"], 8_000);
     const auth = await runCodex(runtimePath, ["login", "status"], 10_000);
     return {
@@ -114,8 +228,12 @@ async function inspectCodex(scriptPath) {
 
 module.exports = {
   cleanVersion,
+  firstExecutable,
+  findMacBundleRuntime,
   inspectCodex,
+  inspectMacCodex,
   inspectRuntimeDirectory,
   loginState,
+  macCodexCandidates,
   parseJsonOutput,
 };

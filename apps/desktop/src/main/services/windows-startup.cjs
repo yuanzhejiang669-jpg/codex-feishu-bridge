@@ -4,7 +4,7 @@ function createWindowsStartup(app, options = {}) {
   const args = ["--background"];
 
   function supported() {
-    return packaged === true && platform === "win32";
+    return packaged === true && new Set(["win32", "darwin"]).has(platform);
   }
 
   function inspect() {
@@ -17,7 +17,11 @@ function createWindowsStartup(app, options = {}) {
   function setEnabled(enabled) {
     if (!supported()) return { supported: false, enabled: false };
     const executablePath = options.executablePath || process.execPath;
-    app.setLoginItemSettings({ openAtLogin: enabled === true, path: executablePath, args });
+    if (platform === "darwin") {
+      app.setLoginItemSettings({ openAtLogin: enabled === true, openAsHidden: true });
+    } else {
+      app.setLoginItemSettings({ openAtLogin: enabled === true, path: executablePath, args });
+    }
     const actual = app.getLoginItemSettings({ path: executablePath, args });
     return { supported: true, enabled: actual.openAtLogin === true };
   }
@@ -25,4 +29,6 @@ function createWindowsStartup(app, options = {}) {
   return { args: [...args], inspect, setEnabled, supported };
 }
 
-module.exports = { createWindowsStartup };
+const createDesktopStartup = createWindowsStartup;
+
+module.exports = { createDesktopStartup, createWindowsStartup };

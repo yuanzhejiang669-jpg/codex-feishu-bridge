@@ -1,0 +1,142 @@
+name: Release Desktop Clients
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: desktop-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: apps/desktop
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            apps/desktop/package-lock.json
+            apps/desktop/proxy-runtime/package-lock.json
+
+      - name: Verify tag matches package version
+        shell: pwsh
+        run: |
+          $package = Get-Content -LiteralPath package.json -Raw | ConvertFrom-Json
+          if ($env:GITHUB_REF_NAME -ne "v$($package.version)") {
+            throw "Tag $env:GITHUB_REF_NAME does not match package version v$($package.version)"
+          }
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test desktop client
+        run: npm run check
+
+      - name: Build and verify Windows release
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: npm run dist:win
+
+      - name: Upload Windows assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-release
+          if-no-files-found: error
+          path: |
+            apps/desktop/out/Codex-Feishu-Bridge-Setup-*.exe
+            apps/desktop/out/Codex-Feishu-Bridge-Setup-*.exe.blockmap
+            apps/desktop/out/latest.yml
+            apps/desktop/out/checksums.txt
+            apps/desktop/out/checksums-windows.txt
+
+  build-macos:
+    runs-on: macos-15-intel
+    defaults:
+      run:
+        working-directory: apps/desktop
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            apps/desktop/package-lock.json
+            apps/desktop/proxy-runtime/package-lock.json
+
+      - name: Verify tag matches package version
+        shell: bash
+        run: |
+          expected="v$(node -p "require('./package.json').version")"
+          if [[ "$GITHUB_REF_NAME" != "$expected" ]]; then
+            echo "Tag $GITHUB_REF_NAME does not match package version $expected" >&2
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test desktop client
+        run: npm run check
+
+      - name: Build and verify macOS releases
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: npm run dist:mac
+
+      - name: Upload macOS assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-release
+          if-no-files-found: error
+          path: |
+            apps/desktop/out/Codex-Feishu-Bridge-*-mac-*.dmg
+            apps/desktop/out/Codex-Feishu-Bridge-*-mac-*.zip
+            apps/desktop/out/Codex-Feishu-Bridge-*-mac-*.zip.blockmap
+            apps/desktop/out/latest-mac.yml
+            apps/desktop/out/checksums-macos.txt
+
+  publish:
+    needs: [build-windows, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download verified assets
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Publish stable GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mapfile -t assets < <(find release-assets -maxdepth 1 -type f -print | sort)
+          if [[ ${#assets[@]} -lt 9 ]]; then
+            echo "Expected Windows and macOS assets, found ${#assets[@]}" >&2
+            find release-assets -maxdepth 2 -type f -print >&2
+            exit 1
+          fi
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$GITHUB_REF_NAME" "${assets[@]}" --repo "$GITHUB_REPOSITORY" \
+              --title "Codex Feishu Bridge $GITHUB_REF_NAME" --generate-notes --latest
+          fi

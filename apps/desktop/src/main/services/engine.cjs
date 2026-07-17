@@ -13,16 +13,23 @@ function readManifest(engineRoot) {
   }
 }
 
-async function inspectEngine({ packaged, resourcesPath, desktopRoot }) {
+function toolNames(platform = process.platform) {
+  return platform === "win32"
+    ? { larkCli: "lark-cli.exe", node: "node.exe" }
+    : { larkCli: "lark-cli", node: "node" };
+}
+
+async function inspectEngine({ packaged, resourcesPath, desktopRoot, platform = process.platform }) {
+  const names = toolNames(platform);
   const engineRoot = packaged
     ? path.join(resourcesPath, "engine")
     : path.join(desktopRoot, "generated", "engine");
   const larkCliPath = packaged
-    ? path.join(resourcesPath, "tools", "lark-cli.exe")
-    : path.join(desktopRoot, "node_modules", "@larksuite", "cli", "bin", "lark-cli.exe");
+    ? path.join(resourcesPath, "tools", names.larkCli)
+    : path.join(desktopRoot, "node_modules", "@larksuite", "cli", "bin", names.larkCli);
   const nodePath = packaged
-    ? path.join(resourcesPath, "tools", "node.exe")
-    : path.join(desktopRoot, "node_modules", "node", "bin", "node.exe");
+    ? path.join(resourcesPath, "tools", names.node)
+    : path.join(desktopRoot, "node_modules", "node", "bin", names.node);
   const manifest = readManifest(engineRoot);
   let larkCliVersion = "";
   let nodeVersion = "";
@@ -66,4 +73,4 @@ async function inspectEngine({ packaged, resourcesPath, desktopRoot }) {
   };
 }
 
-module.exports = { inspectEngine, readManifest };
+module.exports = { inspectEngine, readManifest, toolNames };

@@ -201,7 +201,7 @@
                 <button class="primary-button" type="submit">验证并替换</button>
               </div>
             </form>
-            <p class="form-note">新 Key 写入 Windows 用户环境变量。已运行的 Bot 不会热更新，之后新启动的进程才会读取它。</p>
+            <p class="form-note">新 Key 写入当前系统的安全凭据存储。已运行的 Bot 不会热更新，之后新启动的进程才会读取它。</p>
           </section>
         </div>
 
@@ -262,10 +262,10 @@
           </div>
         </section>
         <section class="content-section">
-          <div class="section-heading"><h2>Windows 运行</h2><span id="desktop-runtime-status" class="badge neutral">检查中</span></div>
+          <div class="section-heading"><h2>桌面运行</h2><span id="desktop-runtime-status" class="badge neutral">检查中</span></div>
           <div class="setting-list">
             <label class="setting-row">
-              <span><strong>登录后启动客户端</strong><small>Windows 登录后在后台启动客户端并恢复已启用的 Bot</small></span>
+              <span><strong>登录后启动客户端</strong><small>系统登录后在后台启动客户端并恢复已启用的 Bot</small></span>
               <input id="launch-at-login-setting" type="checkbox">
             </label>
             <label class="setting-row">
@@ -375,7 +375,7 @@
       <div id="provider-removal-error" class="error-band hidden" role="alert"></div>
       <div id="provider-removal-impact" class="removal-impact"></div>
       <label class="checkbox-field"><input id="provider-removal-spaces" type="checkbox"><span>同时从客户端管理的隔离空间删除该 Provider 定义</span></label>
-      <label class="checkbox-field"><input id="provider-removal-key" type="checkbox"><span id="provider-removal-key-label">同时删除对应的 Windows 用户环境变量</span></label>
+      <label class="checkbox-field"><input id="provider-removal-key" type="checkbox"><span id="provider-removal-key-label">同时删除对应的系统安全凭据</span></label>
       <label class="checkbox-field"><input id="provider-removal-confirm" type="checkbox" required><span>我已核对影响范围并确认删除</span></label>
       <div class="dialog-actions">
         <button id="cancel-provider-removal" class="secondary-button" type="button">取消</button>

@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { readManifest } = require("../src/main/services/engine.cjs");
+const { readManifest, toolNames } = require("../src/main/services/engine.cjs");
 
 test("readManifest reads a staged protocol manifest", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "cfb-engine-test-"));
@@ -15,3 +15,7 @@ test("readManifest reads a staged protocol manifest", () => {
   }
 });
 
+test("toolNames selects native executable names per desktop platform", () => {
+  assert.deepEqual(toolNames("win32"), { larkCli: "lark-cli.exe", node: "node.exe" });
+  assert.deepEqual(toolNames("darwin"), { larkCli: "lark-cli", node: "node" });
+});

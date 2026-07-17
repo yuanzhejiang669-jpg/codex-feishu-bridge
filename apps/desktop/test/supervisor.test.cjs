@@ -119,16 +119,22 @@ test("failed manual stop restores the previous auto-start setting", async () => 
 });
 
 test("builds a child environment with exact bundled tools and isolated profile home", () => {
+  const clientRoot = path.join(os.tmpdir(), "Client Program");
+  const dataRoot = path.join(os.tmpdir(), "ClientData");
+  const runtimeRoot = path.join(os.tmpdir(), "RuntimeData");
+  const nodePath = path.join(clientRoot, process.platform === "win32" ? "node.exe" : "node");
+  const larkCliPath = path.join(clientRoot, process.platform === "win32" ? "lark-cli.exe" : "lark-cli");
   const env = processEnvironment({
-    dataRoot: "C:\\ClientData",
-    localAppData: "C:\\RuntimeData",
-    nodePath: "C:\\Program Files\\Client\\node.exe",
-    larkCliPath: "C:\\Program Files\\Client\\lark-cli.exe",
+    dataRoot,
+    localAppData: runtimeRoot,
+    nodePath,
+    larkCliPath,
   });
-  assert.equal(env.LOCALAPPDATA, "C:\\RuntimeData");
-  assert.equal(env.USERPROFILE, "C:\\ClientData\\profile-home");
-  assert.equal(env.LARK_CLI_BIN, "C:\\Program Files\\Client\\lark-cli.exe");
-  assert.match(env.PATH, /Program Files\\Client/);
+  assert.equal(env.LOCALAPPDATA, runtimeRoot);
+  assert.equal(env.USERPROFILE, path.join(dataRoot, "profile-home"));
+  assert.equal(env.HOME, path.join(dataRoot, "profile-home"));
+  assert.equal(env.LARK_CLI_BIN, larkCliPath);
+  assert.equal(env.PATH.split(path.delimiter)[0], clientRoot);
 });
 
 test("injects a DPAPI-backed Provider key only into the managed Bot child environment", () => {
@@ -148,6 +154,50 @@ test("injects a DPAPI-backed Provider key only into the managed Bot child enviro
     }, bot);
     assert.equal(env.BOT_API_KEY, "decrypted-key");
     assert.equal(process.env.BOT_API_KEY, undefined);
+  } finally {
+    fs.rmSync(value.root, { recursive: true, force: true });
+  }
+});
+
+test("starts and stops through the direct macOS launcher contract", async () => {
+  const value = fixture();
+  try {
+    const engineRoot = path.join(value.root, "engine");
+    const toolsRoot = path.join(value.root, "tools");
+    const larkCliPath = path.join(toolsRoot, "lark-cli");
+    const bridgeEntry = path.join(engineRoot, "bridge-fixture.cjs");
+    fs.mkdirSync(engineRoot, { recursive: true });
+    fs.mkdirSync(toolsRoot, { recursive: true });
+    fs.writeFileSync(larkCliPath, "fixture", "utf8");
+    fs.writeFileSync(bridgeEntry, [
+      'const fs = require("node:fs");',
+      'const path = require("node:path");',
+      'const state = process.env.CODEX_FEISHU_STATE_DIR;',
+      'fs.mkdirSync(state, { recursive: true });',
+      'fs.writeFileSync(path.join(state, "bridge.pid"), String(process.pid));',
+      'const timer = setInterval(() => {',
+      '  if (fs.existsSync(path.join(state, "bridge.stop"))) { clearInterval(timer); process.exit(0); }',
+      '}, 50);',
+    ].join("\n"), "utf8");
+    const options = {
+      dataRoot: value.dataRoot,
+      localAppData: value.localAppData,
+      engineRoot,
+      bridgeEntry,
+      nodePath: process.execPath,
+      larkCliPath,
+      codexPath: process.execPath,
+      defaultCodexHome: path.join(value.root, "codex-home"),
+      codexAvailable: true,
+      platform: "darwin",
+    };
+    const started = await startManagedBot("assistant-1", options);
+    assert.equal(started.online, true);
+    assert.notEqual(started.processId, process.pid);
+    const launch = JSON.parse(fs.readFileSync(path.join(started.runtimeRoot, "state", "launch-config.json"), "utf8"));
+    assert.equal(launch.larkProfile, "assistant-1");
+    const stopped = await stopManagedBot("assistant-1", options);
+    assert.equal(stopped.online, false);
   } finally {
     fs.rmSync(value.root, { recursive: true, force: true });
   }

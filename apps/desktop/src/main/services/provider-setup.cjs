@@ -133,7 +133,7 @@ function prepareProviderConfiguration(bot, raw, options) {
         effectiveReasoning: provider.reasoningPlan.effectiveEffort,
         upstreamReasoning: provider.reasoningPlan.upstreamValue,
         reasoningCapability: provider.reasoningPlan.capabilityName,
-        credentialStorage: "windows-user-environment",
+        credentialStorage: options.credentialStorage || "windows-user-environment",
       },
       commit() {
         fs.mkdirSync(bot.codexHome, { recursive: true });
@@ -156,7 +156,7 @@ function prepareProviderConfiguration(bot, raw, options) {
     };
   }
   if (bot.codexHomeMode !== "isolated") throw new Error("自定义 Provider 必须使用隔离 Codex Home");
-  if (typeof options.encryptSecret !== "function") throw new Error("Windows 安全存储不可用，不能保存 Provider API Key");
+  if (typeof options.encryptSecret !== "function") throw new Error("系统安全存储不可用，不能保存 Provider API Key");
 
   const configPath = path.join(bot.codexHome, "config.toml");
   const originalExists = fs.existsSync(configPath);
@@ -194,7 +194,7 @@ function prepareProviderConfiguration(bot, raw, options) {
       effectiveReasoning: provider.reasoningPlan.effectiveEffort,
       upstreamReasoning: provider.reasoningPlan.upstreamValue,
       reasoningCapability: provider.reasoningPlan.capabilityName,
-      credentialStorage: "windows-dpapi",
+      credentialStorage: options.credentialStorage || "windows-dpapi",
     },
     commit() {
       fs.mkdirSync(bot.codexHome, { recursive: true });
