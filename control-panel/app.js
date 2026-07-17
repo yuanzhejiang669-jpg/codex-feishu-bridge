@@ -17,6 +17,7 @@ const state = {
   modelSources: null,
   modelSourceLoading: false,
   modelSourcePollTimer: null,
+  modelSourceDrafts: new Map(),
 };
 
 const $ = (id) => document.getElementById(id);
@@ -279,7 +280,46 @@ function modelSourceOptions(home) {
   `;
 }
 
+function rememberModelSourceDrafts() {
+  const homes = state.modelSources?.homes || [];
+  homes.forEach((home, index) => {
+    const row = document.querySelector(`[data-model-source-index="${index}"]`);
+    if (!row) return;
+    const select = row.querySelector("[data-model-source-target]");
+    const input = row.querySelector("[data-model-source-confirm]");
+    const advanced = row.querySelector("[data-model-source-advanced]");
+    const focused = document.activeElement;
+    state.modelSourceDrafts.set(home.codexHome, {
+      targetProvider: select?.value || home.currentProvider,
+      confirm: input?.value || "",
+      placeholder: input?.placeholder || "",
+      advancedOpen: advanced?.open === true,
+      focus: focused === select ? "target" : focused === input ? "confirm" : "",
+      selectionStart: focused === input ? input.selectionStart : null,
+      selectionEnd: focused === input ? input.selectionEnd : null,
+    });
+  });
+}
+
+function loginJobPresentation(job) {
+  if (!job) return { badge: "", button: "登录 OpenAI" };
+  if (job.status === "running") {
+    const remainingSeconds = Math.max(0, Math.ceil((new Date(job.expiresAt).getTime() - Date.now()) / 1000));
+    const minutes = Math.floor(remainingSeconds / 60);
+    const seconds = String(remainingSeconds % 60).padStart(2, "0");
+    const warning = Date.now() >= new Date(job.warningAt).getTime();
+    return {
+      badge: statusBadge(warning ? "warn" : "info", `${warning ? "即将超时" : "等待浏览器登录"} · ${minutes}:${seconds}`),
+      button: "重新登录",
+    };
+  }
+  if (job.status === "timed-out") return { badge: statusBadge("warn", "登录已超时"), button: "重新登录" };
+  if (job.status === "failed") return { badge: statusBadge("bad", "登录未完成"), button: "重新登录" };
+  return { badge: "", button: "登录 OpenAI" };
+}
+
 function renderModelSources(data) {
+  rememberModelSourceDrafts();
   state.modelSources = data;
   const homes = data?.homes || [];
   $("modelSourceList").innerHTML = homes.length ? homes.map((home, index) => {
@@ -287,7 +327,8 @@ function renderModelSources(data) {
     const loginText = home.login?.state === "signed-in" ? "OpenAI 已登录" : home.login?.state === "signed-out" ? "OpenAI 未登录" : "登录状态未知";
     const active = (home.bots || []).reduce((sum, bot) => sum + Number(bot.activeRunCount || 0), 0);
     const readOnly = !(home.bots || []).length;
-    const job = home.loginJob?.status === "running" ? statusBadge("info", "等待浏览器登录") : "";
+    const loginJob = loginJobPresentation(home.loginJob);
+    const draft = state.modelSourceDrafts.get(home.codexHome);
     return `
       <article class="model-source-row" data-model-source-index="${index}">
         <div class="model-source-main">
@@ -296,25 +337,52 @@ function renderModelSources(data) {
           <span>${escapeHtml((home.bots || []).map((bot) => bot.label).join("、") || "尚未绑定脚本 Bot")}</span>
         </div>
         <div class="model-source-status">
-          <span>${statusBadge(loginKind, loginText)} ${job}</span>
+          <span>${statusBadge(loginKind, loginText)} ${loginJob.badge}</span>
           <span>当前来源：${home.sourceKind === "openai" ? "OpenAI 官方账号" : `第三方 API · ${escapeHtml(home.currentProvider)}`}</span>
           <span>会话覆盖：${escapeHtml(home.sessionOverrideCount || 0)} 个；活动任务：${escapeHtml(active)} 个</span>
         </div>
         <div class="model-source-actions">
-          <select data-model-source-target aria-label="目标模型来源">${modelSourceOptions(home)}</select>
-          <input data-model-source-confirm placeholder="执行时输入：切换到 Provider ID" autocomplete="off">
-          <div class="button-row">
-            <button type="button" class="secondary-button" data-model-source-action="login" ${readOnly ? "disabled" : ""}>登录 OpenAI</button>
-            <button type="button" class="secondary-button" data-model-source-action="preview">预览</button>
-            <button type="button" class="danger-button" data-model-source-action="apply" ${readOnly ? "disabled" : ""}>确认切换</button>
-          </div>
+          <button type="button" class="primary-button" data-model-source-action="login" ${readOnly ? "disabled" : ""}>${loginJob.button}</button>
+          <span class="model-source-hint">官方登录只作用于这个 Codex Home；浏览器登录最长等待10分钟。</span>
+          <details data-model-source-advanced ${draft?.advancedOpen ? "open" : ""}>
+            <summary>高级管理：整空间默认 Provider</summary>
+            <div class="model-source-advanced-body">
+              <span class="model-source-hint">日常切换请在飞书中操作。这里会影响该 Home 下所有脚本 Bot，并可能重启它们。</span>
+              <select data-model-source-target aria-label="目标模型来源">${modelSourceOptions(home)}</select>
+              <input data-model-source-confirm placeholder="执行时输入：切换到 Provider ID" autocomplete="off">
+              <div class="button-row">
+                <button type="button" class="secondary-button" data-model-source-action="preview">预览</button>
+                <button type="button" class="danger-button" data-model-source-action="apply" ${readOnly ? "disabled" : ""}>确认切换</button>
+              </div>
+            </div>
+          </details>
         </div>
       </article>`;
   }).join("") : '<p class="muted">没有发现 Codex Home。</p>';
   for (const [index, home] of homes.entries()) {
     const row = document.querySelector(`[data-model-source-index="${index}"]`);
     const select = row?.querySelector("[data-model-source-target]");
-    if (select && [...select.options].some((option) => option.value === home.currentProvider)) select.value = home.currentProvider;
+    const input = row?.querySelector("[data-model-source-confirm]");
+    const draft = state.modelSourceDrafts.get(home.codexHome);
+    const targetProvider = draft?.targetProvider || home.currentProvider;
+    if (select) {
+      const available = [...select.options].some((option) => option.value === targetProvider && !option.disabled);
+      const fallback = [...select.options].some((option) => option.value === home.currentProvider && !option.disabled)
+        ? home.currentProvider
+        : "openai";
+      select.value = available ? targetProvider : fallback;
+    }
+    if (input && draft) {
+      input.value = draft.confirm;
+      if (draft.placeholder) input.placeholder = draft.placeholder;
+    }
+    const focusTarget = draft?.focus === "target" ? select : draft?.focus === "confirm" ? input : null;
+    if (focusTarget) {
+      focusTarget.focus();
+      if (focusTarget === input && draft.selectionStart !== null) {
+        input.setSelectionRange(draft.selectionStart, draft.selectionEnd);
+      }
+    }
   }
 }
 
@@ -350,8 +418,9 @@ async function handleModelSourceAction(event) {
   button.disabled = true;
   try {
     if (action === "login") {
+      const restarting = home.loginJob?.status === "running";
       const data = await postJson("/api/model-sources/login", { codexHome: home.codexHome });
-      setActionResult("modelSourceResult", "info", `<strong>官方登录已启动。</strong><div>浏览器完成后会自动刷新：${mono(data.job?.codexHome)}</div>`);
+      setActionResult("modelSourceResult", "info", `<strong>${restarting ? "旧登录已结束，官方登录已重新发起。" : "官方登录已启动。"}</strong><div>浏览器完成后会自动刷新：${mono(data.job?.codexHome)}</div>`);
       await refreshModelSources(false);
       return;
     }
@@ -370,6 +439,8 @@ async function handleModelSourceAction(event) {
     }
     const confirm = row.querySelector("[data-model-source-confirm]").value.trim();
     const result = await postJson("/api/model-sources/apply", { ...payload, confirm });
+    row.querySelector("[data-model-source-confirm]").value = "";
+    state.modelSourceDrafts.delete(home.codexHome);
     setActionResult("modelSourceResult", "good", `<strong>模型来源已切换到 ${escapeHtml(result.targetProvider)}。</strong><div>重启 ${escapeHtml(result.restarted?.length || 0)} 个脚本 Bot；清除 ${escapeHtml(result.clearedSessionOverrides || 0)} 个会话覆盖。</div>`);
     await refreshModelSources(false);
     await refresh();

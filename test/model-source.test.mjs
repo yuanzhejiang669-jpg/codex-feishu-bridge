@@ -141,6 +141,8 @@ test("starts official login with the exact Codex Home and never handles token da
   try {
     const job = manager.start(codexPath, value.writing);
     assert.equal(job.status, "running");
+    assert.ok(job.warningAt);
+    assert.ok(job.expiresAt);
     assert.equal(invocation.command, codexPath);
     assert.deepEqual(invocation.args, ["login"]);
     assert.equal(invocation.options.env.CODEX_HOME, value.writing);
@@ -148,6 +150,40 @@ test("starts official login with the exact Codex Home and never handles token da
     child.emit("exit", 0);
     assert.equal(manager.get(value.writing).status, "completed");
   } finally {
+    fs.rmSync(value.root, { recursive: true, force: true });
+  }
+});
+
+test("restarting official login terminates the stale process and starts a fresh timeout", async () => {
+  const value = fixture();
+  const codexPath = path.join(value.root, "codex.exe");
+  fs.writeFileSync(codexPath, "", "utf8");
+  const children = [];
+  const manager = createLoginManager({
+    timeoutMs: 25,
+    warningMs: 10,
+    spawn: () => {
+      const child = new EventEmitter();
+      child.pid = 400 + children.length;
+      child.killed = false;
+      child.kill = () => { child.killed = true; };
+      child.unref = () => {};
+      children.push(child);
+      return child;
+    },
+  });
+  try {
+    const first = manager.start(codexPath, value.writing);
+    const second = manager.start(codexPath, value.writing);
+    assert.equal(children.length, 2);
+    assert.equal(children[0].killed, true);
+    assert.notEqual(first.processId, second.processId);
+    assert.equal(second.status, "running");
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(manager.get(value.writing).status, "timed-out");
+    assert.equal(children[1].killed, true);
+  } finally {
+    manager.stop(value.writing);
     fs.rmSync(value.root, { recursive: true, force: true });
   }
 });

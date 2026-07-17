@@ -1350,3 +1350,23 @@ Delivery verification:
 - The old device fast-forwarded to `112acfa`, preserved its unrelated Browser Control script modification, passed the root `55/55` checks, and restarted all `17/17` idle script-hosted Bots through their existing scheduled watchdog tasks. Every PID changed and remained alive.
 - The current device uses the same source commit. Its legacy default instance and 13 other idle script-hosted Bots restarted with changed live PIDs; the active `codex-assistant-1` conversation is intentionally left running until a guarded post-turn restart can observe zero active runs.
 - The installed client upgraded in place from `0.4.3` to `0.5.0.0` using the public installer. Its uninstall entry reports `0.5.0`, its persistent data remained under `C:\Users\yzjiang\AppData\Local\CodexFeishuBridgeDesktop`, and all three drawing Bots restarted with new PIDs and remained online for 61 seconds.
+
+## 0.5.1 OpenAI login lifecycle and refresh-safe drafts
+
+Discovery:
+
+- A real script-panel OpenAI login remained at `running` with PID `43132` while `codex login status` still reported signed out. A second click returned the same job and could not reopen the browser because the shared manager had no retry or timeout lifecycle.
+- The script panel rebuilds the model-source controls every ten seconds and every two seconds while login is running. The rebuild restored the persisted `currentProvider`, discarding an unsubmitted Provider selection, confirmation text, details state, and focus. The desktop client has no general periodic refresh, but it uses the same two-second polling while login is running and therefore shared the defect.
+
+Implementation:
+
+- Shared login jobs now expose warning and expiry timestamps, warn for the final two minutes, terminate after ten minutes, and kill the exact previous login child before a deliberate restart. Exit, error, restart, cancellation, and timeout paths clear their timers.
+- Both renderers snapshot per-Home drafts before replacing status markup and restore the selected target, confirmation text, placeholder, advanced-section state, focus, and text selection afterward.
+- OpenAI official login is now the primary action. Whole-Home default Provider switching is collapsed under advanced management with an explicit warning that it affects every owned Bot and that daily switching belongs in Feishu.
+- The stale PID `43132` was verified as `codex.exe login` and stopped before deployment; no `codex.exe app-server` process was touched. The old device is powered off and explicitly excluded from this release synchronization until the user requests it after startup.
+
+Verification so far:
+
+- Root syntax, static, capability, and unit checks pass `56/56`; desktop syntax, unit, and integration checks pass `124/124`.
+- Playwright opened the real isolated script panel, selected `mimo2codex-apideepseek`, entered a confirmation draft, waited twelve seconds across the automatic refresh boundary, and verified the selection, text, and expanded state remained intact.
+- Script-panel and Electron capture screenshots show the primary login action and collapsed advanced Provider control without overlap at `1440x1100`.

@@ -126,6 +126,10 @@ th:nth-child(1) { width: 20%; } th:nth-child(2) { width: 11%; } th:nth-child(3) 
 .model-source-main, .model-source-status, .model-source-actions { display: grid; gap: 7px; min-width: 0; }
 .model-source-main code { overflow-wrap: anywhere; }
 .model-source-actions select, .model-source-actions input { width: 100%; }
+.model-source-hint { color: #66717c; font-size: 12px; line-height: 1.5; }
+.model-source-actions details { border-top: 1px solid #d8dde3; padding-top: 8px; }
+.model-source-actions summary { color: #596570; cursor: pointer; font-weight: 700; }
+.model-source-advanced-body { display: grid; gap: 8px; padding-top: 10px; }
 @media (max-width: 980px) { .model-source-row { grid-template-columns: 1fr; } }
 .selected-mark { display: inline-block; margin-left: 6px; border-radius: 3px; padding: 2px 5px; background: #fff0c2; color: #795800; font-size: 10px; }
 .provider-workbench .content-section { min-width: 0; }

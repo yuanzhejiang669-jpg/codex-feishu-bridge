@@ -264,22 +264,40 @@ async function inspectLogin(codexPath, codexHome, options = {}) {
 
 function createLoginManager(options = {}) {
   const jobs = new Map();
+  const timeoutMs = Math.max(1, Number(options.timeoutMs) || 10 * 60_000);
+  const warningMs = Math.min(timeoutMs, Math.max(0, Number(options.warningMs) || 2 * 60_000));
   const publicJob = (job) => job ? {
     codexHome: job.codexHome,
     processId: job.processId,
     status: job.status,
     startedAt: job.startedAt,
+    warningAt: job.warningAt,
+    expiresAt: job.expiresAt,
     finishedAt: job.finishedAt || "",
     exitCode: job.exitCode,
     error: job.error || "",
   } : null;
+  const finish = (job, status, details = {}) => {
+    if (job.status !== "running") return false;
+    clearTimeout(job.timeout);
+    job.status = status;
+    job.finishedAt = new Date().toISOString();
+    Object.assign(job, details);
+    return true;
+  };
+  const terminate = (job, status = "restarted") => {
+    if (!job || !finish(job, status)) return false;
+    try { job.child.kill(); } catch {}
+    return true;
+  };
   return {
     start(codexPath, codexHome) {
       if (!codexPath || !fs.existsSync(codexPath)) throw new Error("官方 Codex 运行时不可用");
       const resolved = canonicalPath(codexHome);
       const key = pathKey(resolved);
       const existing = jobs.get(key);
-      if (existing?.status === "running") return publicJob(existing);
+      terminate(existing);
+      const startedAtMs = Date.now();
       const child = (options.spawn || spawn)(codexPath, ["login"], {
         windowsHide: true,
         stdio: "ignore",
@@ -289,26 +307,32 @@ function createLoginManager(options = {}) {
         codexHome: resolved,
         processId: child.pid || null,
         status: "running",
-        startedAt: new Date().toISOString(),
+        startedAt: new Date(startedAtMs).toISOString(),
+        warningAt: new Date(startedAtMs + timeoutMs - warningMs).toISOString(),
+        expiresAt: new Date(startedAtMs + timeoutMs).toISOString(),
         finishedAt: "",
         exitCode: null,
         error: "",
+        child,
+        timeout: null,
       };
       jobs.set(key, job);
+      job.timeout = setTimeout(() => {
+        if (!finish(job, "timed-out", { error: "OpenAI login timed out after 10 minutes" })) return;
+        try { child.kill(); } catch {}
+      }, timeoutMs);
+      job.timeout.unref?.();
       child.once("error", (error) => {
-        job.status = "failed";
-        job.error = error.message;
-        job.finishedAt = new Date().toISOString();
+        finish(job, "failed", { error: error.message });
       });
       child.once("exit", (code) => {
-        job.status = code === 0 ? "completed" : "failed";
-        job.exitCode = code;
-        job.finishedAt = new Date().toISOString();
+        finish(job, code === 0 ? "completed" : "failed", { exitCode: code });
       });
       child.unref?.();
       return publicJob(job);
     },
     get(codexHome) { return publicJob(jobs.get(pathKey(codexHome))); },
+    stop(codexHome) { return terminate(jobs.get(pathKey(codexHome)), "cancelled"); },
   };
 }
 

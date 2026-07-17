@@ -146,6 +146,7 @@ let state = null;
 let removalPreview = null;
 let providerRemovalPreview = null;
 let modelSourcePollTimer = null;
+const modelSourceDrafts = new Map();
 
 function text(value, fallback = "-") {
   const result = String(value ?? "").trim();
@@ -500,6 +501,44 @@ function modelSourceOptions(home) {
   )).join("") || '<option disabled>未发现第三方 Provider</option>'}</optgroup>`;
 }
 
+function rememberModelSourceDrafts() {
+  const homes = state?.modelSources?.homes || [];
+  homes.forEach((home, index) => {
+    const row = elements.modelSourceList.querySelector(`[data-model-source-index="${index}"]`);
+    if (!row) return;
+    const select = row.querySelector("[data-model-source-target]");
+    const input = row.querySelector("[data-model-source-confirm]");
+    const advanced = row.querySelector("[data-model-source-advanced]");
+    const focused = document.activeElement;
+    modelSourceDrafts.set(home.codexHome, {
+      targetProvider: select?.value || home.currentProvider,
+      confirm: input?.value || "",
+      placeholder: input?.placeholder || "",
+      advancedOpen: advanced?.open === true,
+      focus: focused === select ? "target" : focused === input ? "confirm" : "",
+      selectionStart: focused === input ? input.selectionStart : null,
+      selectionEnd: focused === input ? input.selectionEnd : null,
+    });
+  });
+}
+
+function loginJobPresentation(job) {
+  if (!job) return { badge: "", button: "登录 OpenAI" };
+  if (job.status === "running") {
+    const remainingSeconds = Math.max(0, Math.ceil((new Date(job.expiresAt).getTime() - Date.now()) / 1000));
+    const minutes = Math.floor(remainingSeconds / 60);
+    const seconds = String(remainingSeconds % 60).padStart(2, "0");
+    const warning = Date.now() >= new Date(job.warningAt).getTime();
+    return {
+      badge: `<span class="${badgeClass(warning ? "warn" : "info")}">${warning ? "即将超时" : "等待浏览器登录"} · ${minutes}:${seconds}</span>`,
+      button: "重新登录",
+    };
+  }
+  if (job.status === "timed-out") return { badge: `<span class="${badgeClass("warn")}">登录已超时</span>`, button: "重新登录" };
+  if (job.status === "failed") return { badge: `<span class="${badgeClass("bad")}">登录未完成</span>`, button: "重新登录" };
+  return { badge: "", button: "登录 OpenAI" };
+}
+
 function renderModelSources(modelSources = {}) {
   const homes = modelSources.homes || [];
   elements.modelSourceCount.textContent = `${homes.length} 个 Codex Home`;
@@ -508,15 +547,48 @@ function renderModelSources(modelSources = {}) {
     const loginText = home.login?.state === "signed-in" ? "OpenAI 已登录" : home.login?.state === "signed-out" ? "OpenAI 未登录" : "登录状态未知";
     const active = (home.bots || []).reduce((sum, bot) => sum + Number(bot.activeRunCount || 0), 0);
     const readOnly = !(home.bots || []).length;
+    const loginJob = loginJobPresentation(home.loginJob);
+    const draft = modelSourceDrafts.get(home.codexHome);
     return `<div class="model-source-row" data-model-source-index="${index}">
       <div class="model-source-main"><strong>${escapeHtml(home.label)}</strong><code>${escapeHtml(home.codexHome)}</code><span>${escapeHtml((home.bots || []).map((bot) => bot.label).join("、") || "尚未绑定客户端 Bot")}</span></div>
-      <div class="model-source-status"><span class="${loginClass}">${loginText}</span><span>当前来源：${home.sourceKind === "openai" ? "OpenAI 官方账号" : `第三方 API · ${escapeHtml(home.currentProvider)}`}</span><span>会话覆盖 ${home.sessionOverrideCount || 0} 个 · 活动任务 ${active} 个</span></div>
-      <div class="model-source-actions"><select data-model-source-target>${modelSourceOptions(home)}</select><input data-model-source-confirm placeholder="执行时输入：切换到 Provider ID" autocomplete="off"><div class="inline-actions"><button class="secondary-button" data-model-source-action="login" type="button" ${readOnly ? "disabled" : ""}>登录 OpenAI</button><button class="secondary-button" data-model-source-action="preview" type="button">预览</button><button class="primary-button" data-model-source-action="apply" type="button" ${readOnly ? "disabled" : ""}>确认切换</button></div></div>
+      <div class="model-source-status"><span><span class="${loginClass}">${loginText}</span> ${loginJob.badge}</span><span>当前来源：${home.sourceKind === "openai" ? "OpenAI 官方账号" : `第三方 API · ${escapeHtml(home.currentProvider)}`}</span><span>会话覆盖 ${home.sessionOverrideCount || 0} 个 · 活动任务 ${active} 个</span></div>
+      <div class="model-source-actions">
+        <button class="primary-button" data-model-source-action="login" type="button" ${readOnly ? "disabled" : ""}>${loginJob.button}</button>
+        <span class="model-source-hint">官方登录只作用于这个 Codex Home；浏览器登录最长等待10分钟。</span>
+        <details data-model-source-advanced ${draft?.advancedOpen ? "open" : ""}>
+          <summary>高级管理：整空间默认 Provider</summary>
+          <div class="model-source-advanced-body">
+            <span class="model-source-hint">日常切换请在飞书中操作。这里会影响该 Home 下所有客户端 Bot，并可能重启它们。</span>
+            <select data-model-source-target>${modelSourceOptions(home)}</select>
+            <input data-model-source-confirm placeholder="执行时输入：切换到 Provider ID" autocomplete="off">
+            <div class="inline-actions"><button class="secondary-button" data-model-source-action="preview" type="button">预览</button><button class="primary-button" data-model-source-action="apply" type="button" ${readOnly ? "disabled" : ""}>确认切换</button></div>
+          </div>
+        </details>
+      </div>
     </div>`;
   }).join("") : '<p class="empty-row">没有发现 Codex Home。</p>';
   homes.forEach((home, index) => {
-    const select = elements.modelSourceList.querySelector(`[data-model-source-index="${index}"] [data-model-source-target]`);
-    if (select && [...select.options].some((option) => option.value === home.currentProvider)) select.value = home.currentProvider;
+    const row = elements.modelSourceList.querySelector(`[data-model-source-index="${index}"]`);
+    const select = row?.querySelector("[data-model-source-target]");
+    const input = row?.querySelector("[data-model-source-confirm]");
+    const draft = modelSourceDrafts.get(home.codexHome);
+    const targetProvider = draft?.targetProvider || home.currentProvider;
+    if (select) {
+      const available = [...select.options].some((option) => option.value === targetProvider && !option.disabled);
+      const fallback = [...select.options].some((option) => option.value === home.currentProvider && !option.disabled)
+        ? home.currentProvider
+        : "openai";
+      select.value = available ? targetProvider : fallback;
+    }
+    if (input && draft) {
+      input.value = draft.confirm;
+      if (draft.placeholder) input.placeholder = draft.placeholder;
+    }
+    const focusTarget = draft?.focus === "target" ? select : draft?.focus === "confirm" ? input : null;
+    if (focusTarget) {
+      focusTarget.focus();
+      if (focusTarget === input && draft.selectionStart !== null) input.setSelectionRange(draft.selectionStart, draft.selectionEnd);
+    }
   });
   clearTimeout(modelSourcePollTimer);
   if (homes.some((home) => home.loginJob?.status === "running")) modelSourcePollTimer = setTimeout(refresh, 2000);
@@ -655,6 +727,7 @@ function renderWorkspaceAgentsPaths() {
 }
 
 function render(currentState) {
+  rememberModelSourceDrafts();
   state = currentState;
   elements.appVersion.textContent = `v${currentState.app.version}`;
   elements.generatedAt.textContent = `更新于 ${new Date(currentState.generatedAt).toLocaleString()}`;
@@ -977,8 +1050,9 @@ elements.modelSourceList.addEventListener("click", async (event) => {
   button.disabled = true;
   try {
     if (action === "login") {
+      const restarting = home.loginJob?.status === "running";
       await window.bridgeDesktop.startOpenAiLogin(home.codexHome);
-      showModelSourceResult("官方登录已启动", "请在浏览器完成 ChatGPT 登录，客户端会自动刷新状态。", "good");
+      showModelSourceResult(restarting ? "官方登录已重新发起" : "官方登录已启动", restarting ? "旧登录进程已经结束，请在新打开的浏览器页面完成 ChatGPT 登录。" : "请在浏览器完成 ChatGPT 登录，客户端会自动刷新状态。", "good");
       await refresh();
       return;
     }
@@ -996,6 +1070,8 @@ elements.modelSourceList.addEventListener("click", async (event) => {
     }
     const confirm = row.querySelector("[data-model-source-confirm]").value.trim();
     const result = await window.bridgeDesktop.applyModelSourceSwitch({ ...input, confirm });
+    row.querySelector("[data-model-source-confirm]").value = "";
+    modelSourceDrafts.delete(home.codexHome);
     showModelSourceResult("模型来源已切换", `当前使用 ${result.targetProvider}；重启 ${result.restarted.length} 个客户端 Bot；清除 ${result.clearedSessionOverrides || 0} 个会话覆盖。`);
     await refresh();
   } catch (error) {

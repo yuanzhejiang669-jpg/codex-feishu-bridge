@@ -644,6 +644,29 @@ table {
   margin: 0;
 }
 
+.model-source-hint {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.model-source-actions details {
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+}
+
+.model-source-actions summary {
+  color: var(--muted);
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.model-source-advanced-body {
+  display: grid;
+  gap: 8px;
+  padding-top: 10px;
+}
+
 @media (max-width: 980px) {
   .model-source-row {
     grid-template-columns: 1fr;

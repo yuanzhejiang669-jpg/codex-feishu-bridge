@@ -367,6 +367,12 @@ This list is the durable parity checklist against the existing local control pan
 108. [x] Preserve unrelated TOML sections and roll back config, session overrides, and process recovery after a failed switch.
 109. [x] Recognize both user-environment credentials and client-managed encrypted Provider credentials.
 110. [x] Verify the packaged `0.5.0` engine, public Release, installed upgrade, and both script-hosted devices.
+111. [x] Bound OpenAI browser login jobs to ten minutes and expose the two-minute expiry warning to both control surfaces.
+112. [x] Make a deliberate second login click terminate the exact stale login child before launching a fresh browser flow.
+113. [x] Preserve each Home's unsubmitted Provider target, confirmation text, expanded state, and focused field across status refreshes.
+114. [x] Keep the desktop client manual-refresh-first while retaining its two-second login-status polling without losing drafts.
+115. [x] Present OpenAI official login as the primary local action and move whole-Home Provider switching into advanced management.
+116. [ ] Verify `0.5.1` packaging, public Release, current-device script panel, installed upgrade, and managed Bot recovery; intentionally defer the powered-off old device.
 
 `0.1.6 Provider center` acceptance: items 26-35 are implemented; API keys never enter TOML, renderer state, IPC results, or logs; synchronization is previewable and transactional; only client-managed isolated Codex Homes are eligible; existing Bridge processes and legacy Bot files remain unchanged.
 
@@ -393,6 +399,8 @@ This list is the durable parity checklist against the existing local control pan
 `0.4.3` delivery is complete: the source checkout, public GitHub Release, old-device script-managed deployment, current-device script-managed deployment, and installed Windows client are synchronized to the same fix. Persistent scheduled-task recovery, installed-client recovery, and the downloaded public installer checksum were independently verified.
 
 `0.5.0 Model-source management` acceptance: user-facing reasoning capability cards show only the selected request and final model outcome; the diagnostic layer retains request, effective Codex effort, and upstream semantics. Both local control surfaces discover current and future Codex Homes dynamically, separate OpenAI official account login from third-party Provider selection, invoke the official runtime with the exact `CODEX_HOME`, never expose credentials, keep foreign/unbound Homes read-only, refuse active tasks, clear persisted session overrides, preserve unrelated Provider/MCP configuration, restart only owned online Bots, and roll back on failure.
+
+`0.5.1 Login lifecycle and refresh safety` acceptance: an OpenAI login child is scoped to its exact Codex Home, expires after ten minutes, enters a visible warning state for its final two minutes, and is replaced only by a deliberate second login action. Login polling and ordinary script-panel refreshes must update server state without discarding an unsubmitted Provider target, confirmation text, advanced-section state, or focused field. Official login remains the primary action; whole-Home Provider switching is explicitly advanced administration, while daily switching is directed to Feishu.
 
 ## 8. Verification strategy
 
