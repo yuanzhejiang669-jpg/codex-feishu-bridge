@@ -3,7 +3,7 @@ import test from "node:test";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
-const { capabilityMappingLines, capabilityMappings, loadRegistry, mapReasoningEffort, resolveCapability, reviewStatus } = require("../src/config/model-reasoning.cjs");
+const { capabilityMappingLines, capabilityMappings, capabilityOutcomeLines, loadRegistry, mapReasoningEffort, resolveCapability, reviewStatus } = require("../src/config/model-reasoning.cjs");
 const registry = loadRegistry();
 
 test("reasoning registry resolves current non-GPT model families", () => {
@@ -57,6 +57,22 @@ test("reasoning mapping lines show rejected and generic values truthfully", () =
   const generic = capabilityMappingLines({ provider: "custom", model: "future-model", currentEffort: "xhigh" }, registry);
   assert.equal(generic.length, registry.canonicalEfforts.length);
   assert.match(generic[5], /`xhigh` → `xhigh` → `xhigh` ← 当前/);
+});
+
+test("user-facing reasoning outcomes hide the internal Codex hop", () => {
+  assert.deepEqual(capabilityOutcomeLines({
+    provider: "mimo2codex-apideepseek",
+    model: "deepseek-v4-flash",
+    currentEffort: "xhigh",
+  }, registry), [
+    "- `none` → `thinking.disabled`",
+    "- `minimal` → `thinking.disabled`",
+    "- `low` → `high`",
+    "- `medium` → `high`",
+    "- `high` → `high`",
+    "- `xhigh` → `max` ← 当前",
+    "- `max` → `max`",
+  ]);
 });
 
 test("reasoning registry rejects impossible settings and keeps unknown models generic", () => {

@@ -26,6 +26,12 @@ const { applyCapabilityMigration, previewCapabilityMigration } = require("./serv
 const { inspectProvider, testProvider } = require("./services/provider-setup.cjs");
 const { reasoningRegistry } = require("./services/reasoning-effort.cjs");
 const {
+  applyDesktopModelSourceSwitch,
+  listDesktopModelSources,
+  previewDesktopModelSourceSwitch,
+  startDesktopOpenAiLogin,
+} = require("./services/model-source.cjs");
+const {
   addGlobalProvider,
   applyGlobalProviderRemoval,
   inspectProviderCatalog,
@@ -175,6 +181,19 @@ function providerManagerOptions() {
   };
 }
 
+function modelSourceOptions() {
+  return {
+    dataRoot: managedDataRoot(),
+    localAppData: runtimeLocalAppData(),
+    codexHomeRoot: codexHomeRoot(),
+    defaultCodexHome: path.join(app.getPath("home"), ".codex"),
+    engineRoot: currentState?.engine?.engineRoot || "",
+    codexPath: currentState?.codex?.runtimePath || "",
+    envValue: (name) => process.env[name] || "",
+    supervisorOptions: supervisorOptions(),
+  };
+}
+
 function workspaceFactoryOptions() {
   return {
     dataRoot: managedDataRoot(),
@@ -319,6 +338,7 @@ async function loadState() {
       currentVersion: app.getVersion(),
     },
   };
+  currentState.modelSources = await listDesktopModelSources(modelSourceOptions());
   currentState.compatibility = assessCompatibility(currentState);
   return currentState;
 }
@@ -586,6 +606,21 @@ if (!singleInstance) {
     ipcMain.handle("desktop:apply-provider-sync", async () => {
       assertStartupReady();
       const result = providerSyncPlan(providerManagerOptions(), true);
+      await loadState();
+      return result;
+    });
+    ipcMain.handle("desktop:start-openai-login", async (_event, codexHome) => {
+      assertStartupReady();
+      const result = startDesktopOpenAiLogin(codexHome, modelSourceOptions());
+      await loadState();
+      return result;
+    });
+    ipcMain.handle("desktop:preview-model-source-switch", (_event, input) => (
+      previewDesktopModelSourceSwitch(input, modelSourceOptions())
+    ));
+    ipcMain.handle("desktop:apply-model-source-switch", async (_event, input) => {
+      assertStartupReady();
+      const result = await applyDesktopModelSourceSwitch(input, modelSourceOptions());
       await loadState();
       return result;
     });

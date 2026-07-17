@@ -14,6 +14,9 @@ const state = {
   factoryNextAction: null,
   cleanupPlan: null,
   cleanupLoading: false,
+  modelSources: null,
+  modelSourceLoading: false,
+  modelSourcePollTimer: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -264,6 +267,117 @@ function renderProviders(data) {
       `;
     })
     .join("");
+}
+
+function modelSourceOptions(home) {
+  const thirdParty = (home.providers || []).map((provider) => (
+    `<option value="${escapeHtml(provider.id)}" ${provider.credentialAvailable === false ? "disabled" : ""}>${escapeHtml(provider.name)} · ${escapeHtml(provider.id)}${provider.credentialAvailable === false ? " · Key 不可用" : ""}</option>`
+  )).join("");
+  return `
+    <option value="openai">OpenAI 官方账号</option>
+    <optgroup label="第三方 API">${thirdParty || '<option disabled>未发现第三方 Provider</option>'}</optgroup>
+  `;
+}
+
+function renderModelSources(data) {
+  state.modelSources = data;
+  const homes = data?.homes || [];
+  $("modelSourceList").innerHTML = homes.length ? homes.map((home, index) => {
+    const loginKind = home.login?.state === "signed-in" ? "good" : home.login?.state === "signed-out" ? "warn" : "info";
+    const loginText = home.login?.state === "signed-in" ? "OpenAI 已登录" : home.login?.state === "signed-out" ? "OpenAI 未登录" : "登录状态未知";
+    const active = (home.bots || []).reduce((sum, bot) => sum + Number(bot.activeRunCount || 0), 0);
+    const readOnly = !(home.bots || []).length;
+    const job = home.loginJob?.status === "running" ? statusBadge("info", "等待浏览器登录") : "";
+    return `
+      <article class="model-source-row" data-model-source-index="${index}">
+        <div class="model-source-main">
+          <strong>${escapeHtml(home.label)}</strong>
+          <code>${escapeHtml(home.codexHome)}</code>
+          <span>${escapeHtml((home.bots || []).map((bot) => bot.label).join("、") || "尚未绑定脚本 Bot")}</span>
+        </div>
+        <div class="model-source-status">
+          <span>${statusBadge(loginKind, loginText)} ${job}</span>
+          <span>当前来源：${home.sourceKind === "openai" ? "OpenAI 官方账号" : `第三方 API · ${escapeHtml(home.currentProvider)}`}</span>
+          <span>会话覆盖：${escapeHtml(home.sessionOverrideCount || 0)} 个；活动任务：${escapeHtml(active)} 个</span>
+        </div>
+        <div class="model-source-actions">
+          <select data-model-source-target aria-label="目标模型来源">${modelSourceOptions(home)}</select>
+          <input data-model-source-confirm placeholder="执行时输入：切换到 Provider ID" autocomplete="off">
+          <div class="button-row">
+            <button type="button" class="secondary-button" data-model-source-action="login" ${readOnly ? "disabled" : ""}>登录 OpenAI</button>
+            <button type="button" class="secondary-button" data-model-source-action="preview">预览</button>
+            <button type="button" class="danger-button" data-model-source-action="apply" ${readOnly ? "disabled" : ""}>确认切换</button>
+          </div>
+        </div>
+      </article>`;
+  }).join("") : '<p class="muted">没有发现 Codex Home。</p>';
+  for (const [index, home] of homes.entries()) {
+    const row = document.querySelector(`[data-model-source-index="${index}"]`);
+    const select = row?.querySelector("[data-model-source-target]");
+    if (select && [...select.options].some((option) => option.value === home.currentProvider)) select.value = home.currentProvider;
+  }
+}
+
+async function refreshModelSources(showResult = false) {
+  if (state.modelSourceLoading) return;
+  state.modelSourceLoading = true;
+  if (showResult) setActionResult("modelSourceResult", "info", "正在检查所有 Codex Home 的登录与 Provider 状态。");
+  try {
+    const response = await fetch("/api/model-sources", { cache: "no-store" });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    renderModelSources(data);
+    if (showResult) setActionResult("modelSourceResult", "good", `<strong>已刷新 ${escapeHtml(data.homes?.length || 0)} 个 Codex Home。</strong>`);
+    clearTimeout(state.modelSourcePollTimer);
+    if ((data.homes || []).some((home) => home.loginJob?.status === "running")) {
+      state.modelSourcePollTimer = setTimeout(() => refreshModelSources(false), 2000);
+    }
+  } catch (error) {
+    setActionResult("modelSourceResult", "bad", `<strong>模型来源刷新失败</strong><pre class="mono">${escapeHtml(error.message)}</pre>`);
+  } finally {
+    state.modelSourceLoading = false;
+  }
+}
+
+async function handleModelSourceAction(event) {
+  const button = event.target.closest("[data-model-source-action]");
+  if (!button) return;
+  const row = button.closest("[data-model-source-index]");
+  const home = state.modelSources?.homes?.[Number(row?.dataset.modelSourceIndex)];
+  if (!home) return;
+  const targetProvider = row.querySelector("[data-model-source-target]").value;
+  const action = button.dataset.modelSourceAction;
+  button.disabled = true;
+  try {
+    if (action === "login") {
+      const data = await postJson("/api/model-sources/login", { codexHome: home.codexHome });
+      setActionResult("modelSourceResult", "info", `<strong>官方登录已启动。</strong><div>浏览器完成后会自动刷新：${mono(data.job?.codexHome)}</div>`);
+      await refreshModelSources(false);
+      return;
+    }
+    const payload = { codexHome: home.codexHome, targetProvider };
+    if (action === "preview") {
+      const preview = await postJson("/api/model-sources/preview", payload);
+      const blockers = (preview.blockers || []).map((item) => `<li>${escapeHtml(item)}</li>`).join("");
+      setActionResult("modelSourceResult", blockers ? "warn" : "good", `
+        <strong>${escapeHtml(preview.currentProvider)} → ${escapeHtml(preview.targetProvider)}</strong>
+        <div>配置：${mono(preview.configPath)}</div>
+        <div>影响 Bot：${escapeHtml((preview.bots || []).map((bot) => bot.label).join("、") || "无")}</div>
+        <div>将清除 ${escapeHtml(preview.sessionOverrideCount || 0)} 个会话 Provider 覆盖。</div>
+        ${blockers ? `<ul>${blockers}</ul>` : ""}`);
+      row.querySelector("[data-model-source-confirm]").placeholder = `输入：切换到 ${targetProvider}`;
+      return;
+    }
+    const confirm = row.querySelector("[data-model-source-confirm]").value.trim();
+    const result = await postJson("/api/model-sources/apply", { ...payload, confirm });
+    setActionResult("modelSourceResult", "good", `<strong>模型来源已切换到 ${escapeHtml(result.targetProvider)}。</strong><div>重启 ${escapeHtml(result.restarted?.length || 0)} 个脚本 Bot；清除 ${escapeHtml(result.clearedSessionOverrides || 0)} 个会话覆盖。</div>`);
+    await refreshModelSources(false);
+    await refresh();
+  } catch (error) {
+    setActionResult("modelSourceResult", "bad", `<strong>操作失败</strong><pre class="mono">${escapeHtml(error.message)}</pre>`);
+  } finally {
+    button.disabled = false;
+  }
 }
 
 function renderManagementPaths(data) {
@@ -2236,6 +2350,7 @@ async function refresh() {
     if (state.activePanel === "workspace-factory") {
       await refreshFactoryJobs(false);
     }
+    if (state.activePanel === "provider-config") await refreshModelSources(false);
   } catch (error) {
     $("problemList").innerHTML = `
       <article class="problem">
@@ -2291,6 +2406,7 @@ function showPanel(panelId, options = {}) {
   if (panelId === "bot-cleanup") {
     refreshCleanupPlan(false);
   }
+  if (panelId === "provider-config") refreshModelSources(false);
 }
 
 function initPanelNavigation() {
@@ -2352,6 +2468,8 @@ $("addProviderButton").addEventListener("click", addProvider);
 $("replaceProviderEnvButton").addEventListener("click", replaceProviderEnv);
 $("previewProviderSyncButton").addEventListener("click", previewProviderSync);
 $("syncProvidersButton").addEventListener("click", syncProvidersToSpaces);
+$("refreshModelSourcesButton").addEventListener("click", () => refreshModelSources(true));
+$("modelSourceList").addEventListener("click", handleModelSourceAction);
 $("providerForm").addEventListener("submit", (event) => event.preventDefault());
 $("previewFactoryButton").addEventListener("click", previewFactory);
 $("readScopesButton").addEventListener("click", readFactoryScopesBaseline);

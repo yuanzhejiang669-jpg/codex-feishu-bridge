@@ -86,6 +86,14 @@ function capabilityMappingLines({ provider = "", model = "", currentEffort = "" 
   });
 }
 
+function capabilityOutcomeLines({ provider = "", model = "", currentEffort = "" } = {}, registry = loadRegistry()) {
+  return capabilityMappings({ provider, model }, registry).map((item) => {
+    const outcome = item.supported ? `\`${item.upstreamValue}\`` : "不支持";
+    const current = item.requestedEffort === currentEffort ? " ← 当前" : "";
+    return `- \`${item.requestedEffort}\` → ${outcome}${current}`;
+  });
+}
+
 function reviewStatus(capability, registry = loadRegistry(), now = Date.now()) {
   if (!capability?.known || !capability.verifiedAt) return { stale: false, reviewDueAt: "" };
   const verifiedAt = Date.parse(`${capability.verifiedAt}T00:00:00Z`);
@@ -95,4 +103,4 @@ function reviewStatus(capability, registry = loadRegistry(), now = Date.now()) {
 
 function publicRegistry(registry = loadRegistry()) { return JSON.parse(JSON.stringify(registry)); }
 
-module.exports = { DEFAULT_REGISTRY_PATH, acceptedEfforts, capabilityMappingLines, capabilityMappings, globMatches, loadRegistry, mapReasoningEffort, publicRegistry, resolveCapability, reviewStatus, validateRegistry };
+module.exports = { DEFAULT_REGISTRY_PATH, acceptedEfforts, capabilityMappingLines, capabilityMappings, capabilityOutcomeLines, globMatches, loadRegistry, mapReasoningEffort, publicRegistry, resolveCapability, reviewStatus, validateRegistry };

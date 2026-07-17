@@ -357,6 +357,16 @@ This list is the durable parity checklist against the existing local control pan
 98. [x] Warn when a known capability rule is due for review and mark unknown models as unverified generic passthrough.
 99. [x] Show every canonical request effort as a request-to-Codex-to-upstream mapping and mark the current request in `/model capability`.
 100. [x] Make `/model effort` without a value show the current Provider/model mapping instead of a fixed generic effort list.
+101. [x] Show reasoning choices as `user request -> model outcome` by default while retaining the internal Codex hop for diagnostics and tests.
+102. [x] Discover Codex Homes dynamically from Bot bindings and the standard Codex Homes root instead of hard-coding current spaces.
+103. [x] Present OpenAI official account login separately from dynamically discovered third-party Providers.
+104. [x] Check ChatGPT login status and launch `codex login` with the exact selected `CODEX_HOME` without reading or copying credentials.
+105. [x] Keep unowned Codex Homes visible but read-only across script-hosted and desktop-managed ownership boundaries.
+106. [x] Refuse a model-source switch while any owned Bot in the selected Home has an active run.
+107. [x] Clear persisted per-session Provider overrides when switching an entire Home so old sessions cannot silently retain the previous source.
+108. [x] Preserve unrelated TOML sections and roll back config, session overrides, and process recovery after a failed switch.
+109. [x] Recognize both user-environment credentials and client-managed encrypted Provider credentials.
+110. [ ] Verify the packaged `0.5.0` engine, public Release, installed upgrade, and both script-hosted devices.
 
 `0.1.6 Provider center` acceptance: items 26-35 are implemented; API keys never enter TOML, renderer state, IPC results, or logs; synchronization is previewable and transactional; only client-managed isolated Codex Homes are eligible; existing Bridge processes and legacy Bot files remain unchanged.
 
@@ -381,6 +391,8 @@ This list is the durable parity checklist against the existing local control pan
 `0.4.3 Empty-reasoning watchdog compatibility` acceptance: a watchdog restart omits `-Reasoning` when the configured value is empty so the Bridge can fall back to session, environment, `config.toml`, or `medium`; an explicit reasoning value is still forwarded unchanged. Script-managed Bots must remain persistently online after remote synchronization through their existing scheduled watchdog tasks.
 
 `0.4.3` delivery is complete: the source checkout, public GitHub Release, old-device script-managed deployment, current-device script-managed deployment, and installed Windows client are synchronized to the same fix. Persistent scheduled-task recovery, installed-client recovery, and the downloaded public installer checksum were independently verified.
+
+`0.5.0 Model-source management` acceptance: user-facing reasoning capability cards show only the selected request and final model outcome; the diagnostic layer retains request, effective Codex effort, and upstream semantics. Both local control surfaces discover current and future Codex Homes dynamically, separate OpenAI official account login from third-party Provider selection, invoke the official runtime with the exact `CODEX_HOME`, never expose credentials, keep foreign/unbound Homes read-only, refuse active tasks, clear persisted session overrides, preserve unrelated Provider/MCP configuration, restart only owned online Bots, and roll back on failure.
 
 ## 8. Verification strategy
 

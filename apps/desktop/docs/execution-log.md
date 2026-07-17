@@ -1312,3 +1312,35 @@ Delivery verification:
 - The old device fast-forwarded to `01b7c15`, preserved its unrelated Browser Control script modification, and recovered all `17/17` script-managed Bots through persistent scheduled watchdog tasks. A later Doctor reported `113` checks, `96` OK, `17` warnings, `0` bad, no active runs, and both managed proxies online.
 - The current device source and `origin/main` both resolve to `01b7c15`. All idle script-managed Bots were restarted; the active conversation Bot uses a guarded post-turn helper so synchronization never interrupts its task.
 - The installed Windows client upgraded in place from `0.4.2` to `0.4.3.0`. Its three managed Bots restarted with new PIDs and recovered online; the installed engine contains the conditional empty-`Reasoning` forwarding fix.
+
+## 0.5.0 dynamic model sources and OpenAI official login
+
+Requirements confirmed:
+
+- Simplify the user-facing reasoning map to `request -> model outcome`; retain all three internal stages for diagnostics.
+- Discover future Codex Homes rather than encoding the three Homes currently present on one device.
+- Treat OpenAI official account login as a separate source from third-party API Providers discovered from `[model_providers.*]`.
+- Support the script-hosted control panel and Windows client without allowing either surface to restart or mutate the other's Bots.
+
+Implementation completed:
+
+- Added one staged shared model-source module for Home discovery, Provider inspection, login-state checks, official login launch, comment-preserving top-level Provider writes, session-override cleanup, and transactional rollback.
+- Updated `/model capability` and no-value `/model effort` to show the selected request and final model outcome only; the existing complete three-hop formatter remains covered by diagnostics tests.
+- Added per-Home model-source UI and APIs to the script control panel and desktop client. Both show absolute paths, owned Bots, login state, current source, discovered third-party Providers, active runs, and session overrides.
+- Official login launches the selected cached `codex.exe login` with only the exact `CODEX_HOME` environment override. Tokens are neither read nor returned.
+- Whole-Home switching refuses active tasks, stops only online owned Bots, writes only `model_provider`, clears Provider session overrides, restarts previously online Bots, and restores prior files/processes after failure.
+
+Verification completed so far:
+
+- Root syntax, static, capability, and unit checks pass `55/55`; desktop syntax, unit, and integration checks pass `123/123`.
+- A real isolated control-panel server discovered the current cached Codex `0.144.2` runtime, global/writing/drawing Homes, all configured third-party Providers, exact Bot ownership, active-run counts, session overrides, and independent signed-out states without modifying configuration.
+
+Adversarial review and fixes so far:
+
+1. Three-month failure: a control surface discovers another surface's Home and treats discovery as ownership, silently changing configuration used by foreign Bots. Fix: unbound Homes remain visible but login and apply actions are blocked; only owned Bots may be stopped or restarted.
+2. Three-month failure: a client-managed custom Provider uses a DPAPI-encrypted Bot secret rather than a user environment variable and is falsely marked unavailable. Fix: a Provider is usable when every affected client Bot has the matching encrypted secret, while no secret content enters state or IPC.
+3. Three-month failure: `config.toml` changes but existing sessions retain `providerOverride`, so only some turns use the selected source. Fix: switching an entire Home clears both Provider override fields while Bots are stopped and restores the exact original session JSON if any later step fails.
+
+Completion boundary:
+
+- Packaging, public Release publication, current/old script deployment, installed-client upgrade, and final delivery verification remain required.

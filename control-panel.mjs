@@ -1,4 +1,5 @@
 import { execFile, spawn } from "node:child_process";
+import { createRequire } from "node:module";
 import { createServer } from "node:http";
 import { existsSync, readFileSync } from "node:fs";
 import {
@@ -37,6 +38,21 @@ import {
   normalizeConfirmedStartResult,
 } from "./src/control-panel/restart.mjs";
 
+const require = createRequire(import.meta.url);
+const {
+  applyModelSourceSwitch,
+  clearSessionOverrides,
+  createLoginManager,
+  discoverCodexHomes,
+  discoverOfficialCodex,
+  inspectCodexHome,
+  inspectLogin,
+  inspectSessionOverrides,
+  previewModelSourceSwitch,
+  restoreModelSourceSwitch,
+  restoreSessionOverrides,
+} = require("./src/codex/model-source.cjs");
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -63,6 +79,7 @@ const instancesConfigPath = envInstancesConfigPath || localInstancesConfigPath;
 const doctorScript = path.join(__dirname, "doctor-codex-feishu-bridge.ps1");
 const startBridgeScript = path.join(__dirname, "start-codex-feishu-bridge.ps1");
 const stopBridgeScript = path.join(__dirname, "stop-codex-feishu-bridge.ps1");
+const codexLoginManager = createLoginManager();
 
 function getArg(name, fallback) {
   const prefix = `--${name}=`;
@@ -3393,6 +3410,147 @@ async function hasActiveRun(descriptor) {
   };
 }
 
+function scriptModelSourceBindings(config = loadInstancesConfig()) {
+  return instanceDescriptors(config).map((descriptor) => ({
+    codexHome: descriptor.codexHome,
+    source: "script",
+    bot: {
+      name: descriptor.name,
+      label: descriptor.label || descriptor.name,
+      owner: "script",
+      runtimeRoot: descriptor.runtimeRoot,
+    },
+  }));
+}
+
+function discoveredScriptHomes(config = loadInstancesConfig()) {
+  const root = config.paths?.codexHomesRoot
+    || path.join(os.homedir(), "Documents", "Codex", "codex-homes");
+  return discoverCodexHomes({
+    globalHome: config.paths?.codexHome || path.join(os.homedir(), ".codex"),
+    roots: [root],
+    bindings: scriptModelSourceBindings(config),
+  });
+}
+
+function requireScriptHome(codexHome, config = loadInstancesConfig()) {
+  const requested = path.resolve(requireString(codexHome, "Codex Home", 1024)).toLowerCase();
+  const home = discoveredScriptHomes(config).find((item) => path.resolve(item.codexHome).toLowerCase() === requested);
+  if (!home) throw new Error("Codex Home 不在当前脚本控制面板的已知范围内");
+  return home;
+}
+
+async function scriptHomeBotStates(home, config = loadInstancesConfig()) {
+  const descriptors = instanceDescriptors(config).filter((descriptor) => (
+    path.resolve(descriptor.codexHome || "").toLowerCase() === path.resolve(home.codexHome).toLowerCase()
+  ));
+  const rows = [];
+  for (const descriptor of descriptors) {
+    const active = await hasActiveRun(descriptor);
+    const processId = await readPidForDescriptor(descriptor);
+    rows.push({
+      name: descriptor.name,
+      label: descriptor.label || descriptor.name,
+      runtimeRoot: descriptor.runtimeRoot,
+      activeRunCount: active.count,
+      processId,
+      online: isProcessAlive(processId),
+      sessionsPath: path.join(descriptor.runtimeRoot, "state", "sessions.json"),
+    });
+  }
+  return rows;
+}
+
+async function listScriptModelSources() {
+  const config = loadInstancesConfig();
+  const codexPath = discoverOfficialCodex(localAppData);
+  const homes = [];
+  for (const home of discoveredScriptHomes(config)) {
+    const bots = await scriptHomeBotStates(home, config);
+    const source = inspectCodexHome(home.codexHome, { envValue: environmentVariableValue });
+    const login = await inspectLogin(codexPath, home.codexHome);
+    const overrides = inspectSessionOverrides(bots.map((item) => item.sessionsPath));
+    homes.push({
+      ...source,
+      label: path.resolve(home.codexHome).toLowerCase() === path.resolve(config.paths?.codexHome || path.join(os.homedir(), ".codex")).toLowerCase()
+        ? "全局配置"
+        : path.basename(home.codexHome),
+      sources: home.sources,
+      bots,
+      login,
+      loginJob: codexLoginManager.get(home.codexHome),
+      sessionOverrideCount: overrides.overrideCount,
+    });
+  }
+  return { codexPath, homes };
+}
+
+async function previewScriptModelSourceSwitch(payload) {
+  const config = loadInstancesConfig();
+  const home = requireScriptHome(payload.codexHome, config);
+  const bots = await scriptHomeBotStates(home, config);
+  const preview = previewModelSourceSwitch(home.codexHome, payload.targetProvider, { envValue: environmentVariableValue });
+  const login = await inspectLogin(discoverOfficialCodex(localAppData), home.codexHome);
+  return {
+    ...preview,
+    login,
+    bots,
+    sessionOverrideCount: inspectSessionOverrides(bots.map((item) => item.sessionsPath)).overrideCount,
+    blockers: [
+      ...(!bots.length ? ["该 Codex Home 未绑定脚本托管 Bot，在本控制面板中只读"] : []),
+      ...(preview.targetProvider === "openai" && login.state !== "signed-in" ? ["该 Codex Home 尚未完成 OpenAI 官方登录"] : []),
+      ...bots.filter((item) => item.activeRunCount > 0).map((item) => `${item.label} 有 ${item.activeRunCount} 个活动任务`),
+    ],
+  };
+}
+
+async function stopScriptBots(rows) {
+  const stopped = [];
+  for (const bot of rows.filter((item) => item.online)) {
+    const result = await runScript(stopBridgeScript, scriptArgsForInstance(bot.name), 60_000);
+    if (!result.ok) throw new Error(`停止 ${bot.label} 失败`);
+    stopped.push(bot);
+  }
+  return stopped;
+}
+
+async function startScriptBots(rows) {
+  const results = [];
+  for (const bot of rows) {
+    let result = await runScript(startBridgeScript, scriptArgsForInstance(bot.name), BRIDGE_START_SCRIPT_TIMEOUT_MS);
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    const descriptor = await getInstanceDescriptorByName(bot.name);
+    const processId = await readPidForDescriptor(descriptor);
+    const confirmed = await bridgePidIsConfirmed(descriptor, processId);
+    result = normalizeConfirmedStartResult(result, confirmed);
+    results.push({ name: bot.name, processId, confirmed, result });
+    if (!confirmed) throw new Error(`启动 ${bot.label} 后未确认到存活 Bridge`);
+  }
+  return results;
+}
+
+async function applyScriptModelSourceSwitch(payload) {
+  const preview = await previewScriptModelSourceSwitch(payload);
+  if (payload.confirm !== `切换到 ${preview.targetProvider}`) throw new Error(`确认文本不匹配，请输入：切换到 ${preview.targetProvider}`);
+  if (preview.blockers.length) throw new Error(preview.blockers.join("；"));
+  if (!preview.changed && preview.sessionOverrideCount === 0) return { ...preview, applied: false, restarted: [] };
+  let stopped = [];
+  let sourceWrite = null;
+  let sessionWrite = null;
+  try {
+    stopped = await stopScriptBots(preview.bots);
+    sourceWrite = applyModelSourceSwitch(preview.codexHome, preview.targetProvider, { envValue: environmentVariableValue });
+    sessionWrite = clearSessionOverrides(preview.bots.map((item) => item.sessionsPath));
+    const restarted = await startScriptBots(stopped);
+    return { ...preview, applied: sourceWrite.applied || sessionWrite.changed > 0, clearedSessionOverrides: sessionWrite.changed, restarted };
+  } catch (error) {
+    try { restoreSessionOverrides(sessionWrite); } catch {}
+    try { restoreModelSourceSwitch(sourceWrite); } catch {}
+    try { await startScriptBots(stopped); } catch {}
+    throw new Error(`模型来源切换失败：${error.message}；配置与会话覆盖已尝试回滚`);
+  }
+}
+
 async function restartIdleInstance(name) {
   const descriptor = await getInstanceDescriptorByName(name);
   const active = await hasActiveRun(descriptor);
@@ -4006,6 +4164,46 @@ async function requestHandler(req, res) {
         ok: false,
         error: error instanceof Error ? error.message : String(error),
       });
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/model-sources" && req.method === "GET") {
+    try {
+      jsonResponse(res, 200, await listScriptModelSources());
+    } catch (error) {
+      jsonResponse(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) });
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/model-sources/login" && req.method === "POST") {
+    try {
+      const body = await readRequestJson(req);
+      const home = requireScriptHome(body.codexHome);
+      if (!(await scriptHomeBotStates(home)).length) throw new Error("该 Codex Home 未绑定脚本托管 Bot，在本控制面板中只读");
+      const codexPath = discoverOfficialCodex(localAppData);
+      jsonResponse(res, 200, { ok: true, job: codexLoginManager.start(codexPath, home.codexHome) });
+    } catch (error) {
+      jsonResponse(res, 400, { ok: false, error: error instanceof Error ? error.message : String(error) });
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/model-sources/preview" && req.method === "POST") {
+    try {
+      jsonResponse(res, 200, await previewScriptModelSourceSwitch(await readRequestJson(req)));
+    } catch (error) {
+      jsonResponse(res, 400, { ok: false, error: error instanceof Error ? error.message : String(error) });
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/model-sources/apply" && req.method === "POST") {
+    try {
+      jsonResponse(res, 200, await applyScriptModelSourceSwitch(await readRequestJson(req)));
+    } catch (error) {
+      jsonResponse(res, 400, { ok: false, error: error instanceof Error ? error.message : String(error) });
     }
     return;
   }

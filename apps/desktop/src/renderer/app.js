@@ -78,6 +78,9 @@ const elements = {
   providerSyncPreview: document.querySelector("#provider-sync-preview-button"),
   providerSyncApply: document.querySelector("#provider-sync-apply-button"),
   providerOperationResult: document.querySelector("#provider-operation-result"),
+  modelSourceCount: document.querySelector("#model-source-count"),
+  modelSourceList: document.querySelector("#model-source-list"),
+  modelSourceResult: document.querySelector("#model-source-result"),
   createWorkspaceFactory: document.querySelector("#create-workspace-factory-button"),
   workspaceFactoryEditor: document.querySelector("#workspace-factory-editor"),
   workspaceFactoryForm: document.querySelector("#workspace-factory-form"),
@@ -142,6 +145,7 @@ const elements = {
 let state = null;
 let removalPreview = null;
 let providerRemovalPreview = null;
+let modelSourcePollTimer = null;
 
 function text(value, fallback = "-") {
   const result = String(value ?? "").trim();
@@ -490,6 +494,39 @@ function renderProviderCatalog(catalog = {}, setup = {}) {
   elements.providerSyncTargetCount.textContent = `${(setup.managedBots || []).filter((bot) => bot.codexHomeMode === "isolated").length} 个可同步目标`;
 }
 
+function modelSourceOptions(home) {
+  return `<option value="openai">OpenAI 官方账号</option><optgroup label="第三方 API">${(home.providers || []).map((provider) => (
+    `<option value="${escapeHtml(provider.id)}" ${provider.credentialAvailable === false ? "disabled" : ""}>${escapeHtml(provider.name)} · ${escapeHtml(provider.id)}${provider.credentialAvailable === false ? " · Key 不可用" : ""}</option>`
+  )).join("") || '<option disabled>未发现第三方 Provider</option>'}</optgroup>`;
+}
+
+function renderModelSources(modelSources = {}) {
+  const homes = modelSources.homes || [];
+  elements.modelSourceCount.textContent = `${homes.length} 个 Codex Home`;
+  elements.modelSourceList.innerHTML = homes.length ? homes.map((home, index) => {
+    const loginClass = badgeClass(home.login?.state === "signed-in" ? "good" : home.login?.state === "signed-out" ? "warn" : "info");
+    const loginText = home.login?.state === "signed-in" ? "OpenAI 已登录" : home.login?.state === "signed-out" ? "OpenAI 未登录" : "登录状态未知";
+    const active = (home.bots || []).reduce((sum, bot) => sum + Number(bot.activeRunCount || 0), 0);
+    const readOnly = !(home.bots || []).length;
+    return `<div class="model-source-row" data-model-source-index="${index}">
+      <div class="model-source-main"><strong>${escapeHtml(home.label)}</strong><code>${escapeHtml(home.codexHome)}</code><span>${escapeHtml((home.bots || []).map((bot) => bot.label).join("、") || "尚未绑定客户端 Bot")}</span></div>
+      <div class="model-source-status"><span class="${loginClass}">${loginText}</span><span>当前来源：${home.sourceKind === "openai" ? "OpenAI 官方账号" : `第三方 API · ${escapeHtml(home.currentProvider)}`}</span><span>会话覆盖 ${home.sessionOverrideCount || 0} 个 · 活动任务 ${active} 个</span></div>
+      <div class="model-source-actions"><select data-model-source-target>${modelSourceOptions(home)}</select><input data-model-source-confirm placeholder="执行时输入：切换到 Provider ID" autocomplete="off"><div class="inline-actions"><button class="secondary-button" data-model-source-action="login" type="button" ${readOnly ? "disabled" : ""}>登录 OpenAI</button><button class="secondary-button" data-model-source-action="preview" type="button">预览</button><button class="primary-button" data-model-source-action="apply" type="button" ${readOnly ? "disabled" : ""}>确认切换</button></div></div>
+    </div>`;
+  }).join("") : '<p class="empty-row">没有发现 Codex Home。</p>';
+  homes.forEach((home, index) => {
+    const select = elements.modelSourceList.querySelector(`[data-model-source-index="${index}"] [data-model-source-target]`);
+    if (select && [...select.options].some((option) => option.value === home.currentProvider)) select.value = home.currentProvider;
+  });
+  clearTimeout(modelSourcePollTimer);
+  if (homes.some((home) => home.loginJob?.status === "running")) modelSourcePollTimer = setTimeout(refresh, 2000);
+}
+
+function showModelSourceResult(title, detail, kind = "good") {
+  elements.modelSourceResult.innerHTML = `<strong>${escapeHtml(title)}</strong><span>${escapeHtml(detail)}</span>`;
+  elements.modelSourceResult.className = `operation-result ${kind}`;
+}
+
 function renderProtocolProxy(proxy = {}) {
   const labels = { online: "运行中", starting: "启动中", failed: "异常", unused: "尚未使用", stopped: "已停止", unavailable: "不可用" };
   const kind = proxy.status === "online" ? "good" : proxy.status === "failed" || proxy.status === "unavailable" ? "bad" : "neutral";
@@ -630,6 +667,7 @@ function render(currentState) {
   renderCompatibility(currentState.compatibility);
   renderCapabilities(currentState.capabilities, currentState.setup);
   renderProviderCatalog(currentState.providerCatalog, currentState.setup);
+  renderModelSources(currentState.modelSources);
   renderProtocolProxy(currentState.setup.protocolProxy);
   renderWorkspaceFactory(currentState.setup.workspaceFactory, currentState.providerCatalog);
   renderBotCreationTargets(currentState.setup);
@@ -927,6 +965,45 @@ async function refresh() {
     elements.refresh.disabled = false;
   }
 }
+
+elements.modelSourceList.addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-model-source-action]");
+  if (!button) return;
+  const row = button.closest("[data-model-source-index]");
+  const home = state?.modelSources?.homes?.[Number(row?.dataset.modelSourceIndex)];
+  if (!home) return;
+  const targetProvider = row.querySelector("[data-model-source-target]").value;
+  const action = button.dataset.modelSourceAction;
+  button.disabled = true;
+  try {
+    if (action === "login") {
+      await window.bridgeDesktop.startOpenAiLogin(home.codexHome);
+      showModelSourceResult("官方登录已启动", "请在浏览器完成 ChatGPT 登录，客户端会自动刷新状态。", "good");
+      await refresh();
+      return;
+    }
+    const input = { codexHome: home.codexHome, targetProvider };
+    if (action === "preview") {
+      const preview = await window.bridgeDesktop.previewModelSourceSwitch(input);
+      const blockers = (preview.blockers || []).join("；");
+      showModelSourceResult(
+        `${preview.currentProvider} → ${preview.targetProvider}`,
+        `${preview.bots.length} 个客户端 Bot；清除 ${preview.sessionOverrideCount} 个会话覆盖${blockers ? `；阻塞：${blockers}` : ""}`,
+        blockers ? "warn" : "good",
+      );
+      row.querySelector("[data-model-source-confirm]").placeholder = `输入：切换到 ${targetProvider}`;
+      return;
+    }
+    const confirm = row.querySelector("[data-model-source-confirm]").value.trim();
+    const result = await window.bridgeDesktop.applyModelSourceSwitch({ ...input, confirm });
+    showModelSourceResult("模型来源已切换", `当前使用 ${result.targetProvider}；重启 ${result.restarted.length} 个客户端 Bot；清除 ${result.clearedSessionOverrides || 0} 个会话覆盖。`);
+    await refresh();
+  } catch (error) {
+    showModelSourceResult("操作失败", error.message || String(error), "bad");
+  } finally {
+    button.disabled = false;
+  }
+});
 
 async function openRemovalDialog(kind, id) {
   removalPreview = null;

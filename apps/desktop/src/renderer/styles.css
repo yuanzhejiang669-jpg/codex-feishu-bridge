@@ -119,6 +119,14 @@ th:nth-child(1) { width: 20%; } th:nth-child(2) { width: 11%; } th:nth-child(3) 
 .provider-table td { height: auto; min-height: 48px; white-space: normal; overflow-wrap: anywhere; }
 .provider-table td:first-child strong, .provider-table td:first-child small { display: block; }
 .provider-table td:first-child small { margin-top: 3px; color: #6c7783; }
+
+.model-source-list { display: grid; gap: 0; margin-top: 14px; }
+.model-source-row { display: grid; grid-template-columns: minmax(220px, 1.3fr) minmax(180px, .9fr) minmax(260px, 1.2fr); gap: 16px; align-items: start; padding: 14px 0; border-bottom: 1px solid #d8dde3; }
+.model-source-row:last-child { border-bottom: 0; }
+.model-source-main, .model-source-status, .model-source-actions { display: grid; gap: 7px; min-width: 0; }
+.model-source-main code { overflow-wrap: anywhere; }
+.model-source-actions select, .model-source-actions input { width: 100%; }
+@media (max-width: 980px) { .model-source-row { grid-template-columns: 1fr; } }
 .selected-mark { display: inline-block; margin-left: 6px; border-radius: 3px; padding: 2px 5px; background: #fff0c2; color: #795800; font-size: 10px; }
 .provider-workbench .content-section { min-width: 0; }
 .stack-form { display: grid; gap: 12px; }

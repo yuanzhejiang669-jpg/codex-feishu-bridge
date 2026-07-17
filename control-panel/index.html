@@ -171,6 +171,17 @@
             <tbody id="providerRows"></tbody>
           </table>
         </div>
+        <div class="model-source-section">
+          <div class="section-head">
+            <div>
+              <h3>模型来源</h3>
+              <p>按动态发现的 Codex Home 管理 OpenAI 官方登录，或选择该 Home 已配置的第三方 Provider。</p>
+            </div>
+            <button id="refreshModelSourcesButton" type="button" class="secondary-button">刷新来源</button>
+          </div>
+          <div id="modelSourceList" class="model-source-list"></div>
+          <div id="modelSourceResult" class="action-result"></div>
+        </div>
       </section>
 
       <section id="management" class="section management-section panel-page" data-panel-page="management">

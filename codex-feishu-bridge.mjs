@@ -101,7 +101,7 @@ import {
 } from "./src/logging/errors.mjs";
 import modelReasoning from "./src/config/model-reasoning.cjs";
 
-const { acceptedEfforts, capabilityMappingLines, loadRegistry: loadReasoningRegistry, mapReasoningEffort, reviewStatus: reasoningReviewStatus } = modelReasoning;
+const { acceptedEfforts, capabilityOutcomeLines, loadRegistry: loadReasoningRegistry, mapReasoningEffort, reviewStatus: reasoningReviewStatus } = modelReasoning;
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_TOOLS = resolveDefaultTools();
@@ -7445,7 +7445,7 @@ function modelCapabilityMarkdown(session, { includeUsage = false } = {}) {
   const capability = mapping.capability;
   const review = reasoningReviewStatus(capability, MODEL_REASONING_REGISTRY);
   const supported = acceptedEfforts(capability, MODEL_REASONING_REGISTRY);
-  const rows = capabilityMappingLines({
+  const rows = capabilityOutcomeLines({
     provider: settings.provider,
     model: settings.model,
     currentEffort: settings.requestedReasoning,
@@ -7459,7 +7459,7 @@ function modelCapabilityMarkdown(session, { includeUsage = false } = {}) {
     `状态：${capability.known ? `${review.stale ? "待复核" : "已收录"} · 核验 ${capability.verifiedAt} · 下次 ${review.reviewDueAt}` : "未收录 · 通用透传"}`,
     `可接受请求值：${supported.map((effort) => `\`${effort}\``).join("、")}`,
     "",
-    "完整映射（请求值 → Codex 参数 → 上游语义）：",
+    "实际效果（你的选择 → 模型实际效果）：",
     ...rows,
     "",
     `当前映射：\`${settings.requestedReasoning}\` → \`${mapping.supported ? mapping.effectiveEffort : "不支持"}\` → \`${mapping.supported ? mapping.upstreamValue : "不支持"}\``,
