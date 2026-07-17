@@ -1332,7 +1332,8 @@ Implementation completed:
 
 Verification completed so far:
 
-- Root syntax, static, capability, and unit checks pass `55/55`; desktop syntax, unit, and integration checks pass `123/123`.
+- Root syntax, static, capability, and unit checks pass `55/55`; desktop syntax, unit, and integration checks pass `124/124`.
+- The first `v0.5.0` CI run exposed Windows canonical-path aliases in temporary Codex Homes. Home ownership comparisons now use the shared canonical path identity, and a regression test covers DPAPI-backed Provider application without a process-level API-key environment variable.
 - A real isolated control-panel server discovered the current cached Codex `0.144.2` runtime, global/writing/drawing Homes, all configured third-party Providers, exact Bot ownership, active-run counts, session overrides, and independent signed-out states without modifying configuration.
 
 Adversarial review and fixes so far:

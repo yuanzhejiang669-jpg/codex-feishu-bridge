@@ -33,17 +33,19 @@ function discoveredHomes(options) {
 }
 
 function requireHome(codexHome, options) {
-  const requested = path.resolve(String(codexHome || "").trim()).toLowerCase();
-  const home = discoveredHomes(options).find((item) => path.resolve(item.codexHome).toLowerCase() === requested);
+  const shared = sharedModule(options);
+  const requested = shared.canonicalPath(String(codexHome || "").trim()).toLowerCase();
+  const home = discoveredHomes(options).find((item) => shared.canonicalPath(item.codexHome).toLowerCase() === requested);
   if (!home) throw new Error("Codex Home 不在当前客户端的已知范围内");
   return home;
 }
 
 function botStates(home, options) {
-  const target = path.resolve(home.codexHome).toLowerCase();
+  const shared = sharedModule(options);
+  const target = shared.canonicalPath(home.codexHome).toLowerCase();
   const inspect = options.inspectBots || inspectManagedBots;
   return inspect(options.dataRoot, options.localAppData)
-    .filter((bot) => path.resolve(bot.codexHome || options.defaultCodexHome).toLowerCase() === target)
+    .filter((bot) => shared.canonicalPath(bot.codexHome || options.defaultCodexHome).toLowerCase() === target)
     .map((bot) => ({
       name: bot.name,
       label: bot.label || bot.name,
@@ -129,7 +131,9 @@ async function applyDesktopModelSourceSwitch(raw, options) {
       await (options.stopBot || stopManagedBot)(bot.name, options.supervisorOptions);
       stopped.push(bot);
     }
-    sourceWrite = shared.applyModelSourceSwitch(preview.codexHome, preview.targetProvider, { envValue: options.envValue });
+    sourceWrite = shared.applyModelSourceSwitch(preview.codexHome, preview.targetProvider, {
+      envValue: homeEnvValue(preview.bots, options),
+    });
     sessionWrite = shared.clearSessionOverrides(preview.bots.map((item) => item.sessionsPath));
     const restarted = [];
     for (const bot of stopped) restarted.push(await (options.startBot || startManagedBot)(bot.name, options.supervisorOptions));

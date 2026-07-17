@@ -76,9 +76,35 @@ test("desktop model sources dynamically include managed and future Codex Homes",
   try {
     const result = await listDesktopModelSources(value.options);
     assert.equal(result.homes.length, 3);
-    assert.equal(result.homes.find((home) => home.codexHome === value.drawing).bots[0].name, "drawing-1");
-    assert.equal(result.homes.find((home) => home.codexHome === value.drawing).providers.find((provider) => provider.id === "company").credentialAvailable, true);
-    assert.ok(result.homes.some((home) => home.codexHome === value.future));
+    const drawing = result.homes.find((home) => home.bots.some((bot) => bot.name === "drawing-1"));
+    assert.equal(drawing.bots[0].name, "drawing-1");
+    assert.equal(drawing.providers.find((provider) => provider.id === "company").credentialAvailable, true);
+    assert.ok(result.homes.some((home) => path.basename(home.codexHome) === path.basename(value.future)));
+  } finally {
+    fs.rmSync(value.root, { recursive: true, force: true });
+  }
+});
+
+test("desktop applies a DPAPI-backed Provider without requiring a process environment key", async () => {
+  const value = fixture();
+  const configPath = path.join(value.drawing, "config.toml");
+  fs.writeFileSync(configPath, fs.readFileSync(configPath, "utf8").replace(
+    'model_provider = "company"',
+    'model_provider = "company2"',
+  ), "utf8");
+  try {
+    const result = await applyDesktopModelSourceSwitch({
+      codexHome: value.drawing,
+      targetProvider: "company",
+      confirm: "\u5207\u6362\u5230 company",
+    }, {
+      ...value.options,
+      envValue: () => "",
+      stopBot: async () => {},
+      startBot: async (name) => ({ name }),
+    });
+    assert.equal(result.applied, true);
+    assert.match(fs.readFileSync(configPath, "utf8"), /^model_provider = "company"$/m);
   } finally {
     fs.rmSync(value.root, { recursive: true, force: true });
   }
