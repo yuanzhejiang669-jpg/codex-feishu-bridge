@@ -1164,7 +1164,7 @@ Implementation completed:
 - Added MCP and Skills selected/eligible counts with independent select-all and clear-selection controls. MCP entries with unavailable commands or entry paths remain disabled.
 - Added a development-only read-only Provider-removal capture mode; it opens the impact dialog but never submits deletion.
 
-Verification completed so far:
+Verification completed:
 
 - Desktop syntax/unit/integration suite passed `111/111`; existing script-hosted Bridge syntax/static/unit tests passed `41/41` without modifying its source.
 - Real local proxy smoke translated Responses to Chat Completions, recovered from a killed process, removed its final route, stopped, and reported `unused`.
@@ -1335,6 +1335,7 @@ Verification completed so far:
 - Root syntax, static, capability, and unit checks pass `55/55`; desktop syntax, unit, and integration checks pass `124/124`.
 - The first `v0.5.0` CI run exposed Windows canonical-path aliases in temporary Codex Homes. Home ownership comparisons now use the shared canonical path identity, and a regression test covers DPAPI-backed Provider application without a process-level API-key environment variable.
 - A real isolated control-panel server discovered the current cached Codex `0.144.2` runtime, global/writing/drawing Homes, all configured third-party Providers, exact Bot ownership, active-run counts, session overrides, and independent signed-out states without modifying configuration.
+- The packaged engine smoke test passed from commit `112acfac009acdfc99a141732a8c79f5ef9a0db2`; the managed Chat Completions proxy smoke test also passed before the Windows build.
 
 Adversarial review and fixes so far:
 
@@ -1342,6 +1343,10 @@ Adversarial review and fixes so far:
 2. Three-month failure: a client-managed custom Provider uses a DPAPI-encrypted Bot secret rather than a user environment variable and is falsely marked unavailable. Fix: a Provider is usable when every affected client Bot has the matching encrypted secret, while no secret content enters state or IPC.
 3. Three-month failure: `config.toml` changes but existing sessions retain `providerOverride`, so only some turns use the selected source. Fix: switching an entire Home clears both Provider override fields while Bots are stopped and restores the exact original session JSON if any later step fails.
 
-Completion boundary:
+Delivery verification:
 
-- Packaging, public Release publication, current/old script deployment, installed-client upgrade, and final delivery verification remain required.
+- Implementation commits `5ae6ee9` and `112acfa` were pushed to `origin/main`; tag `v0.5.0` published through GitHub Actions run `29545774770` after all clean-runner tests and packaging checks passed.
+- The public installer is `169721717` bytes. A fresh public download produced SHA-256 `8117B4911EB907624D9EA73991DB5F47A700FC27E518140AFB0BE2E028DA17A8`, exactly matching `checksums.txt` and the GitHub asset digest.
+- The old device fast-forwarded to `112acfa`, preserved its unrelated Browser Control script modification, passed the root `55/55` checks, and restarted all `17/17` idle script-hosted Bots through their existing scheduled watchdog tasks. Every PID changed and remained alive.
+- The current device uses the same source commit. Its legacy default instance and 13 other idle script-hosted Bots restarted with changed live PIDs; the active `codex-assistant-1` conversation is intentionally left running until a guarded post-turn restart can observe zero active runs.
+- The installed client upgraded in place from `0.4.3` to `0.5.0.0` using the public installer. Its uninstall entry reports `0.5.0`, its persistent data remained under `C:\Users\yzjiang\AppData\Local\CodexFeishuBridgeDesktop`, and all three drawing Bots restarted with new PIDs and remained online for 61 seconds.

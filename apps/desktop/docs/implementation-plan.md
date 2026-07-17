@@ -366,7 +366,7 @@ This list is the durable parity checklist against the existing local control pan
 107. [x] Clear persisted per-session Provider overrides when switching an entire Home so old sessions cannot silently retain the previous source.
 108. [x] Preserve unrelated TOML sections and roll back config, session overrides, and process recovery after a failed switch.
 109. [x] Recognize both user-environment credentials and client-managed encrypted Provider credentials.
-110. [ ] Verify the packaged `0.5.0` engine, public Release, installed upgrade, and both script-hosted devices.
+110. [x] Verify the packaged `0.5.0` engine, public Release, installed upgrade, and both script-hosted devices.
 
 `0.1.6 Provider center` acceptance: items 26-35 are implemented; API keys never enter TOML, renderer state, IPC results, or logs; synchronization is previewable and transactional; only client-managed isolated Codex Homes are eligible; existing Bridge processes and legacy Bot files remain unchanged.
 
