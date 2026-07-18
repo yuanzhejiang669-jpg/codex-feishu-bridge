@@ -1617,3 +1617,16 @@ Regression evidence:
 - Desktop client check passed `147` tests with `1` expected macOS-only skip on Windows.
 - Windows Desktop Control protocol exposed all 19 tools and the existing desktop smoke test passed.
 - Python compilation, POSIX shell syntax, and `git diff --check` passed.
+
+## 2026-07-18 - macOS reboot Provider-environment recovery
+
+Discovery:
+
+- After a network-late reboot, the Provider LaunchAgent completed successfully and the current `launchctl` login session contained both configured Provider keys, but the desktop login item had started earlier without either key.
+- Quitting and reopening the desktop process produced a new client with both keys. The six detached Bridge children survived the client exit, so the UI still showed them online and manual Bot start was a no-op; every old child retained the missing-key environment and failed Codex turns with `Missing environment variable: LTHOME_API_KEY`.
+- All six `active-runs.json` files contained zero non-null runs. The six old children were terminated normally and the existing recovery supervisor restarted them in batches. Every replacement PID contains both Provider variables, all six event consumers reconnected, and a real `codex-assistant-1` message completed successfully in about 9.3 seconds.
+
+Permanent fix:
+
+- The macOS supervisor now inspects every Provider definition in the Bot's selected Codex Home on each start and fills missing `env_key` values from the current `launchctl` session. It does not log values, mutate `process.env`, query malformed names, or override client-encrypted custom Provider credentials.
+- Added regression coverage for login-item stale snapshots, duplicate Provider references, value trimming, process-environment isolation, and custom-Provider precedence.

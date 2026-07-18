@@ -5,6 +5,7 @@ const path = require("node:path");
 const test = require("node:test");
 const {
   inspectManagedBots,
+  macosProviderEnvironment,
   managedBotStartArguments,
   managedRuntimeRoot,
   processEnvironment,
@@ -203,6 +204,40 @@ test("injects a DPAPI-backed Provider key only into the managed Bot child enviro
   } finally {
     fs.rmSync(value.root, { recursive: true, force: true });
   }
+});
+
+test("refreshes macOS Provider keys from launchctl for every Bot start", () => {
+  const previous = process.env.LTHOME_API_KEY;
+  delete process.env.LTHOME_API_KEY;
+  try {
+    const environment = macosProviderEnvironment("/Users/example/.codex", { provider: { mode: "current" } }, {
+      platform: "darwin",
+      inspectProviderCatalog: () => ({
+        error: "",
+        providers: [
+          { id: "lthome", envKey: "LTHOME_API_KEY" },
+          { id: "duplicate", envKey: "LTHOME_API_KEY" },
+          { id: "openai", envKey: "" },
+        ],
+      }),
+      readLaunchctlEnvironmentVariable: (name) => name === "LTHOME_API_KEY" ? "launchctl-secret\n" : "",
+    });
+    assert.deepEqual(environment, { LTHOME_API_KEY: "launchctl-secret" });
+    assert.equal(process.env.LTHOME_API_KEY, undefined);
+  } finally {
+    if (previous == null) delete process.env.LTHOME_API_KEY;
+    else process.env.LTHOME_API_KEY = previous;
+  }
+});
+
+test("does not replace a custom Provider key with launchctl state", () => {
+  let queried = false;
+  const environment = macosProviderEnvironment("/Users/example/.codex", { provider: { mode: "custom" } }, {
+    platform: "darwin",
+    inspectProviderCatalog: () => { queried = true; return { error: "", providers: [] }; },
+  });
+  assert.deepEqual(environment, {});
+  assert.equal(queried, false);
 });
 
 test("starts and stops through the direct macOS launcher contract", async () => {

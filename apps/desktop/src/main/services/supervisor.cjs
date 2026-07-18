@@ -2,9 +2,12 @@ const fs = require("node:fs");
 const crypto = require("node:crypto");
 const os = require("node:os");
 const path = require("node:path");
-const { execFile } = require("node:child_process");
+const { execFile, execFileSync } = require("node:child_process");
 const { activeRunCount, isProcessAlive, readJson } = require("./bridge-discovery.cjs");
 const { readManagedBots } = require("./bot-setup.cjs");
+const { inspectProviderCatalog } = require("./provider-manager.cjs");
+
+const ENV_NAME = /^[A-Z_][A-Z0-9_]{0,127}$/;
 
 function managedRuntimeRoot(localAppData, name) {
   return path.join(localAppData, "CodexFeishuBridge", "instances", name);
@@ -99,6 +102,30 @@ function processEnvironment(options, bot = null) {
   return environment;
 }
 
+function macosProviderEnvironment(codexHome, bot, options = {}) {
+  if ((options.platform || process.platform) !== "darwin" || bot?.provider?.mode === "custom") return {};
+  const inspect = options.inspectProviderCatalog || inspectProviderCatalog;
+  const catalog = inspect(codexHome, {});
+  if (catalog.error) throw new Error(catalog.error);
+  const readLaunchctl = options.readLaunchctlEnvironmentVariable || ((name) => execFileSync(
+    "/bin/launchctl",
+    ["getenv", name],
+    { encoding: "utf8", timeout: 5_000, maxBuffer: 64 * 1024 },
+  ));
+  const environment = {};
+  for (const provider of catalog.providers || []) {
+    const envKey = String(provider.envKey || "").trim();
+    if (!ENV_NAME.test(envKey) || environment[envKey]) continue;
+    const inherited = String(process.env[envKey] || "");
+    let value = inherited;
+    if (!value) {
+      try { value = String(readLaunchctl(envKey) || "").trim(); } catch { value = ""; }
+    }
+    if (value) environment[envKey] = value;
+  }
+  return environment;
+}
+
 function writeJsonAtomic(destination, value) {
   const temporary = `${destination}.${crypto.randomUUID()}.tmp`;
   fs.mkdirSync(path.dirname(destination), { recursive: true });
@@ -119,6 +146,7 @@ function posixRuntimePaths(options, name) {
 function posixBridgeEnvironment(bot, codexHome, options, paths) {
   return {
     ...processEnvironment(options, bot),
+    ...macosProviderEnvironment(codexHome, bot, options),
     CODEX_FEISHU_WORKSPACE: bot.workspace,
     CODEX_FEISHU_INSTANCE_NAME: bot.name,
     CODEX_HOME: codexHome,
@@ -306,6 +334,7 @@ module.exports = {
   inspectManagedBots,
   managedBotStartArguments,
   managedRuntimeRoot,
+  macosProviderEnvironment,
   posixBridgeEnvironment,
   posixRuntimePaths,
   processEnvironment,

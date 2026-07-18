@@ -394,6 +394,7 @@ This list is the durable parity checklist against the existing local control pan
 135. [x] Keep the macOS Lark event-bus Unix socket below the platform path limit through a validated short symlink to the existing isolated Profile Home; never move, copy, or recreate Profile credentials.
 136. [ ] Verify all six physical-Mac Bots remain online and receive a real `im.message.receive_v1` event after the short-Profile-Home fix.
 137. [x] Complete the physical-Mac Accessibility consent and pass window discovery plus non-destructive activation/input readiness checks alongside screen capture, clipboard, protocol, and both-Home registration.
+138. [x] Refresh configured macOS Provider environment keys from the current `launchctl` login session on every Bot start so login-item ordering and temporary boot-time network loss cannot strand long-lived Bots with a stale environment snapshot.
 
 `0.1.6 Provider center` acceptance: items 26-35 are implemented; API keys never enter TOML, renderer state, IPC results, or logs; synchronization is previewable and transactional; only client-managed isolated Codex Homes are eligible; existing Bridge processes and legacy Bot files remain unchanged.
 
