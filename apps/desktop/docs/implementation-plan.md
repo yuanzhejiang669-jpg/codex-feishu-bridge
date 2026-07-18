@@ -386,13 +386,14 @@ This list is the durable parity checklist against the existing local control pan
 127. [x] Discover the current official `ChatGPT.app` bundle (`com.openai.codex`) as well as the legacy `Codex.app` name on system and per-user application paths.
 128. [x] Install the updated Apple Silicon client on the physical Mac and verify official runtime discovery before Provider, Skill, MCP, and Bot provisioning.
 129. [x] Provision the physical Mac ordinary and writing Codex Homes through an idempotent, credential-free bootstrap script without creating Feishu Bots.
-130. [ ] Validate `sub2api`, `lthome`, the Browser Control extension bridge, Firecrawl, Tavily, Git-backed writing Skills, and local writing Skills on the physical Mac.
-131. [x] Keep the current Windows-only Desktop Control disabled on macOS until a native implementation replaces its `pywin32` and UI Automation dependencies.
+130. [x] Validate `sub2api`, `lthome`, the Browser Control extension bridge, Firecrawl, Tavily, Git-backed writing Skills, and local writing Skills on the physical Mac.
+131. [x] Replace the Windows-only Desktop Control limitation with a native macOS core backend that does not import `pywin32`, while preserving Windows UI Automation and tool contracts.
 132. [x] Optionally keep a dedicated physical Mac and its display awake through a reversible user LaunchAgent without changing system-wide power settings.
 133. [x] Require an explicit, validated trust action before an unbound discovered Codex Home becomes writable in the desktop client.
 134. [x] Install and verify the official Google Chrome bundle on the physical Mac and verify Bing as its selected default without modifying protected browser preferences or extension security settings.
 135. [x] Keep the macOS Lark event-bus Unix socket below the platform path limit through a validated short symlink to the existing isolated Profile Home; never move, copy, or recreate Profile credentials.
 136. [ ] Verify all six physical-Mac Bots remain online and receive a real `im.message.receive_v1` event after the short-Profile-Home fix.
+137. [x] Complete the physical-Mac Accessibility consent and pass window discovery plus non-destructive activation/input readiness checks alongside screen capture, clipboard, protocol, and both-Home registration.
 
 `0.1.6 Provider center` acceptance: items 26-35 are implemented; API keys never enter TOML, renderer state, IPC results, or logs; synchronization is previewable and transactional; only client-managed isolated Codex Homes are eligible; existing Bridge processes and legacy Bot files remain unchanged.
 
@@ -492,3 +493,12 @@ These risks are addressed with protocol versioning, active-run guards, transacti
 - A stable `v0.7.0` tag must fail closed unless all five Apple signing and notarization Secrets are configured. An unsigned macOS build remains suitable only for local verification and must never reach the stable update channel.
 - Commit and push the reviewed source independently of the distribution tag. Create the tag only after Apple Developer Program access, a Developer ID Application certificate, notarization credentials, and CI artifact verification are available.
 - Preserve the six physical-Mac Bot records, Profiles, workspaces, Codex Homes, and active processes; source publication does not replace the installed local overlay.
+
+## 2026-07-18 - Native macOS Desktop Control and repeatable browser setup
+
+- Keep the existing Desktop Control MCP tool names and Windows behavior while adding a native macOS backend for screen geometry, top-level window discovery, activation, screenshots, coordinate clicks, hotkeys, clipboard paste, and permission diagnostics.
+- Use only macOS public user-session facilities (`screencapture`, System Events, AppleScript, and `pbcopy`/`pbpaste`) for the core backend. Never bypass Accessibility or Screen Recording consent; report each missing permission as an actionable diagnostic.
+- Preserve OCR and visual detection as optional layers. Core macOS control must remain usable when heavyweight OCR or UI-model dependencies are absent.
+- Register one shared Desktop Control program body in both the ordinary and writing Codex Homes, with separate per-Home output directories. Installation must be idempotent and must not rewrite unrelated Provider, MCP, Skill, or secret configuration.
+- Keep the unpacked Browser Control extension as an explicit Chrome developer-mode installation. The bootstrap verifies the extension directory and token file, while the user performs Chrome's one-time `Load unpacked` confirmation.
+- Acceptance requires Windows protocol/smoke regression tests plus physical-Mac MCP protocol status, window listing, screenshot, clipboard, and non-destructive permission checks. Pointer and keyboard mutation tests run only after macOS Accessibility consent is visible.

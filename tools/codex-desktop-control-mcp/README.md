@@ -1,6 +1,6 @@
 # Codex Desktop Control MCP
 
-这是一个 Windows 桌面控制 MCP server，面向 Codex 的真实桌面自动化。它优先提供可诊断、可降级的操作路径，而不是只依赖单一截图或坐标方法。
+这是一个 Windows 与 macOS 桌面控制 MCP server，面向 Codex 的真实桌面自动化。它优先提供可诊断、可降级的操作路径，而不是只依赖单一截图或坐标方法。
 
 ## 能力
 
@@ -10,6 +10,23 @@
 - 坐标动作：`codex_desktop_control_click`、`codex_desktop_control_double_click`、`codex_desktop_control_hotkey`
 - 粘贴文本：`codex_desktop_control_paste_text`，默认会尝试恢复原剪贴板文本格式
 - UI Automation 语义层：`codex_desktop_control_uia_status`、`codex_desktop_control_uia_tree`、`codex_desktop_control_uia_find`、`codex_desktop_control_uia_click`
+
+macOS 核心后端使用系统 `screencapture`、System Events、AppleScript 和 `pbcopy` / `pbpaste`，覆盖窗口、截图、点击、快捷键和粘贴。Windows UIA 工具在 macOS 上会明确返回不可用并引导回退到 OCR、视觉和坐标操作。
+
+## macOS 权限
+
+首次使用时，在“系统设置 > 隐私与安全性”中允许启动 MCP 的 Python 运行时：
+
+- “辅助功能”：窗口枚举/激活、点击、键盘操作所需。
+- “屏幕与系统音频录制”：桌面和窗口截图所需。
+
+服务不会绕过系统授权。`codex_desktop_control_status` 和 `codex_desktop_control_self_check` 会指出缺失权限。
+
+macOS 核心依赖：
+
+```bash
+python -m pip install -r requirements-macos.txt
+```
 
 ## 降级策略
 

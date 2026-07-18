@@ -8,6 +8,8 @@ from typing import Any
 def error_code(error: Any) -> str:
     message = str(error)
     lower = message.lower()
+    if 'accessibility permission' in lower or 'privacy & security' in lower or 'not authorized' in lower:
+        return 'PERMISSION_DENIED'
     if 'no matching window' in lower or 'window has empty bounds' in lower:
         return 'WINDOW_NOT_FOUND'
     if 'coordinates outside virtual screen bounds' in lower:

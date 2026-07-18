@@ -16,6 +16,10 @@ from mcp.server.fastmcp import FastMCP
 from diagnostics import fail as _fail
 from diagnostics import ui_model_install_payload as _build_ui_model_install_payload
 
+IS_MACOS = sys.platform == 'darwin'
+if IS_MACOS:
+    import macos_backend as _macos
+
 mcp = FastMCP('codex-desktop-control')
 
 try:
@@ -87,6 +91,8 @@ def _import_win32():
 
 
 def _get_screen_info() -> dict[str, Any]:
+    if IS_MACOS:
+        return _macos.screen_info()
     win32api, win32con, _win32gui, _win32ui, _clip, windll = _import_win32()
     hdc = windll.user32.GetDC(0)
     primary_physical_width = windll.gdi32.GetDeviceCaps(hdc, 118)
@@ -180,7 +186,7 @@ def _image_to_payload(img, *, include_data: bool, path: str | None, format: str,
         'path': str(out),
         'format': format.lower(),
         'data_base64': data,
-        'coordinate_system': 'virtual_screen_physical_pixels',
+        'coordinate_system': _get_screen_info()['coordinate_system'],
     }
 
 
@@ -237,6 +243,8 @@ def _trace_self_check(label: str) -> None:
 
 
 def _client_rect_on_screen(hwnd: int) -> tuple[int, int, int, int]:
+    if IS_MACOS:
+        return tuple(int(value) for value in _macos.resolve_window(hwnd)['rect'])
     _api, _con, win32gui, _ui, _clip, _windll = _import_win32()
     left, top = win32gui.ClientToScreen(hwnd, (0, 0))
     _client_left, _client_top, width, height = win32gui.GetClientRect(hwnd)
@@ -244,6 +252,8 @@ def _client_rect_on_screen(hwnd: int) -> tuple[int, int, int, int]:
 
 
 def _capture_window(hwnd: int, client_area: bool = False):
+    if IS_MACOS:
+        return _macos.capture_window(hwnd, client_area=client_area)
     Image, ImageGrab = _import_pil()
     _win32api, _win32con, win32gui, win32ui, _clip, windll = _import_win32()
     window_left, window_top, window_right, window_bottom = win32gui.GetWindowRect(hwnd)
@@ -283,6 +293,8 @@ def _capture_window(hwnd: int, client_area: bool = False):
 
 
 def _capture_screen(bbox=None):
+    if IS_MACOS:
+        return _macos.capture_screen(bbox)
     _Image, ImageGrab = _import_pil()
     if bbox is not None:
         return ImageGrab.grab(bbox=bbox, all_screens=True)
@@ -300,6 +312,8 @@ def _window_matches(title: str, title_contains: str | None) -> bool:
 
 
 def _list_windows(title_contains: str | None = None, visible_only: bool = True) -> list[dict[str, Any]]:
+    if IS_MACOS:
+        return _macos.list_windows(title_contains=title_contains, visible_only=visible_only)
     _api, _con, win32gui, _ui, _clip, _windll = _import_win32()
     windows: list[dict[str, Any]] = []
 
@@ -333,6 +347,8 @@ def _resolve_hwnd(hwnd: int | None = None, title_contains: str | None = None) ->
 
 
 def _activate(hwnd: int) -> dict[str, Any]:
+    if IS_MACOS:
+        return _macos.activate_window(hwnd)
     win32api, _con, win32gui, _ui, _clip, windll = _import_win32()
     if win32gui.IsIconic(hwnd):
         win32gui.ShowWindow(hwnd, 9)
@@ -370,6 +386,8 @@ def _activate(hwnd: int) -> dict[str, Any]:
 
 
 def _foreground_window_info() -> dict[str, Any]:
+    if IS_MACOS:
+        return _macos.foreground_window_info()
     _api, _con, win32gui, _ui, _clip, _windll = _import_win32()
     hwnd = win32gui.GetForegroundWindow()
     if not hwnd:
@@ -580,9 +598,12 @@ def _capture_source(
         return img, [0.0, 0.0], 'image_pixels', {'type': 'image_path', 'path': str(resolved)}
     if hwnd or title_contains:
         resolved = _resolve_hwnd(hwnd=hwnd, title_contains=title_contains)
-        _api, _con, win32gui, _ui, _clip, _windll = _import_win32()
-        left, top, right, bottom = _client_rect_on_screen(resolved) if client_area else win32gui.GetWindowRect(resolved)
-        return _capture_window(resolved, client_area=client_area), [float(left), float(top)], 'virtual_screen_physical_pixels', {
+        if IS_MACOS:
+            left, top, right, bottom = _macos.resolve_window(resolved)['rect']
+        else:
+            _api, _con, win32gui, _ui, _clip, _windll = _import_win32()
+            left, top, right, bottom = _client_rect_on_screen(resolved) if client_area else win32gui.GetWindowRect(resolved)
+        return _capture_window(resolved, client_area=client_area), [float(left), float(top)], _get_screen_info()['coordinate_system'], {
             'type': 'window',
             'hwnd': int(resolved),
             'rect': [left, top, right, bottom],
@@ -591,10 +612,13 @@ def _capture_source(
     normalized = _normalize_bbox(bbox)
     screen = _get_screen_info()
     origin = [float(normalized[0]), float(normalized[1])] if normalized else [float(screen['virtual_left']), float(screen['virtual_top'])]
-    return _capture_screen(normalized), origin, 'virtual_screen_physical_pixels', {'type': 'screen', 'bbox': list(normalized) if normalized else None}
+    return _capture_screen(normalized), origin, screen['coordinate_system'], {'type': 'screen', 'bbox': list(normalized) if normalized else None}
 
 
 def _send_hotkey(keys: list[str], delay_seconds: float = 0.02) -> None:
+    if IS_MACOS:
+        _macos.send_hotkey(keys, delay_seconds=delay_seconds)
+        return
     win32api, win32con, _gui, _ui, _clip, _windll = _import_win32()
     key_map = {
         'backspace': 0x08, 'tab': 0x09, 'enter': 0x0D, 'shift': 0x10, 'ctrl': 0x11,
@@ -691,6 +715,16 @@ def _restore_clipboard_snapshot(win32clipboard, snapshot: dict[str, Any] | None)
 
 
 def _uia_status_payload() -> dict[str, Any]:
+    if IS_MACOS:
+        accessibility = _macos.accessibility_status()
+        return {
+            'ok': True,
+            'available': False,
+            'backend': 'macos-accessibility',
+            'accessibility_permission': bool(accessibility.get('available')),
+            'reason': 'macOS semantic Accessibility-tree tools are not implemented; OCR, visual fallback, windows, screenshots, and coordinate actions remain available.',
+            'fallbacks': ['ocr', 'visual_fallback', 'coordinate_actions'],
+        }
     modules = {name: _module_available(name) for name in UIA_OPTIONAL_MODULES}
     if not modules.get('uiautomation'):
         return {
@@ -913,24 +947,27 @@ def _post_action_verification(
 
 def _status_payload() -> dict[str, Any]:
     dependencies: dict[str, bool] = {}
-    for name, module in [
+    dependency_modules = [
         ('pillow', 'PIL'),
-        ('pywin32', 'win32gui'),
         ('rapidocr_onnxruntime', 'rapidocr_onnxruntime'),
         ('ultralytics', 'ultralytics'),
         ('torch', 'torch'),
-    ]:
+    ]
+    if not IS_MACOS:
+        dependency_modules.append(('pywin32', 'win32gui'))
+    for name, module in dependency_modules:
         dependencies[name] = _module_available(module)
     dependencies['numpy'] = _NUMPY is not None
-    for module in UIA_OPTIONAL_MODULES:
-        dependencies[module] = _module_available(module)
+    if not IS_MACOS:
+        for module in UIA_OPTIONAL_MODULES:
+            dependencies[module] = _module_available(module)
     try:
         screen = _get_screen_info()
     except Exception as exc:
         screen = {'error': str(exc)}
     return {
         'ok': True,
-        'platform': os.name,
+        'platform': sys.platform,
         'dependencies': dependencies,
         'screen': screen,
         'output_dir': str(DEFAULT_OUTPUT_DIR),
@@ -944,6 +981,7 @@ def _status_payload() -> dict[str, Any]:
             'restore_text_formats_supported': True,
             'restore_non_text_formats_supported': False,
         },
+        'permissions': _macos.accessibility_status() if IS_MACOS else None,
         'uia': _uia_status_payload(),
         'error_codes': [
             'VALIDATION_ERROR',
@@ -954,6 +992,7 @@ def _status_payload() -> dict[str, Any]:
             'OCR_UNAVAILABLE',
             'UI_MODEL_MISSING',
             'CLIPBOARD_UNAVAILABLE',
+            'PERMISSION_DENIED',
             'TIMEOUT',
             'TOOL_ERROR',
         ],
@@ -985,7 +1024,7 @@ def codex_desktop_control_ui_status() -> dict[str, Any]:
 
 @mcp.tool()
 def codex_desktop_control_uia_status() -> dict[str, Any]:
-    """Report whether Windows UI Automation is available. Prefer UIA over OCR for native controls when this returns available=true."""
+    """Report semantic UI automation availability. Windows exposes UIA; macOS currently reports Accessibility permission and visual fallbacks."""
     return _uia_status_payload()
 
 
@@ -1119,7 +1158,10 @@ def codex_desktop_control_self_check() -> dict[str, Any]:
             warnings.append(f'UI detection model is not installed; visual fallback, OCR, and coordinates remain available. Install command: {install.get("install_command")}')
         checks['uia'] = checks['status'].get('uia') or _uia_status_payload()
         if not checks['uia'].get('available'):
-            warnings.append('UI Automation semantic controls are not available; install the optional uiautomation package to enable name/AutomationId/control-type actions.')
+            if IS_MACOS:
+                warnings.append('macOS semantic Accessibility-tree controls are unavailable; window, screenshot, OCR, visual, and coordinate tools remain available.')
+            else:
+                warnings.append('UI Automation semantic controls are not available; install the optional uiautomation package to enable name/AutomationId/control-type actions.')
     except Exception as exc:
         checks['status'] = _fail(exc)
     _trace_self_check('status')
@@ -1162,9 +1204,14 @@ def codex_desktop_control_self_check() -> dict[str, Any]:
         warnings.append('Visual fallback UI detection is not currently available.')
     _trace_self_check('visual_fallback')
     try:
-        _api, _con, _gui, _ui, win32clipboard, _windll = _import_win32()
-        _open_clipboard_with_retry(retries=3, delay_seconds=0.03)
-        win32clipboard.CloseClipboard()
+        if IS_MACOS:
+            clipboard = _macos.clipboard_read_text()
+            if not clipboard.get('ok'):
+                raise RuntimeError(clipboard.get('error') or 'clipboard is not readable')
+        else:
+            _api, _con, _gui, _ui, win32clipboard, _windll = _import_win32()
+            _open_clipboard_with_retry(retries=3, delay_seconds=0.03)
+            win32clipboard.CloseClipboard()
         checks['clipboard'] = {'ok': True}
     except Exception as exc:
         checks['clipboard'] = {'ok': False, 'error': str(exc)}
@@ -1173,7 +1220,7 @@ def codex_desktop_control_self_check() -> dict[str, Any]:
     desktop_available = bool(checks.get('windows', {}).get('ok') and checks.get('screenshot', {}).get('ok'))
     if not desktop_available:
         warnings.append('Desktop capture is not currently available in this session; window, screenshot, and coordinate actions may fail until the interactive desktop is accessible.')
-    hard_checks = ['status', 'visual_fallback', 'clipboard']
+    hard_checks = ['status', 'clipboard'] if IS_MACOS else ['status', 'visual_fallback', 'clipboard']
     ok = all(checks.get(name, {}).get('ok', False) for name in hard_checks)
     _trace_self_check('return')
     return {'ok': ok, 'desktop_available': desktop_available, 'warnings': warnings, 'checks': checks}
@@ -1181,7 +1228,7 @@ def codex_desktop_control_self_check() -> dict[str, Any]:
 
 @mcp.tool()
 def codex_desktop_control_list_windows(title_contains: str | None = None, visible_only: bool = True) -> dict[str, Any]:
-    """List top-level Windows windows. title_contains is a case-insensitive title filter; visible_only excludes hidden windows by default. Returns hwnd values for later calls."""
+    """List top-level desktop windows. title_contains is a case-insensitive title filter; visible_only excludes hidden windows by default. Returns stable run-local hwnd identifiers for later calls."""
     try:
         windows = _list_windows(title_contains=title_contains, visible_only=visible_only)
         return {'ok': True, 'count': len(windows), 'windows': windows[:200]}
@@ -1520,13 +1567,16 @@ def _click_payload(
         iy = int(round(y))
         if ix < screen['virtual_left'] or iy < screen['virtual_top'] or ix >= screen['virtual_right'] or iy >= screen['virtual_bottom']:
             return _fail('coordinates outside virtual screen bounds', 'COORD_OUT_OF_BOUNDS', screen=screen, x=ix, y=iy)
-        win32api, win32con, _gui, _ui, _clip, _windll = _import_win32()
-        win32api.SetCursorPos((ix, iy))
-        time.sleep(0.05)
-        win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0)
-        time.sleep(0.05)
-        win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0)
-        result: dict[str, Any] = {'ok': True, 'x': x, 'y': y, 'coordinate_system': 'virtual_screen_physical_pixels'}
+        if IS_MACOS:
+            _macos.click(ix, iy)
+        else:
+            win32api, win32con, _gui, _ui, _clip, _windll = _import_win32()
+            win32api.SetCursorPos((ix, iy))
+            time.sleep(0.05)
+            win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0)
+            time.sleep(0.05)
+            win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0)
+        result: dict[str, Any] = {'ok': True, 'x': x, 'y': y, 'coordinate_system': screen['coordinate_system']}
         if verify_after:
             result['verification'] = _post_action_verification(
                 bbox=verify_bbox,
@@ -1603,7 +1653,7 @@ def codex_desktop_control_double_click(
         return first
     time.sleep(0.05)
     second = _click_payload(x=x, y=y)
-    result: dict[str, Any] = {'ok': bool(second.get('ok')), 'x': x, 'y': y, 'coordinate_system': 'virtual_screen_physical_pixels', 'second': second}
+    result: dict[str, Any] = {'ok': bool(second.get('ok')), 'x': x, 'y': y, 'coordinate_system': _get_screen_info()['coordinate_system'], 'second': second}
     if verify_after:
         result['verification'] = _post_action_verification(
             bbox=verify_bbox,
@@ -1620,7 +1670,7 @@ def codex_desktop_control_hotkey(
     verify_bbox: list[int] | None = None,
     verify_delay_ms: int = 200,
 ) -> dict[str, Any]:
-    """Send a key chord such as ['ctrl','s'] to the foreground or selected window. Keys are pressed in order and released in reverse; verify_after captures visual evidence."""
+    """Send a key chord to the foreground or selected window. Use command on macOS and ctrl on Windows for platform-native shortcuts; verify_after captures visual evidence."""
     try:
         if activate_title_contains:
             _activate(_resolve_hwnd(title_contains=activate_title_contains))
@@ -1649,7 +1699,7 @@ def codex_desktop_control_paste_text(
     restore_clipboard: bool = True,
     restore_delay_ms: int = 200,
 ) -> dict[str, Any]:
-    """Paste Unicode text through the Windows clipboard and Ctrl+V.
+    """Paste Unicode text through the native clipboard and platform paste shortcut.
 
     Optionally activate a target window. restore_clipboard=true restores the prior clipboard even when paste or verification fails. verify_text polls OCR; verify_after captures post-action evidence.
     """
@@ -1659,17 +1709,22 @@ def codex_desktop_control_paste_text(
     try:
         if activate_title_contains:
             _activate(_resolve_hwnd(title_contains=activate_title_contains))
-        _api, win32con, _gui, _ui, win32clipboard, _windll = _import_win32()
-        _open_clipboard_with_retry()
-        try:
+        if IS_MACOS:
             if restore_clipboard:
-                clipboard_snapshot = _clipboard_snapshot(win32clipboard, win32con)
-            win32clipboard.EmptyClipboard()
-            win32clipboard.SetClipboardText(text, win32con.CF_UNICODETEXT)
-        finally:
-            win32clipboard.CloseClipboard()
+                clipboard_snapshot = _macos.clipboard_read_text()
+            _macos.clipboard_write_text(text)
+        else:
+            _api, win32con, _gui, _ui, win32clipboard, _windll = _import_win32()
+            _open_clipboard_with_retry()
+            try:
+                if restore_clipboard:
+                    clipboard_snapshot = _clipboard_snapshot(win32clipboard, win32con)
+                win32clipboard.EmptyClipboard()
+                win32clipboard.SetClipboardText(text, win32con.CF_UNICODETEXT)
+            finally:
+                win32clipboard.CloseClipboard()
         result = {'ok': True, 'length': len(text), 'clipboard_restore_requested': bool(restore_clipboard)}
-        _send_hotkey(['ctrl', 'v'])
+        _send_hotkey(['command', 'v'] if IS_MACOS else ['ctrl', 'v'])
         if verify_after:
             result['post_action'] = _post_action_verification(
                 bbox=verify_bbox,
@@ -1689,10 +1744,19 @@ def codex_desktop_control_paste_text(
         result = _fail(exc)
         return result
     finally:
-        if restore_clipboard and win32clipboard is not None and clipboard_snapshot is not None:
+        if restore_clipboard and clipboard_snapshot is not None:
             time.sleep(max(0, int(restore_delay_ms)) / 1000.0)
             try:
-                restored = _restore_clipboard_snapshot(win32clipboard, clipboard_snapshot)
+                if IS_MACOS:
+                    if clipboard_snapshot.get('ok'):
+                        _macos.clipboard_write_text(clipboard_snapshot.get('text') or '')
+                        restored = {'ok': True, 'restored_format_count': 1}
+                    else:
+                        restored = _fail(clipboard_snapshot.get('error') or 'clipboard snapshot failed', 'CLIPBOARD_RESTORE_FAILED')
+                elif win32clipboard is not None:
+                    restored = _restore_clipboard_snapshot(win32clipboard, clipboard_snapshot)
+                else:
+                    restored = _fail('clipboard backend unavailable', 'CLIPBOARD_RESTORE_FAILED')
             except Exception as exc:
                 restored = _fail(exc, 'CLIPBOARD_RESTORE_FAILED')
             if result is not None:

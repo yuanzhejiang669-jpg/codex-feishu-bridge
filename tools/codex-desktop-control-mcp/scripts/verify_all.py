@@ -18,8 +18,11 @@ def run(label: str, args: list[str]) -> None:
 def main() -> int:
     python = sys.executable
     run('protocol smoke', [python, 'scripts/desktop_protocol_smoke_test.py'])
-    run('desktop smoke', [python, 'scripts/desktop_smoke_test.py'])
-    run('notepad e2e', [python, 'scripts/desktop_notepad_e2e_test.py'])
+    if sys.platform == 'darwin':
+        run('macOS desktop smoke', [python, 'scripts/macos_desktop_smoke_test.py'])
+    else:
+        run('desktop smoke', [python, 'scripts/desktop_smoke_test.py'])
+        run('notepad e2e', [python, 'scripts/desktop_notepad_e2e_test.py'])
     run('ui model installer help', [python, 'scripts/install_ui_model.py', '--help'])
     return 0
 

@@ -127,14 +127,26 @@ if [ ! -x "$PYTHON_EXE" ]; then
   exit 1
 fi
 
+DESKTOP_CONTROL_REQUIREMENTS="$REPO_ROOT/tools/codex-desktop-control-mcp/requirements-macos.txt"
+if ! "$PYTHON_EXE" -c 'import mcp, PIL' >/dev/null 2>&1; then
+  [ -f "$DESKTOP_CONTROL_REQUIREMENTS" ] || {
+    echo "Desktop Control requirements are missing: $DESKTOP_CONTROL_REQUIREMENTS" >&2
+    exit 1
+  }
+  "$PYTHON_EXE" -m ensurepip --upgrade
+  "$PYTHON_EXE" -m pip install --timeout 120 --retries 5 --requirement "$DESKTOP_CONTROL_REQUIREMENTS"
+fi
+
 umask 077
 mkdir -p \
   "$GLOBAL_HOME" \
   "$GLOBAL_HOME/skills" \
   "$GLOBAL_HOME/tmp/browser-control" \
+  "$GLOBAL_HOME/tmp/desktop-control" \
   "$WRITING_HOME" \
   "$WRITING_HOME/skills" \
   "$WRITING_HOME/tmp/browser-control" \
+  "$WRITING_HOME/tmp/desktop-control" \
   "$CODEX_ROOT/workspaces" \
   "$CODEX_ROOT/tools" \
   "$CODEX_ROOT/skill-sources" \
@@ -328,15 +340,33 @@ type = "stdio"
 command = "$PYTHON_EXE"
 args = ["$REPO_ROOT/tools/firecrawl-router/server.py"]
 env = { PATH = "$CODEX_ROOT/tools/bin:/usr/bin:/bin:/usr/sbin:/sbin", FIRECRAWL_KEY_POOL_PATH = "$CODEX_ROOT/mcp-data/key-pools/firecrawl-key-pool.json", FIRECRAWL_ROUTER_STATE_PATH = "$CODEX_ROOT/mcp-data/state/firecrawl-router-state.json", FIRECRAWL_RATE_LIMIT_COOLDOWN_SECONDS = "180", FIRECRAWL_TRANSIENT_ERROR_COOLDOWN_SECONDS = "30", FIRECRAWL_CREDITS_FALLBACK_COOLDOWN_SECONDS = "21600" }
-
-# codex_desktop_control is intentionally omitted. The current implementation
-# uses Windows UI Automation, pywin32, and Windows clipboard/window APIs.
 EOF
   chmod 600 "$destination"
 }
 
 write_config "$GLOBAL_HOME/config.toml" "$GLOBAL_HOME/tmp/browser-control"
 write_config "$WRITING_HOME/config.toml" "$WRITING_HOME/tmp/browser-control"
+
+ensure_desktop_control_config() {
+  destination=$1
+  output_dir=$2
+  if grep -q '^\[mcp_servers\.codex_desktop_control\]$' "$destination"; then
+    echo "Keeping existing Desktop Control config: $destination"
+    return
+  fi
+  cat >>"$destination" <<EOF
+
+[mcp_servers.codex_desktop_control]
+type = "stdio"
+command = "$PYTHON_EXE"
+args = ["$REPO_ROOT/tools/codex-desktop-control-mcp/server.py"]
+env = { CODEX_DESKTOP_CONTROL_OUTPUT_DIR = "$output_dir" }
+EOF
+  chmod 600 "$destination"
+}
+
+ensure_desktop_control_config "$GLOBAL_HOME/config.toml" "$GLOBAL_HOME/tmp/desktop-control"
+ensure_desktop_control_config "$WRITING_HOME/config.toml" "$WRITING_HOME/tmp/desktop-control"
 
 BROWSER_EXTENSION="$REPO_ROOT/tools/codex-browser-control-mcp/extension/codex_browser_bridge"
 BROWSER_EXTENSION_TOKEN="$BROWSER_EXTENSION/bridge-token.local.js"
@@ -389,4 +419,4 @@ fi
 
 echo "macOS personal environment is ready."
 echo "No Feishu Bot was created, registered, authorized, or started."
-echo "Desktop Control remains unavailable until a native macOS implementation exists."
+echo "Desktop Control is registered. Grant Accessibility and Screen Recording permission when macOS prompts for them."

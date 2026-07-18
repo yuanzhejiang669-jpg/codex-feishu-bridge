@@ -1582,3 +1582,38 @@ Implementation:
 - Added CI acceptance for stapled notarization tickets on both unpacked application bundles and both architecture-specific DMGs, in addition to strict signature and Gatekeeper checks.
 - The root Bridge check passed all 56 tests. Both release YAML files parsed successfully, the macOS bootstrap passed POSIX shell syntax validation, production dependency audit reported zero vulnerabilities, `git diff --check` passed, and a credential-shaped-value scan found no GitHub token, API key, application secret, private key, or Feishu App ID in the publishable source boundary.
 - The generated local Windows installer was used only for verification and was not installed or committed. The physical Mac's six Bot processes and installed local overlay were not restarted or replaced. The powered-off old Windows device remains the user's explicit synchronization exception.
+
+## 2026-07-18 - Native macOS Desktop Control implementation
+
+Scope accepted:
+
+- Load and verify the existing Browser Control extension in the physical Mac's Chrome profile.
+- Replace the previous Windows-only Desktop Control limitation with a native macOS core backend while preserving the Windows contract.
+- Register and verify Desktop Control in both physical-Mac Codex Homes through an idempotent bootstrap path.
+
+Execution and verification evidence will be appended here as each implementation and physical-device check completes.
+
+Implemented:
+
+- Added a platform-dispatched macOS backend using System Events, AppleScript, `screencapture`, `pbcopy`, and `pbpaste`. Windows retains its existing `pywin32` and UI Automation implementation.
+- Added macOS screen geometry, window enumeration/activation, screenshots, coordinate clicks, hotkeys, native paste with text-clipboard restoration, permission diagnostics, and stable `PERMISSION_DENIED` errors.
+- Added minimal pinned macOS requirements, an idempotent dependency install with official-PyPI retries, and append-only Desktop Control registration for both existing Codex Homes.
+- Added a physical-Mac smoke test and made the aggregate verifier choose the native Mac or Windows E2E path by platform.
+- Corrected the bootstrap's obsolete “Desktop Control unavailable” completion message.
+
+Physical-Mac evidence:
+
+- Browser Control unpacked extension is enabled in Chrome and has an established loopback connection to `127.0.0.1:18795`.
+- Both `~/.codex/config.toml` and the writing Home `config.toml` now register `codex_desktop_control` against the same shared program body with separate output directories.
+- Installed `Pillow 12.1.1` arm64 from official PyPI after the initial download timed out; the retry used a 120-second read timeout and completed without a third-party mirror.
+- Desktop MCP protocol test passed with all 19 tools. The real Mac smoke confirms a 1512x982 point desktop, working screen capture, and working clipboard.
+- The user enabled Accessibility for the SSH control path. A repeated physical-Mac smoke reported `accessibility_permission=true`, six visible windows, working screen capture, and working clipboard.
+- Corrected the AppleScript window enumerator after the first authorized run exposed two real-device differences: integer concatenation emitted list punctuation unless explicitly coerced to text, and querying a per-window `visible` property skipped valid windows. The corrected enumerator returns six windows.
+- Added and passed a non-destructive input E2E: Desktop Control identified and activated the `System Settings` window titled `辅助功能`, clicked its title bar at `(419, 50)`, and sent `Esc`. This verifies native activation, pointer, and keyboard delivery without editing user data.
+
+Regression evidence:
+
+- Root Bridge check passed `56/56`.
+- Desktop client check passed `147` tests with `1` expected macOS-only skip on Windows.
+- Windows Desktop Control protocol exposed all 19 tools and the existing desktop smoke test passed.
+- Python compilation, POSIX shell syntax, and `git diff --check` passed.
