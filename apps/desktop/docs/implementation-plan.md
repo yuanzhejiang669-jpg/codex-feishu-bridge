@@ -383,6 +383,8 @@ This list is the durable parity checklist against the existing local control pan
 124. [x] Pass the cross-platform desktop test suite and rebuild the Windows `0.6.0` installer locally.
 125. [x] Pass the clean GitHub macOS runner build and verify both unpacked application architectures and release assets.
 126. [ ] Complete a real Mac install, Codex discovery, OpenAI/Provider login, Feishu registration, Bot start, and message E2E before calling macOS production-ready.
+127. [x] Discover the current official `ChatGPT.app` bundle (`com.openai.codex`) as well as the legacy `Codex.app` name on system and per-user application paths.
+128. [ ] Install the updated Apple Silicon client on the physical Mac and verify official runtime discovery before Provider, Skill, MCP, and Bot provisioning.
 
 `0.1.6 Provider center` acceptance: items 26-35 are implemented; API keys never enter TOML, renderer state, IPC results, or logs; synchronization is previewable and transactional; only client-managed isolated Codex Homes are eligible; existing Bridge processes and legacy Bot files remain unchanged.
 
@@ -412,7 +414,7 @@ This list is the durable parity checklist against the existing local control pan
 
 `0.5.1 Login lifecycle and refresh safety` acceptance: an OpenAI login child is scoped to its exact Codex Home, expires after ten minutes, enters a visible warning state for its final two minutes, and is replaced only by a deliberate second login action. Login polling and ordinary script-panel refreshes must update server state without discarding an unsubmitted Provider target, confirmation text, advanced-section state, or focused field. Official login remains the primary action; whole-Home Provider switching is explicitly advanced administration, while daily switching is directed to Feishu.
 
-`0.6.0 macOS distribution` acceptance: one source tree preserves the verified Windows behavior and builds unsigned Intel and Apple Silicon macOS clients. Each Mac asset contains architecture-matched checksum-verified Node.js and Lark CLI tools, discovers Codex without fixed version paths, uses Keychain-backed safe storage, starts Bridge directly without PowerShell, uses native login items, and keeps client data outside the application bundle. A tag is publishable only after clean Windows and macOS jobs both pass. Unsigned Mac packages remain test releases: automatic in-app installation and production-ready claims are deferred until Developer ID signing, notarization, and a real-device Feishu message E2E pass.
+`0.6.x macOS distribution` acceptance: one source tree preserves the verified Windows behavior and builds unsigned Intel and Apple Silicon macOS clients. Each Mac asset contains architecture-matched checksum-verified Node.js and Lark CLI tools, discovers the current `ChatGPT.app` (`com.openai.codex`) and legacy `Codex.app` names without fixed version paths, uses Keychain-backed safe storage, starts Bridge directly without PowerShell, uses native login items, and keeps client data outside the application bundle. A tag is publishable only after clean Windows and macOS jobs both pass. Unsigned Mac packages remain test releases: automatic in-app installation and production-ready claims are deferred until Developer ID signing, notarization, and a real-device Feishu message E2E pass.
 
 ## 8. Verification strategy
 

@@ -1441,3 +1441,24 @@ Delivery verification:
 - The public Windows installer SHA-256 is `1BED7BF05F7C89FBD308FAC1ED9ACFC7DCB8CD7CF19822EAC81E0A059D568139`.
 - The current Windows client upgraded in place to file version `0.6.2.0`; its uninstall entry reports `0.6.2`. Drawing Bots 1, 2, and 3 restarted with new PIDs `13584`, `38300`, and `22308`, and remained online for 61 seconds. Persistent data was preserved.
 - Script-hosted Bots were not restarted because the shared Bridge engine source did not change in this macOS client iteration. The powered-off old Windows device was not contacted.
+
+## 0.6.3 current OpenAI macOS bundle discovery
+
+Physical-Mac discovery:
+
+- Established Windows-to-Mac SSH over Tailscale and verified the physical target as macOS 15.1 on Apple M4 Pro (`arm64`).
+- Downloaded the current Apple Silicon image from OpenAI's official `persistent.oaistatic.com/codex-app-prod/Codex.dmg` endpoint.
+- Verified the mounted and installed application with strict code-signature checks and Gatekeeper assessment; both report an accepted notarized Developer ID application.
+- The current image is still named `Codex.dmg`, but now contains `/Applications/ChatGPT.app`, bundle ID `com.openai.codex`, version `26.715.31251`, with `codex` and `codex-code-mode-host` under `Contents/Resources`.
+- Confirmed that client `0.6.2` only enumerates `Codex.app`, so it would incorrectly report the official current runtime as missing on a clean Mac.
+
+Implementation:
+
+- Added system and per-user `ChatGPT.app` candidates ahead of the legacy `Codex.app` candidates while retaining nested-resource and PATH fallback behavior.
+- Require bundle ID `com.openai.codex` before accepting either application name as an official desktop runtime source.
+- Extended regression coverage to require both current and legacy bundle names and to reject an executable inside an unrelated same-name application.
+- No Bridge engine, Windows runtime, existing Bot, Provider, workspace, or credential was changed.
+
+Open acceptance:
+
+- Build and publish the matching `0.6.3` Windows/macOS release, install the Apple Silicon client on the physical Mac, and verify it reports `/Applications/ChatGPT.app/Contents/Resources/codex` before provisioning Providers, Skills, MCPs, or Bots.

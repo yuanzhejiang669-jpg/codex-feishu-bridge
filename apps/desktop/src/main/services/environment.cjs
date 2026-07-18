@@ -56,6 +56,8 @@ function firstExecutable(candidates) {
 function macCodexCandidates(home = require("node:os").homedir()) {
   const posixHome = String(home || "").replaceAll("\\", "/");
   const bundles = [
+    "/Applications/ChatGPT.app",
+    path.posix.join(posixHome, "Applications", "ChatGPT.app"),
     "/Applications/Codex.app",
     path.posix.join(posixHome, "Applications", "Codex.app"),
   ];
@@ -97,11 +99,25 @@ function findMacBundleRuntime(bundlePath) {
 
 async function inspectMacCodex(options = {}) {
   const candidates = options.candidates || macCodexCandidates(options.home);
-  let runtimePath = firstExecutable(candidates);
+  const readBundleValue = options.readBundleValue || (async (bundlePath, key) => String((await execFileAsync(
+    "/usr/bin/plutil",
+    ["-extract", key, "raw", path.join(bundlePath, "Contents", "Info.plist")],
+    { timeout: 5_000, encoding: "utf8" },
+  )).stdout || "").trim());
+  const discoveredBundles = [...new Set(candidates
+    .filter((candidate) => candidate.includes(".app/"))
+    .map((candidate) => `${candidate.split(".app/")[0]}.app`))]
+    .filter((bundlePath) => fs.existsSync(bundlePath));
+  const bundles = [];
+  for (const bundlePath of discoveredBundles) {
+    try {
+      const bundleId = await readBundleValue(bundlePath, "CFBundleIdentifier");
+      if (bundleId === "com.openai.codex") bundles.push(bundlePath);
+    } catch {}
+  }
+  const bundleCandidates = candidates.filter((candidate) => bundles.some((bundle) => candidate.startsWith(`${bundle}/`)));
+  let runtimePath = firstExecutable(bundleCandidates);
   if (!runtimePath) {
-    const bundles = [...new Set(candidates
-      .filter((candidate) => candidate.includes(".app/"))
-      .map((candidate) => `${candidate.split(".app/")[0]}.app`))];
     runtimePath = bundles.map(findMacBundleRuntime).find(Boolean) || "";
   }
   if (!runtimePath) {
@@ -114,15 +130,11 @@ async function inspectMacCodex(options = {}) {
       runtimePath = "";
     }
   }
-  const bundlePath = candidates
-    .map((candidate) => candidate.includes(".app/") ? `${candidate.split(".app/")[0]}.app` : "")
-    .find((candidate) => candidate && fs.existsSync(candidate)) || "";
+  const bundlePath = bundles.find((bundle) => runtimePath.startsWith(`${bundle}/`)) || bundles[0] || "";
   let packageVersion = "";
   if (bundlePath && fs.existsSync(bundlePath)) {
     try {
-      packageVersion = String((await execFileAsync("/usr/bin/plutil", [
-        "-extract", "CFBundleShortVersionString", "raw", path.join(bundlePath, "Contents", "Info.plist"),
-      ], { timeout: 5_000, encoding: "utf8" })).stdout || "").trim();
+      packageVersion = await readBundleValue(bundlePath, "CFBundleShortVersionString");
     } catch {
       packageVersion = "";
     }
@@ -133,6 +145,7 @@ async function inspectMacCodex(options = {}) {
     supported: true,
     platform: "darwin",
     packageFound: Boolean(bundlePath && fs.existsSync(bundlePath)),
+    bundleIdentifier: bundlePath ? "com.openai.codex" : "",
     packageVersion,
     installLocation: bundlePath && fs.existsSync(bundlePath) ? bundlePath : "",
     sourceRuntimePath: runtimePath,
