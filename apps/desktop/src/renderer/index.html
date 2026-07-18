@@ -119,6 +119,7 @@
             <label><span>推理强度</span><select name="reasoning"><option value="medium">medium</option></select><small id="workspace-reasoning-hint"></small></label>
             <label><span>平台</span><select name="brand"><option value="feishu">飞书</option><option value="lark">Lark</option></select></label>
             <label class="form-wide"><span>共享 Codex Home 目录名</span><input name="codexHomeName" placeholder="默认 codex-space-{slug}"></label>
+            <label class="form-wide checkbox-field"><input name="reuseExistingHome" type="checkbox"><span>复用已纳入客户端管理的现有 Codex Home（不改写配置、AGENTS.md、Skills 或 MCP）</span></label>
             <label class="form-wide checkbox-field"><input name="initializeAgents" type="checkbox" checked><span>从全局配置初始化空间 AGENTS.md</span></label>
             <div id="workspace-agents-paths" class="form-wide path-summary"></div>
             <div class="form-wide inline-actions">
@@ -218,27 +219,27 @@
 
       <section id="capabilities-view" class="view hidden">
         <section class="capability-source-band">
-          <div><strong>能力来源</strong><span id="capability-source-home"></span></div>
+          <div><strong>迁移源：全局 Codex Home</strong><span id="capability-source-home"></span></div>
           <div><span>MCP 配置</span><code id="capability-source-config"></code></div>
           <div><span>Skills 目录</span><code id="capability-source-skills"></code></div>
         </section>
         <div class="migration-toolbar">
           <select id="migration-target" aria-label="目标 Bot"><option value="">选择隔离配置的 Bot</option></select>
-          <button id="preview-migration-button" class="secondary-button" type="button">预览源路径与目标</button>
+          <button id="preview-migration-button" class="secondary-button" type="button">预览迁移源与目标库存</button>
         </div>
         <div id="migration-target-detail" class="path-summary hidden"></div>
         <section id="migration-preview" class="migration-preview hidden"></section>
         <div class="two-column">
           <section class="content-section">
             <div class="section-heading">
-              <h2>MCP</h2>
+              <h2>迁移源 MCP 候选</h2>
               <div class="selection-tools"><span id="mcp-count" class="section-meta"></span><button id="select-all-mcp" class="link-button" type="button">全选</button><button id="clear-all-mcp" class="link-button" type="button">清空选择</button></div>
             </div>
             <div id="mcp-list" class="capability-list"></div>
           </section>
           <section class="content-section">
             <div class="section-heading">
-              <h2>Skills</h2>
+              <h2>迁移源 Skills 候选</h2>
               <div class="selection-tools"><span id="skill-count" class="section-meta"></span><button id="select-all-skills" class="link-button" type="button">全选</button><button id="clear-all-skills" class="link-button" type="button">清空选择</button></div>
             </div>
             <div id="skill-list" class="capability-list"></div>

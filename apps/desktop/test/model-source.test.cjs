@@ -7,6 +7,7 @@ const {
   applyDesktopModelSourceSwitch,
   listDesktopModelSources,
   previewDesktopModelSourceSwitch,
+  trustDesktopCodexHome,
 } = require("../src/main/services/model-source.cjs");
 
 function fixture() {
@@ -121,6 +122,28 @@ test("desktop preview treats OpenAI separately from discovered third-party Provi
     assert.equal(thirdParty.blockers.length, 0);
     const unbound = await previewDesktopModelSourceSwitch({ codexHome: value.future, targetProvider: "openai" }, value.options);
     assert.match(unbound.blockers.join(" "), /只读/);
+  } finally {
+    fs.rmSync(value.root, { recursive: true, force: true });
+  }
+});
+
+test("desktop explicitly trusts a discovered Home before managing it without Bots", async () => {
+  const value = fixture();
+  try {
+    fs.writeFileSync(path.join(value.future, "config.toml"), 'model_provider = "openai"\n', "utf8");
+    const before = await previewDesktopModelSourceSwitch({ codexHome: value.future, targetProvider: "openai" }, value.options);
+    assert.match(before.blockers.join(" "), /只读/);
+    const imported = trustDesktopCodexHome(value.future, value.options);
+    assert.equal(imported.changed, true);
+    assert.equal(imported.trusted, true);
+    const listed = await listDesktopModelSources(value.options);
+    const future = listed.homes.find((home) => path.basename(home.codexHome) === path.basename(value.future));
+    assert.equal(future.trusted, true);
+    assert.equal(future.manageable, true);
+    assert.equal(future.bots.length, 0);
+    const after = await previewDesktopModelSourceSwitch({ codexHome: value.future, targetProvider: "openai" }, value.options);
+    assert.doesNotMatch(after.blockers.join(" "), /只读/);
+    assert.match(after.blockers.join(" "), /尚未完成 OpenAI/);
   } finally {
     fs.rmSync(value.root, { recursive: true, force: true });
   }

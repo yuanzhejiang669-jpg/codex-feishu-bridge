@@ -10,6 +10,17 @@ function fakeUpdater() {
   return updater;
 }
 
+test("reports why automatic update is unsupported", async () => {
+  const service = createUpdaterService({
+    supported: false,
+    unsupportedReason: "需要正式签名版本",
+    updater: fakeUpdater(),
+    currentVersion: "0.6.3",
+  });
+  assert.equal(service.snapshot().unsupportedReason, "需要正式签名版本");
+  await assert.rejects(service.install(), /需要正式签名版本/);
+});
+
 test("tracks download events and blocks installation while a Bot is active", async () => {
   const updater = fakeUpdater();
   let prepared = false;

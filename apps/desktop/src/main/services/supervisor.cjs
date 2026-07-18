@@ -1,5 +1,6 @@
 const fs = require("node:fs");
 const crypto = require("node:crypto");
+const os = require("node:os");
 const path = require("node:path");
 const { execFile } = require("node:child_process");
 const { activeRunCount, isProcessAlive, readJson } = require("./bridge-discovery.cjs");
@@ -57,8 +58,25 @@ function runPowerShell(scriptPath, args, options) {
   });
 }
 
-function processEnvironment(options, bot = null) {
+function resolveLarkProfileHome(options) {
   const profileHome = path.join(options.dataRoot, "profile-home");
+  if ((options.platform || process.platform) !== "darwin") return profileHome;
+  const alias = path.resolve(options.larkProfileHome || path.join(os.homedir(), ".cfb-lark-profile"));
+  fs.mkdirSync(profileHome, { recursive: true, mode: 0o700 });
+  try {
+    const stat = fs.lstatSync(alias);
+    if (!stat.isSymbolicLink() || fs.realpathSync(alias) !== fs.realpathSync(profileHome)) {
+      throw new Error(`macOS Lark Profile 短路径已被其他文件占用：${alias}`);
+    }
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+    fs.symlinkSync(profileHome, alias, "dir");
+  }
+  return alias;
+}
+
+function processEnvironment(options, bot = null) {
+  const profileHome = resolveLarkProfileHome(options);
   const toolDirs = [path.dirname(options.nodePath), path.dirname(options.larkCliPath)];
   const environment = {
     ...process.env,
@@ -291,6 +309,7 @@ module.exports = {
   posixBridgeEnvironment,
   posixRuntimePaths,
   processEnvironment,
+  resolveLarkProfileHome,
   runPowerShell,
   setManagedBotAutoStart,
   startManagedBot,

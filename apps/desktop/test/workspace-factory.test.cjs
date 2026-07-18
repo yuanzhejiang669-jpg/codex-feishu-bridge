@@ -104,6 +104,48 @@ test("initializes one shared space AGENTS.md without overwriting a target", () =
   } finally { fs.rmSync(value.root, { recursive: true, force: true }); }
 });
 
+test("reuses a trusted existing Codex Home without rewriting its configuration or AGENTS.md", () => {
+  const value = fixture();
+  const target = path.join(value.codexHomeRoot, "codex-space-writing");
+  fs.mkdirSync(target, { recursive: true });
+  const configText = [
+    'model = "existing-model"',
+    'model_provider = "company"',
+    '[model_providers.company]',
+    'name = "Existing Company"',
+    'base_url = "https://existing.example/v1"',
+    'wire_api = "responses"',
+    'env_key = "COMPANY_API_KEY"',
+    '',
+  ].join("\n");
+  const agentsText = "# Existing space rules\n";
+  fs.writeFileSync(path.join(target, "config.toml"), configText, "utf8");
+  fs.writeFileSync(path.join(target, "AGENTS.md"), agentsText, "utf8");
+  value.trustedCodexHomes = [target];
+  try {
+    const raw = { ...input(3), initializeAgents: true, reuseExistingHome: true };
+    const preview = previewWorkspaceFactory(raw, value);
+    assert.equal(preview.available, true);
+    assert.equal(preview.factory.reusingExistingHome, true);
+    const state = createWorkspaceFactoryQueue(raw, value);
+    assert.equal(state.bots.length, 3);
+    assert.equal(fs.readFileSync(path.join(target, "config.toml"), "utf8"), configText);
+    assert.equal(fs.readFileSync(path.join(target, "AGENTS.md"), "utf8"), agentsText);
+  } finally { fs.rmSync(value.root, { recursive: true, force: true }); }
+});
+
+test("refuses to reuse an existing Codex Home that is not trusted", () => {
+  const value = fixture();
+  const target = path.join(value.codexHomeRoot, "codex-space-writing");
+  fs.mkdirSync(target, { recursive: true });
+  fs.writeFileSync(path.join(target, "config.toml"), '[model_providers.company]\nname = "Company"\n', "utf8");
+  try {
+    const preview = previewWorkspaceFactory({ ...input(1), reuseExistingHome: true }, value);
+    assert.equal(preview.available, false);
+    assert.match(preview.bots[0].conflicts.join(" "), /已纳入客户端管理/);
+  } finally { fs.rmSync(value.root, { recursive: true, force: true }); }
+});
+
 test("reports a missing global AGENTS.md before creating a space", () => {
   const value = fixture();
   try {

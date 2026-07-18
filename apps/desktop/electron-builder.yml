@@ -54,7 +54,7 @@ mac:
   artifactName: Codex-Feishu-Bridge-${version}-mac-${arch}.${ext}
   icon: resources/icon.png
   category: public.app-category.developer-tools
-  identity: null
+  hardenedRuntime: true
   target:
     - target: dmg
       arch:

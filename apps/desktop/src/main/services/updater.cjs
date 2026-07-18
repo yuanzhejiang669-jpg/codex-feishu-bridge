@@ -10,6 +10,7 @@ function createUpdaterService(options) {
   let state = {
     supported,
     status: supported ? "idle" : "unsupported",
+    unsupportedReason: supported ? "" : String(options.unsupportedReason || "当前环境不支持客户端内更新"),
     currentVersion: String(options.currentVersion || ""),
     latestVersion: "",
     progress: 0,
@@ -40,7 +41,7 @@ function createUpdaterService(options) {
   }
 
   async function install() {
-    if (!supported) throw new Error("当前环境不支持客户端自动更新");
+    if (!supported) throw new Error(state.unsupportedReason);
     if (!["downloaded", "blocked"].includes(state.status)) throw new Error("更新尚未下载完成");
     const plan = buildInstallPlan(await options.inspectBots());
     if (!plan.allowed) {

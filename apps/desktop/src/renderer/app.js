@@ -364,7 +364,7 @@ function renderUpdater(update = {}) {
   elements.updateProgress.value = Number(update.progress || 0);
   const active = (update.activeBots || []).map((bot) => `${bot.name}（${bot.activeRunCount} 个任务）`).join("、");
   elements.updateMessage.textContent = ({
-    unsupported: "开发模式不连接更新服务",
+    unsupported: text(update.unsupportedReason, "当前环境不支持客户端内更新"),
     idle: "可以手动检查；安装版启动后也会定期检查",
     checking: "正在读取 GitHub 最新发行版",
     available: `发现 ${text(update.latestVersion)}，正在准备下载`,
@@ -447,9 +447,11 @@ function renderCapabilities(capabilities, setup) {
     ? skills.map((item) => `<div class="capability-row capability-detail-row">
       <label class="capability-selector"><input class="migration-skill" type="checkbox" value="${escapeHtml(item.name)}"><strong>${escapeHtml(item.name)}</strong><span class="${badgeClass("good")}">已定位</span></label>
       ${pathLine("目录", item.path)}
+      ${item.realPath && item.realPath !== item.path ? pathLine("源码实体", item.realPath) : ""}
+      <div class="capability-path"><span>来源类型</span><code>${escapeHtml(item.sourceType === "symlink" ? "符号链接" : "本地目录")}</code></div>
       ${pathLine("入口", item.skillFile)}
     </div>`).join("")
-    : '<div class="empty-row">未发现 Skills</div>';
+    : '<div class="empty-row">迁移源（全局 Home）没有可迁移的自定义 Skills；请在上方选择目标 Home 查看其已安装库存</div>';
   const groups = isolatedSpaceGroups(setup);
   elements.migrationTarget.innerHTML = '<option value="">选择目标空间 / Codex Home</option>' + groups
     .map((group) => {
@@ -546,13 +548,14 @@ function renderModelSources(modelSources = {}) {
     const loginClass = badgeClass(home.login?.state === "signed-in" ? "good" : home.login?.state === "signed-out" ? "warn" : "info");
     const loginText = home.login?.state === "signed-in" ? "OpenAI 已登录" : home.login?.state === "signed-out" ? "OpenAI 未登录" : "登录状态未知";
     const active = (home.bots || []).reduce((sum, bot) => sum + Number(bot.activeRunCount || 0), 0);
-    const readOnly = !(home.bots || []).length;
+    const readOnly = home.manageable !== true;
     const loginJob = loginJobPresentation(home.loginJob);
     const draft = modelSourceDrafts.get(home.codexHome);
     return `<div class="model-source-row" data-model-source-index="${index}">
-      <div class="model-source-main"><strong>${escapeHtml(home.label)}</strong><code>${escapeHtml(home.codexHome)}</code><span>${escapeHtml((home.bots || []).map((bot) => bot.label).join("、") || "尚未绑定客户端 Bot")}</span></div>
+      <div class="model-source-main"><strong>${escapeHtml(home.label)}</strong><code>${escapeHtml(home.codexHome)}</code><span>${escapeHtml((home.bots || []).map((bot) => bot.label).join("、") || (home.trusted ? "已由客户端管理 · 尚未绑定 Bot" : "尚未纳入客户端管理"))}</span></div>
       <div class="model-source-status"><span><span class="${loginClass}">${loginText}</span> ${loginJob.badge}</span><span>当前来源：${home.sourceKind === "openai" ? "OpenAI 官方账号" : `第三方 API · ${escapeHtml(home.currentProvider)}`}</span><span>会话覆盖 ${home.sessionOverrideCount || 0} 个 · 活动任务 ${active} 个</span></div>
       <div class="model-source-actions">
+        ${readOnly ? '<button class="secondary-button" data-model-source-action="trust" type="button">纳入客户端管理</button>' : ""}
         <button class="primary-button" data-model-source-action="login" type="button" ${readOnly ? "disabled" : ""}>${loginJob.button}</button>
         <span class="model-source-hint">官方登录只作用于这个 Codex Home；浏览器登录最长等待10分钟。</span>
         <details data-model-source-advanced ${draft?.advancedOpen ? "open" : ""}>
@@ -811,8 +814,8 @@ function capabilitySelection() {
 function updateCapabilitySelectionCounts() {
   const mcp = [...document.querySelectorAll(".migration-mcp:not(:disabled)")];
   const skills = [...document.querySelectorAll(".migration-skill:not(:disabled)")];
-  elements.mcpCount.textContent = `已选 ${mcp.filter((item) => item.checked).length}/${mcp.length}`;
-  elements.skillCount.textContent = `已选 ${skills.filter((item) => item.checked).length}/${skills.length}`;
+  elements.mcpCount.textContent = `迁移源候选：已选 ${mcp.filter((item) => item.checked).length} / 可选 ${mcp.length}`;
+  elements.skillCount.textContent = `迁移源候选：已选 ${skills.filter((item) => item.checked).length} / 可选 ${skills.length}`;
   elements.selectAllMcp.disabled = mcp.length === 0;
   elements.clearAllMcp.disabled = !mcp.some((item) => item.checked);
   elements.selectAllSkills.disabled = skills.length === 0;
@@ -1049,6 +1052,12 @@ elements.modelSourceList.addEventListener("click", async (event) => {
   const action = button.dataset.modelSourceAction;
   button.disabled = true;
   try {
+    if (action === "trust") {
+      await window.bridgeDesktop.trustCodexHome(home.codexHome);
+      showModelSourceResult("配置空间已纳入客户端管理", "现在可以执行 OpenAI 官方登录和整空间 Provider 切换；Bot 启停仍需创建并绑定 Bot。", "good");
+      await refresh();
+      return;
+    }
     if (action === "login") {
       const restarting = home.loginJob?.status === "running";
       await window.bridgeDesktop.startOpenAiLogin(home.codexHome);
@@ -1380,7 +1389,9 @@ elements.workspaceFactoryPreviewButton.addEventListener("click", async () => {
   try {
     const result = await window.bridgeDesktop.previewWorkspaceFactory(workspaceFactoryInput());
     const conflicts = result.bots.filter((bot) => bot.conflicts.length);
-    const agents = result.factory.initializeAgents
+    const agents = result.factory.reusingExistingHome
+      ? '<span>复用现有 Codex Home；不会改写 config.toml、AGENTS.md、Skills 或 MCP</span>'
+      : result.factory.initializeAgents
       ? `<div class="path-summary"><span>AGENTS.md 来源</span><code>${escapeHtml(result.factory.agentsSource)}</code><span>目标</span><code>${escapeHtml(result.factory.agentsTarget)}</code></div>`
       : '<span>不初始化空间 AGENTS.md</span>';
     elements.workspaceFactoryPreview.innerHTML = `<strong>${result.bots.length} 个 Bot · 共享 Codex Home</strong><span>${escapeHtml(result.factory.codexHome)}</span>${agents}<div class="factory-preview-list">${result.bots.map((bot) => `<div><span>${escapeHtml(bot.label)}</span><code>${escapeHtml(bot.name)}</code><small>${escapeHtml(bot.conflicts.join("；") || "可创建")}</small></div>`).join("")}</div>`;
@@ -1595,7 +1606,12 @@ elements.migrationTarget.addEventListener("change", () => {
     elements.migrationTargetDetail.classList.add("hidden");
     return;
   }
-  elements.migrationTargetDetail.innerHTML = `<strong>目标 Codex Home</strong><code>${escapeHtml(option.dataset.codexHome)}</code><span>影响 Bot：${escapeHtml(option.dataset.botNames)}</span>`;
+  const targetCapabilities = (state?.setup?.capabilityHomes || [])
+    .find((item) => item.codexHome === option.dataset.codexHome);
+  const skillPaths = (targetCapabilities?.skills || []).map((item) => (
+    `<code>${escapeHtml(item.name)}：${escapeHtml(item.path)}${item.realPath && item.realPath !== item.path ? ` → ${escapeHtml(item.realPath)}` : ""}</code>`
+  )).join("");
+  elements.migrationTargetDetail.innerHTML = `<strong>目标 Codex Home 已安装库存</strong><code>${escapeHtml(option.dataset.codexHome)}</code><span>影响 Bot：${escapeHtml(option.dataset.botNames)}</span><span>已安装：MCP ${targetCapabilities?.summary?.mcpServers || 0} 个 / Skills ${targetCapabilities?.summary?.skills || 0} 个</span>${skillPaths}`;
   elements.migrationTargetDetail.classList.remove("hidden");
   elements.migrationPreview.classList.add("hidden");
 });

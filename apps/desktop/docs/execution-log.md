@@ -1462,3 +1462,123 @@ Implementation:
 Open acceptance:
 
 - Build and publish the matching `0.6.3` Windows/macOS release, install the Apple Silicon client on the physical Mac, and verify it reports `/Applications/ChatGPT.app/Contents/Resources/codex` before provisioning Providers, Skills, MCPs, or Bots.
+
+## 2026-07-18 - Physical Mac bootstrap started
+
+- Confirmed the target over Tailscale SSH as macOS 15.1 on Apple M4 Pro (`arm64`).
+- Confirmed the notarized official runtime exists at `/Applications/ChatGPT.app/Contents/Resources/codex` and that the Bridge client, `~/.codex`, and `~/Documents/Codex` were not yet present.
+- Confirmed local source, `origin`, and tag `v0.6.3` resolve to commit `9557380627a3b7b08b3a7e0a23d50dae88e4e121`.
+- Added `bootstrap/install-macos-personal-environment.sh`. It is idempotent, contains no keys, refuses to replace existing configuration or skill paths, and never creates or authorizes Feishu Bots.
+- Confirmed the current Desktop Control MCP is Windows-only (`pywin32`, Windows UI Automation, Windows clipboard/window APIs). It is deliberately not configured on Mac; a native implementation remains required.
+- Deployment, secrets transfer, MCP checks, client discovery, and second-run idempotence verification are in progress.
+- Added an opt-in `--keep-awake` mode for the dedicated Mac. It uses a user-level `LaunchAgent` running `/usr/bin/caffeinate -dimsu`, never replaces an existing same-name plist, and does not require administrator privileges or change global power settings.
+- Physical-Mac verification showed the Browser Control MCP protocol starts under bundled Node, but its direct browser executable allowlist still requires Windows `chrome.exe`/`msedge.exe` names. The Mac bootstrap therefore provisions one shared token for the extension bridge and does not claim native browser launch support.
+
+Completion evidence:
+
+- Verified the `v0.6.3` Apple Silicon DMG at `230639671` bytes. Local SHA-256 `3e1ccabdc11ef76d026f95277e843317f35a3d2ac2ac37489ff55b75fd6636a2` exactly matched the GitHub API asset digest.
+- Installed `/Applications/Codex Feishu Bridge.app` version `0.6.3`. The main executable, bundled Node `24.18.0`, and Lark CLI `1.0.69` are arm64. The unsigned bundle fails strict `codesign` and Gatekeeper assessment as documented; no quarantine bypass or trust override was performed.
+- The packaged environment inspector found `/Applications/ChatGPT.app/Contents/Resources/codex`, reported Codex `0.145.0-alpha.18`, and correctly reported the new Home as signed out.
+- Ran the bootstrap repeatedly with `--no-git-sync --keep-awake`. Existing configs were preserved, six writing Skill links remained stable, and the local plan still records exactly six uncreated Bots.
+- Stored Provider secrets and the shared Browser Control token in user-only `0600` files. Both Home configs contain only `sub2api` and `lthome`, default to `medium`, expose Browser Control, Firecrawl, and Tavily, and omit Desktop Control.
+- Live Provider checks passed: `sub2api` returned 19 models and `lthome` returned 10 models. Tavily returned one live result. Firecrawl CLI `1.19.24` completed a live search on its first key attempt.
+- Browser Control started under the bundled Node, completed MCP initialization, and listed 56 tools including extension bridge tools. Loading the unpacked extension in a Mac browser remains a manual acceptance step; direct `.app` browser launch is not yet supported.
+- Tavily tests passed `2/2`; Firecrawl tests passed `8/8`. `codex mcp list` parsed all three enabled MCP entries from both Homes without exposing their environment values.
+- The user LaunchAgent remained `running`; a forced `launchctl kickstart -k` replaced caffeinate PID `4578` with PID `4922`, proving `KeepAlive` recovery. This permanent wake/display assertion increases battery drain and energy use.
+- No Feishu application, Lark Profile, Bot registration, authorization, Bridge process, or message event was created. Those remain deferred until the user signs in to the new Feishu account.
+
+## 2026-07-18 - Unbound Home management and Chrome bootstrap follow-up
+
+- Confirmed from the physical-Mac screenshot and desktop source that `~/.codex` and `~/Documents/Codex/codex-homes/codex-space-writing` were discovered correctly but intentionally rendered read-only because zero client-managed Bots were bound.
+- Added an explicit trusted Codex Home registry at the desktop data root. Import is idempotent and atomic, accepts only an already discovered directory with a parseable `config.toml`, and does not create, register, authorize, or start a Feishu Bot.
+- Trusted unbound Homes now support OpenAI official login and transactional whole-Home Provider switching. UI text distinguishes `已由客户端管理 · 尚未绑定 Bot` from an unmanaged read-only Home. Bot start/stop still requires an actual managed Bot.
+- Added `--install-chrome` to the idempotent macOS bootstrap. It downloads Google's official universal stable DMG and verifies `com.google.Chrome`, strict code signing, Gatekeeper acceptance, and arm64 support before and after copying the app.
+- Verified the Google download endpoint redirects to a `dl.google.com` tagged URL and returns a `272891826`-byte `application/x-apple-diskimage` response on 2026-07-18; no DMG was downloaded on Windows.
+- Deliberately did not edit Chrome profile JSON, deploy enterprise policy, enable Developer mode, or load an unpacked extension automatically. Bing selection and Browser Control extension loading remain small, visible user actions inside Chrome.
+- Focused trusted-Home and model-source tests passed; the complete desktop check passed `136/136`; local POSIX shell syntax validation passed.
+- Remote SSH to the physical Mac timed out during this follow-up. Chrome installation, Finder launch, physical-client installation, and the two Home trust clicks remain pending until the Mac is reachable.
+
+Completion after the Mac returned online:
+
+- Installed `/Applications/Google Chrome.app` version `150.0.7871.129` from Google's official universal stable DMG. The installed bundle is `com.google.Chrome`, contains `x86_64 arm64`, passes strict code-signature verification, and is accepted by Gatekeeper as a notarized Developer ID application.
+- The first installer run correctly verified the mounted source but exposed a shell variable collision that made the second verification point at the source again. Renamed the verification variable, redeployed the script, and independently verified the installed `/Applications` target. No Gatekeeper or quarantine bypass was used.
+- Opened Finder at `~/Documents/Codex` and opened Chrome's search settings. Structured inspection of Chrome's own `Default/Preferences` confirmed `Microsoft Bing`, prepopulated engine ID `3`, and `https://www.bing.com/search?q={searchTerms}` as the selected default; no profile JSON was edited and no enterprise policy was installed.
+- Mac focused tests passed and the complete Mac desktop check completed with `135` passes, `0` failures, and the expected single Windows-only skip. The existing arm64 application was used as a verified packaging base after GitHub's unrelated Intel Lark CLI download stalled; only the tested desktop `app.asar` code was rebuilt.
+- Isolated screenshot smoke testing showed both discovered Homes read-only with an explicit `纳入客户端管理` action. Imported exactly `~/.codex` and `~/Documents/Codex/codex-homes/codex-space-writing` through the same backend validation and persisted two entries in `~/Library/Application Support/CodexFeishuBridgeDesktop/trusted-codex-homes.json` with mode `0600`.
+- Replaced the installed client transactionally using staged `next` and rollback `previous` bundles. The updated client launched as PID `7623`; `desktop-state.json` retained the same SHA-256 before and after installation; no next/previous bundle remained; and no managed Bot existed or was created.
+- Installation-after screenshot smoke testing showed both Homes as `已由客户端管理 · 尚未绑定 Bot`, with OpenAI login and whole-Home Provider controls enabled. The local overlay remains version `0.6.3` and unsigned, matching the existing unsigned physical-Mac test build; no signing or Gatekeeper claim was added.
+- Opened `chrome://extensions` and the unpacked Browser Control extension directory. Developer mode and `Load unpacked` remain a required visible user action; browser security settings were not changed automatically.
+- Removed downloaded build dependencies, generated packaging output, screenshots, logs, and temporary scripts from both machines after verification. Cleanup initially removed the tracked remote `resources/icon.ico`; final status inspection caught it immediately and restored the byte source from the unchanged local checkout before completion.
+## 2026-07-18 - Existing macOS writing space registration path
+
+- Confirmed over SSH that the Mac desktop data root has zero managed Bots, no workspace-factory queue, and no Lark profiles yet.
+- Confirmed both `~/.codex` and `~/Documents/Codex/codex-homes/codex-space-writing` are present in `trusted-codex-homes.json`.
+- Added the workspace-factory `reuseExistingHome` option and guarded it with the trusted-Home registry.
+- Reuse mode preserves the existing Home and checks that the selected Provider is already available there.
+- Added positive preservation coverage and a negative untrusted-Home test.
+- Verification: `npm run check` passed, 138/138 tests.
+- No Feishu application, profile, workspace queue, or QR registration was created during this implementation step.
+
+## 2026-07-18 - Physical Mac six-Bot recovery and Lark event-bus socket path
+
+Discovery:
+
+- Audited all six client-managed Bot records, isolated Lark Profiles, runtime state, workspaces, Codex Homes, Providers, MCPs, and writing Skills without deleting or recreating any application.
+- All six App IDs are distinct and every Bot identity verifies successfully. Five Profiles have a verified user OAuth identity; only `codex-assistant-1-writing` still requires user OAuth for user-scoped Lark CLI tools.
+- The six auto-start Bots were offline with zero active runs. Each attempted Bridge start reached `im.message.receive_v1`, but bundled Lark CLI exited with code 5 because its event-bus daemon did not become ready.
+- The long Profile Home produced an approximately 130-byte per-App `bus.sock` path, beyond the macOS Unix socket path limit. Disk space, directory permissions, Feishu endpoints, configuration, and Bot identity all passed `lark-cli doctor`.
+
+Isolation evidence:
+
+- Removed only empty-PID, no-live-process `bus.pid`, `bus.fork.lock`, and `bus.alive.lock` cache files. Profiles, credentials, App IDs, Bot metadata, Codex Homes, and workspaces were unchanged.
+- Lark CLI `1.0.72` failed under the long Home exactly like bundled `1.0.69`, excluding a simple dependency-version fix.
+- Created `~/.cfb-lark-profile` as a symlink to the existing desktop Profile Home. Bundled `1.0.69` then started its bus daemon, connected the Feishu WebSocket, reported `ready event_key=im.message.receive_v1`, and completed an eight-second bounded consume normally.
+
+Implementation:
+
+- The macOS supervisor now creates or validates the short Profile alias before launching Bridge children and uses it for `HOME` and `USERPROFILE`. Profile data remains in the original desktop data root.
+- Windows retains the existing long-path behavior. A foreign file, directory, or wrong symlink at the alias path is preserved and rejected instead of overwritten.
+- Added regression tests for alias creation/validation and occupied-path refusal. The Windows desktop check passed 139 tests with the one macOS-only symlink test skipped.
+- Extracted the physical Mac's current `app.asar` and verified its trusted-Home, model-source, workspace-factory, preload, and renderer files matched the current source before applying only the supervisor overlay. Staged and installed smoke tests passed before the transactional replacement.
+- The recovery supervisor brought all six Bots online with distinct stable PIDs. Every latest launch segment reports `ready event_key=im.message.receive_v1` and `feishu-websocket: connected`, with no later event-consumer error or shutdown.
+- All six Bot identities verify and all six App IDs are distinct. The five existing user OAuth Profiles expose the same 34-scope effective set. `codex-assistant-1-writing` remains message-capable but lacks user OAuth, so an ephemeral exact-32-scope split flow was opened in the Mac browser and QR viewer; completion awaits the user's confirmation.
+- Real incoming-message evidence is still absent from all six `seen-events.json` files. Production-ready macOS E2E remains open until the user sends test messages and all six are observed.
+
+## 2026-07-18 - Six-Bot permissions, MCP, and Skill-source audit
+
+- Confirmed six distinct application fingerprints and six verified Bot identities. All six user OAuth identities now verify with the same 34-scope effective set; the replacement `codex-assistant-1-writing` authorization completed after the earlier report.
+- Confirmed all six Bridge processes remain live with stable distinct PIDs. Every runtime log reports `ready event_key=im.message.receive_v1` and a connected Feishu WebSocket; no other event key appears in the inspected launch logs. A real incoming-message receipt is still not recorded.
+- Separated the evidence boundary: every local Bot record requests policy `bridge-lark-common-v1` (9 tenant plus 32 user scopes), but the remote granted application scopes are not identical. The replacement writing Bot exactly matches 9/32; four legacy-created Bots share a larger 35/115 set while missing recommended tenant scope `im:chat:readonly`; the remaining ordinary Bot returned inconsistent scope-list responses and was not claimed complete. The developer-console event subscription list was not asserted because no verified read API was available.
+- Confirmed both Homes configure exactly the same three MCP servers: `codex_browser_control`, `firecrawl`, and `tavily`. Commands, arguments, resolved entry paths, and content hashes match, proving both configurations use the same program bodies. Desktop Control remains absent because the current implementation is Windows-only.
+- Confirmed the ordinary Home has no custom Skills beyond its system-managed directory. The writing Home has six valid Skill symlinks. `academic-research-suite` and `research-paper-writing` resolve to their two GitHub source repositories; `imagegen-router` and `powershell-safe-invocation` resolve to the Bridge repository; `mineru-document-parser` and `ppt-master` resolve to local shared sources.
+- Fixed Skill discovery to follow valid directory symlinks, ignore broken links, and report `realPath` plus `sourceType`. Added a per-Home capability inventory to desktop state. Selecting the writing Home now shows `MCP 3 / Skills 6` and every configured-to-resolved absolute path; the global empty state explains that it is the migration source rather than claiming the writing space has no Skills.
+- Complete desktop verification passed 142 tests with zero failures and one expected macOS-only skip on Windows. The focused capability suite passed 4/4.
+- Repacked only the tested desktop `app.asar`, installed it transactionally on the physical Mac, and verified the final SHA-256 `96fe3d1e5c7cbcff5ee324b2ff0ceaf6f4173cc5f32c5a72c73282bea788c42f`. DOM inspection and a screenshot confirmed the six writing Skills and their source paths. All six Bridge engine processes remained live across both client restarts.
+
+## 2026-07-18 - macOS updater safety and MCP/Skills UI clarification
+
+- Confirmed the physical Mac Keychain contains zero valid code-signing identities. The repository currently has no configured Actions secrets, so the installed `0.6.3` overlay cannot truthfully perform in-app replacement yet.
+- Added a platform-neutral update-support assessment. Packaged Windows remains enabled. Packaged macOS is enabled only after the application exposes a `Developer ID Application` signing authority and passes `spctl --assess --type execute`; every disabled state carries a concrete reason to the system page.
+- Reused the existing updater flow without weakening it: downloaded updates still recheck active runs, preserve the online-Bot restart list, write the recovery marker, stop only managed Bots and the local proxy, roll back on preparation failure, then invoke `quitAndInstall`.
+- Added a GitHub Actions signing/notarization entry that reads only the five documented Secrets, rejects incomplete secret sets, preserves unsigned test builds when none are configured, and verifies strict code signing, Developer ID authority, and Gatekeeper acceptance before uploading signed assets.
+- Removed the false packaged-Mac message `开发模式不连接更新服务`. The page now displays the backend reason, such as `当前 macOS 客户端不是正式 Developer ID 签名版本，暂不能安全自动更新`.
+- Renamed capability sections and counters to distinguish global-Home migration candidates from the selected target Home's installed inventory. Existing symlink discovery and resolved Skill source paths are preserved.
+- Added updater-support and unsupported-reason regression coverage. Focused tests passed `7/7`; full Windows and physical-Mac verification follow in this entry before installation is marked complete.
+- Complete Windows verification passed 147 tests with zero failures and one expected macOS-only skip. Both YAML configuration files parsed successfully and `git diff --check` reported no whitespace errors.
+- Immediately before installation, all six physical-Mac Bots had zero active runs and six live Bridge PIDs. Built the overlay from the installed `96fe3d1e5c7cbcff5ee324b2ff0ceaf6f4173cc5f32c5a72c73282bea788c42f` app archive, installed the tested `3a154a642568249f35a7d665a42106673fc198aab345b746a97f423b4f823037` archive transactionally, and removed the rollback copy immediately after success.
+- Restarted only the desktop process. Its new PID is `13981`; all six Bridge PID records were byte-for-byte unchanged, all six remained online, and all remained at zero active runs.
+- Physical-Mac updater tests passed `7/7`. Runtime assessment now reports `当前 macOS 客户端不是正式 Developer ID 签名版本，暂不能安全自动更新`, matching the known invalid strict signature after local `app.asar` overlays rather than falsely calling the packaged app development mode.
+- Physical-Mac inventory verification reports the ordinary Home as `MCP 3 / Skills 0` and the writing Home as `MCP 3 / Skills 6`. All six writing Skills remain valid symlinks with their existing resolved source paths; both Homes still expose Browser Control, Firecrawl, and Tavily.
+- In-app macOS update is code-complete but not production-enabled. Activation still requires Apple Developer Program access, a Developer ID Application certificate, all five repository Secrets, a signed/notarized Release, and installation of that Release once so future updates inherit a trusted signature chain.
+
+## 2026-07-18 - 0.7.0 release-source preparation
+
+- Selected `0.7.0` for the accumulated desktop feature set and synchronized `package.json` with `package-lock.json`.
+- Added release notes covering trusted unbound Homes, existing-space reuse, the macOS Lark socket-path fix, per-Home MCP/Skill inventory, and the guarded macOS updater.
+- Tightened the stable tag workflow: an empty Apple credential set is no longer accepted. All five signing/notarization Secrets are mandatory before either platform can be published as one stable Release.
+- Audited the worktree boundary. Local Mac overlay archives and extracted dependencies under `tmp/` are build intermediates and are excluded from source publication. The bootstrap script contains no Provider, MCP, Apple, Feishu, or GitHub credential value.
+- GitHub currently exposes no repository Actions Secrets, so `v0.7.0` remains intentionally untagged and unpublished until the user completes Apple Developer setup. Source commit/push and stable Release publication are tracked as separate states.
+- Local `npm run check` passed 147 tests with zero failures and one expected macOS-only skip. Local `npm run dist:win` then passed PowerShell syntax validation, protocol-proxy smoke testing, Windows x64 packaging, version/update-metadata checks, and release checksum verification for `0.7.0`.
+- Added CI acceptance for stapled notarization tickets on both unpacked application bundles and both architecture-specific DMGs, in addition to strict signature and Gatekeeper checks.
+- The root Bridge check passed all 56 tests. Both release YAML files parsed successfully, the macOS bootstrap passed POSIX shell syntax validation, production dependency audit reported zero vulnerabilities, `git diff --check` passed, and a credential-shaped-value scan found no GitHub token, API key, application secret, private key, or Feishu App ID in the publishable source boundary.
+- The generated local Windows installer was used only for verification and was not installed or committed. The physical Mac's six Bot processes and installed local overlay were not restarted or replaced. The powered-off old Windows device remains the user's explicit synchronization exception.

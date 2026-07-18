@@ -2,6 +2,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { readManagedBots } = require("./bot-setup.cjs");
 const { inspectManagedBots, startManagedBot, stopManagedBot } = require("./supervisor.cjs");
+const { isTrustedCodexHome, trustCodexHome } = require("./trusted-codex-homes.cjs");
 
 const managers = new Map();
 
@@ -76,6 +77,7 @@ async function listDesktopModelSources(options) {
   const homes = [];
   for (const home of discoveredHomes(options)) {
     const bots = botStates(home, options);
+    const trusted = isTrustedCodexHome(home.codexHome, options.dataRoot);
     const source = shared.inspectCodexHome(home.codexHome, { envValue: homeEnvValue(bots, options) });
     homes.push({
       ...source,
@@ -84,6 +86,8 @@ async function listDesktopModelSources(options) {
         : path.basename(home.codexHome),
       sources: home.sources,
       bots,
+      trusted,
+      manageable: trusted || bots.length > 0,
       login: await shared.inspectLogin(options.codexPath, home.codexHome),
       loginJob: loginManager(options).get(home.codexHome),
       sessionOverrideCount: shared.inspectSessionOverrides(bots.map((item) => item.sessionsPath)).overrideCount,
@@ -94,14 +98,22 @@ async function listDesktopModelSources(options) {
 
 function startDesktopOpenAiLogin(codexHome, options) {
   const home = requireHome(codexHome, options);
-  if (!botStates(home, options).length) throw new Error("该 Codex Home 未绑定客户端 Bot，在本客户端中只读");
+  if (!botStates(home, options).length && !isTrustedCodexHome(home.codexHome, options.dataRoot)) {
+    throw new Error("该 Codex Home 尚未纳入客户端管理，在本客户端中只读");
+  }
   return loginManager(options).start(options.codexPath, home.codexHome);
+}
+
+function trustDesktopCodexHome(codexHome, options) {
+  const home = requireHome(codexHome, options);
+  return trustCodexHome(home.codexHome, { dataRoot: options.dataRoot, discoveredHomes: discoveredHomes(options) });
 }
 
 async function previewDesktopModelSourceSwitch(raw, options) {
   const shared = sharedModule(options);
   const home = requireHome(raw.codexHome, options);
   const bots = botStates(home, options);
+  const trusted = isTrustedCodexHome(home.codexHome, options.dataRoot);
   const preview = shared.previewModelSourceSwitch(home.codexHome, raw.targetProvider, { envValue: homeEnvValue(bots, options) });
   const login = await shared.inspectLogin(options.codexPath, home.codexHome);
   return {
@@ -110,7 +122,7 @@ async function previewDesktopModelSourceSwitch(raw, options) {
     bots,
     sessionOverrideCount: shared.inspectSessionOverrides(bots.map((item) => item.sessionsPath)).overrideCount,
     blockers: [
-      ...(!bots.length ? ["该 Codex Home 未绑定客户端 Bot，在本客户端中只读"] : []),
+      ...(!bots.length && !trusted ? ["该 Codex Home 尚未纳入客户端管理，在本客户端中只读"] : []),
       ...(preview.targetProvider === "openai" && login.state !== "signed-in" ? ["该 Codex Home 尚未完成 OpenAI 官方登录"] : []),
       ...bots.filter((item) => item.activeRunCount > 0).map((item) => `${item.label} 有 ${item.activeRunCount} 个活动任务`),
     ],
@@ -153,4 +165,5 @@ module.exports = {
   listDesktopModelSources,
   previewDesktopModelSourceSwitch,
   startDesktopOpenAiLogin,
+  trustDesktopCodexHome,
 };

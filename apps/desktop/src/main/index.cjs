@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { inspectCodex } = require("./services/environment.cjs");
 const { discoverBridge } = require("./services/bridge-discovery.cjs");
-const { inspectCapabilities } = require("./services/capabilities.cjs");
+const { inspectCapabilities, inspectCapabilityHomes } = require("./services/capabilities.cjs");
 const { inspectEngine } = require("./services/engine.cjs");
 const { collectKnownPaths, isKnownPath } = require("./services/known-paths.cjs");
 const { createManagedBot, previewBot, readManagedBots, runLarkCli } = require("./services/bot-setup.cjs");
@@ -31,6 +31,7 @@ const {
   listDesktopModelSources,
   previewDesktopModelSourceSwitch,
   startDesktopOpenAiLogin,
+  trustDesktopCodexHome,
 } = require("./services/model-source.cjs");
 const {
   addGlobalProvider,
@@ -53,6 +54,7 @@ const {
 const { inspectDataSchema, migrateDesktopData } = require("./services/data-migrations.cjs");
 const { assessCompatibility } = require("./services/compatibility.cjs");
 const { createUpdaterService } = require("./services/updater.cjs");
+const { assessUpdateSupport } = require("./services/update-support.cjs");
 const {
   clearRecoveryMarker,
   restoreUpdateBots,
@@ -64,6 +66,7 @@ const {
   readWorkspaceFactoryQueue,
   registerFactoryBot,
 } = require("./services/workspace-factory.cjs");
+const { readTrustedCodexHomes } = require("./services/trusted-codex-homes.cjs");
 
 const smokeTest = process.argv.includes("--smoke-test");
 const capturePath = process.env.CFB_DESKTOP_CAPTURE_PATH || "";
@@ -212,6 +215,7 @@ function workspaceFactoryOptions() {
     codexHomeRoot: codexHomeRoot(),
     sourceCodexHome: path.join(app.getPath("home"), ".codex"),
     existingNames: currentState?.bridge?.instances?.map((item) => item.name) || [],
+    trustedCodexHomes: readTrustedCodexHomes(managedDataRoot()).map((item) => item.codexHome),
   };
 }
 
@@ -279,8 +283,16 @@ async function prepareUpdateInstall(restartNames, targetVersion) {
 }
 
 function createDesktopUpdater() {
+  const updateSupport = assessUpdateSupport({
+    packaged: app.isPackaged,
+    smokeTest,
+    captureMode: Boolean(capturePath),
+    platform: process.platform,
+    executablePath: process.execPath,
+  });
   return createUpdaterService({
-    supported: app.isPackaged && !smokeTest && !capturePath && process.platform === "win32",
+    supported: updateSupport.supported,
+    unsupportedReason: updateSupport.reason,
     updater: autoUpdater,
     currentVersion: app.getVersion(),
     inspectBots: async () => inspectManagedBots(managedDataRoot(), runtimeLocalAppData()),
@@ -316,6 +328,11 @@ async function loadState() {
     inspectEngine({ packaged: app.isPackaged, resourcesPath: process.resourcesPath, desktopRoot }),
     Promise.resolve(inspectCapabilities()),
   ]);
+  const managedBots = inspectManagedBots(managedDataRoot(), runtimeLocalAppData());
+  const capabilityHomes = inspectCapabilityHomes([
+    capabilities.codexHome,
+    ...managedBots.map((bot) => bot.codexHome),
+  ]);
   const providerCatalog = inspectProviderCatalog(path.join(app.getPath("home"), ".codex"));
   currentState = {
     generatedAt: new Date().toISOString(),
@@ -339,7 +356,8 @@ async function loadState() {
       workspaceRoot: workspaceRoot(),
       codexHomeRoot: codexHomeRoot(),
       runtimeLocalAppData: runtimeLocalAppData(),
-      managedBots: inspectManagedBots(managedDataRoot(), runtimeLocalAppData()),
+      managedBots,
+      capabilityHomes,
       managedSpaces: isolatedSpaces(managedDataRoot()),
       permissionPolicy: publicPermissionPolicy(),
       dataSchema: inspectDataSchema(managedDataRoot()),
@@ -637,6 +655,12 @@ if (!singleInstance) {
     ipcMain.handle("desktop:start-openai-login", async (_event, codexHome) => {
       assertStartupReady();
       const result = startDesktopOpenAiLogin(codexHome, modelSourceOptions());
+      await loadState();
+      return result;
+    });
+    ipcMain.handle("desktop:trust-codex-home", async (_event, codexHome) => {
+      assertStartupReady();
+      const result = trustDesktopCodexHome(codexHome, modelSourceOptions());
       await loadState();
       return result;
     });

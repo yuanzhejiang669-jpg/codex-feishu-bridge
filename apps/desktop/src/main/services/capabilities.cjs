@@ -44,11 +44,26 @@ function resolveCommandPath(command, envPath = process.env.PATH || "") {
 function listSkills(skillsRoot) {
   try {
     return fs.readdirSync(skillsRoot, { withFileTypes: true })
-      .filter((entry) => entry.isDirectory())
       .map((entry) => {
         const skillPath = path.join(skillsRoot, entry.name);
+        let sourceType = "directory";
+        let realPath = skillPath;
+        try {
+          const stat = fs.statSync(skillPath);
+          if (!stat.isDirectory()) return null;
+          if (entry.isSymbolicLink()) {
+            sourceType = "symlink";
+            realPath = fs.realpathSync(skillPath);
+          } else if (!entry.isDirectory()) {
+            return null;
+          }
+        } catch {
+          return null;
+        }
         const skillFile = path.join(skillPath, "SKILL.md");
-        return fs.existsSync(skillFile) ? { name: entry.name, path: skillPath, skillFile } : null;
+        return fs.existsSync(skillFile)
+          ? { name: entry.name, path: skillPath, realPath, sourceType, skillFile }
+          : null;
       })
       .filter(Boolean)
       .sort((left, right) => left.name.localeCompare(right.name));
@@ -84,4 +99,11 @@ function inspectCapabilities(codexHome = path.join(os.homedir(), ".codex")) {
   };
 }
 
-module.exports = { inspectCapabilities, listSkills, parseMcpServerIds, parseMcpServers, resolveCommandPath };
+function inspectCapabilityHomes(codexHomes = []) {
+  const seen = new Set();
+  return (codexHomes || []).map((value) => path.resolve(String(value || "")))
+    .filter((value) => value && !seen.has(value) && seen.add(value))
+    .map((value) => inspectCapabilities(value));
+}
+
+module.exports = { inspectCapabilities, inspectCapabilityHomes, listSkills, parseMcpServerIds, parseMcpServers, resolveCommandPath };

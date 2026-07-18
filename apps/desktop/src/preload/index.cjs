@@ -23,6 +23,7 @@ contextBridge.exposeInMainWorld("bridgeDesktop", Object.freeze({
   previewProviderSync: () => ipcRenderer.invoke("desktop:preview-provider-sync"),
   applyProviderSync: () => ipcRenderer.invoke("desktop:apply-provider-sync"),
   startOpenAiLogin: (codexHome) => ipcRenderer.invoke("desktop:start-openai-login", codexHome),
+  trustCodexHome: (codexHome) => ipcRenderer.invoke("desktop:trust-codex-home", codexHome),
   previewModelSourceSwitch: (value) => ipcRenderer.invoke("desktop:preview-model-source-switch", value),
   applyModelSourceSwitch: (value) => ipcRenderer.invoke("desktop:apply-model-source-switch", value),
   startBot: (name) => ipcRenderer.invoke("desktop:start-bot", name),

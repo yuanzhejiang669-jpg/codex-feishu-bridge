@@ -384,7 +384,15 @@ This list is the durable parity checklist against the existing local control pan
 125. [x] Pass the clean GitHub macOS runner build and verify both unpacked application architectures and release assets.
 126. [ ] Complete a real Mac install, Codex discovery, OpenAI/Provider login, Feishu registration, Bot start, and message E2E before calling macOS production-ready.
 127. [x] Discover the current official `ChatGPT.app` bundle (`com.openai.codex`) as well as the legacy `Codex.app` name on system and per-user application paths.
-128. [ ] Install the updated Apple Silicon client on the physical Mac and verify official runtime discovery before Provider, Skill, MCP, and Bot provisioning.
+128. [x] Install the updated Apple Silicon client on the physical Mac and verify official runtime discovery before Provider, Skill, MCP, and Bot provisioning.
+129. [x] Provision the physical Mac ordinary and writing Codex Homes through an idempotent, credential-free bootstrap script without creating Feishu Bots.
+130. [ ] Validate `sub2api`, `lthome`, the Browser Control extension bridge, Firecrawl, Tavily, Git-backed writing Skills, and local writing Skills on the physical Mac.
+131. [x] Keep the current Windows-only Desktop Control disabled on macOS until a native implementation replaces its `pywin32` and UI Automation dependencies.
+132. [x] Optionally keep a dedicated physical Mac and its display awake through a reversible user LaunchAgent without changing system-wide power settings.
+133. [x] Require an explicit, validated trust action before an unbound discovered Codex Home becomes writable in the desktop client.
+134. [x] Install and verify the official Google Chrome bundle on the physical Mac and verify Bing as its selected default without modifying protected browser preferences or extension security settings.
+135. [x] Keep the macOS Lark event-bus Unix socket below the platform path limit through a validated short symlink to the existing isolated Profile Home; never move, copy, or recreate Profile credentials.
+136. [ ] Verify all six physical-Mac Bots remain online and receive a real `im.message.receive_v1` event after the short-Profile-Home fix.
 
 `0.1.6 Provider center` acceptance: items 26-35 are implemented; API keys never enter TOML, renderer state, IPC results, or logs; synchronization is previewable and transactional; only client-managed isolated Codex Homes are eligible; existing Bridge processes and legacy Bot files remain unchanged.
 
@@ -416,6 +424,18 @@ This list is the durable parity checklist against the existing local control pan
 
 `0.6.x macOS distribution` acceptance: one source tree preserves the verified Windows behavior and builds unsigned Intel and Apple Silicon macOS clients. Each Mac asset contains architecture-matched checksum-verified Node.js and Lark CLI tools, discovers the current `ChatGPT.app` (`com.openai.codex`) and legacy `Codex.app` names without fixed version paths, uses Keychain-backed safe storage, starts Bridge directly without PowerShell, uses native login items, and keeps client data outside the application bundle. A tag is publishable only after clean Windows and macOS jobs both pass. Unsigned Mac packages remain test releases: automatic in-app installation and production-ready claims are deferred until Developer ID signing, notarization, and a real-device Feishu message E2E pass.
 
+`0.6.3 physical Mac bootstrap` acceptance: `bootstrap/install-macos-personal-environment.sh` can run repeatedly on Apple Silicon without overwriting existing configuration or skill paths, stores no credential, provisions `~/.codex` plus `~/Documents/Codex/codex-homes/codex-space-writing`, and records but does not create the six planned Bots. Provider keys and MCP key pools are transferred separately into permission-restricted local files. Git-backed writing Skills remain updateable through symlinks. Browser Control, Firecrawl, and Tavily must pass protocol and live checks. The current Windows-only Desktop Control must not be presented as available on macOS.
+
+The physical-Mac Bridge supervisor must not expose the long desktop data root as Lark CLI `HOME` because the resulting per-App event-bus Unix socket exceeds the macOS path limit. It creates or validates `~/.cfb-lark-profile` as a symlink to the unchanged `~/Library/Application Support/CodexFeishuBridgeDesktop/profile-home` directory and passes only that short alias to Bridge children. An occupied or incorrectly targeted alias is a startup error; the client must never replace it. Windows keeps its existing Profile Home contract.
+
+An unbound Codex Home remains read-only until the user explicitly selects `纳入客户端管理`. The backend accepts only a Home already present in discovery, requires an existing directory and parseable `config.toml`, and persists the decision in a permission-restricted registry outside the Home. A trusted Home can use official OpenAI login and whole-Home Provider switching without creating a Feishu Bot; Bot start/stop remains unavailable until a managed Bot is actually created and bound.
+
+The optional `--install-chrome` bootstrap mode downloads Google's current universal stable DMG from `dl.google.com`, requires bundle ID `com.google.Chrome`, strict code-signature verification, Gatekeeper acceptance, and an arm64 executable before and after installation. It never bypasses quarantine or browser security settings. Chrome's default search engine is selected by the user in Chrome settings because editing protected profile preferences or installing a machine policy would be disproportionate and could overwrite an existing profile.
+
+Browser Control on macOS is limited to its extension bridge until native application discovery accepts `.app` Chrome/Edge executables. The current direct-launch allowlist still requires `chrome.exe` or `msedge.exe`. Both Homes must share one permission-restricted extension token because the local extension bridge uses one loopback port; the unpacked extension requires one manual load in Chrome or Edge.
+
+The optional `--keep-awake` mode installs a user-owned `LaunchAgent` for `/usr/bin/caffeinate -dimsu`, refuses to overwrite an existing same-name plist, and is verified through both `launchctl` and the live process. It is reversible by booting out and removing that one plist. The UI must state that permanent display and system wake assertions materially increase battery use and energy consumption.
+
 ## 8. Verification strategy
 
 Every phase records:
@@ -443,3 +463,32 @@ The strongest practical verification must run before a phase is marked complete.
 8. An unsigned or unnotarized macOS bundle is blocked by Gatekeeper, or carries a helper binary for the wrong architecture.
 
 These risks are addressed with protocol versioning, active-run guards, transactional writes, runtime inspection, scope checks, license review, DPAPI secret storage, proxy health supervision, clean-VM testing, and signed artifacts.
+## 2026-07-18 - Reuse a pre-provisioned macOS Codex Home for the first space Bot
+
+- Treat an existing space Home as reusable only when it is already present in the desktop trusted-Home registry and contains `config.toml`.
+- In reuse mode, create only the Bot registration queue and per-Bot workspaces. Never rewrite the existing Home's `config.toml`, `AGENTS.md`, Skills, MCP configuration, or other contents.
+- Validate that the selected Provider is already defined in the reused Home before creating the queue.
+- Keep the existing new-space behavior unchanged when reuse mode is not selected.
+- For the Mac rollout, create three global Bots against `~/.codex` and three writing Bots against the existing `codex-space-writing`; each Feishu application still requires an explicit user QR confirmation.
+
+## 2026-07-18 - Physical Mac permission and capability audit
+
+- Treat Feishu application scopes, user OAuth scopes, developer-console event subscriptions, and Bridge runtime event consumers as four separate evidence layers. Never infer the developer-console subscription list from the runtime listener.
+- Show each managed Codex Home's existing MCP and Skill inventory when the user selects a target space. Preserve the global Home as the migration source and label an empty global Skill source explicitly.
+- Follow only valid directory symlinks when discovering Skills. Report both the configured Skill path and its resolved source path so Git-backed and local shared sources remain visible without copying them.
+- Keep the ordinary and writing Homes separate: ordinary Bots share `~/.codex`; writing Bots share `~/Documents/Codex/codex-homes/codex-space-writing`.
+
+## 2026-07-18 - Safe macOS in-app update path and capability wording
+
+- Permit `electron-updater` on packaged macOS only when the installed `.app` has a valid `Developer ID Application` signature and passes Gatekeeper execution assessment. Development, capture, smoke-test, ad-hoc, unsigned, and unnotarized builds remain disabled with a precise user-facing reason.
+- Reuse the existing active-run guard, online-Bot snapshot, transactional stop, recovery marker, rollback, and post-update Bot restoration for both Windows and macOS. macOS consumes the existing `latest-mac.yml` and ZIP release metadata; it must not bypass Gatekeeper or install source from `main`.
+- Configure release signing only through the complete GitHub Secret set `MAC_CSC_LINK`, `MAC_CSC_KEY_PASSWORD`, `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, and `APPLE_TEAM_ID`. A partial set fails the release job. No certificate, password, Apple credential, or key is stored in the repository.
+- Keep unsigned macOS builds available for development verification, but never label them auto-update capable. Production auto-update acceptance additionally requires an Apple Developer Program membership, a Developer ID Application certificate, successful notarization, and signed/notarized artifact checks in CI.
+- Label the MCP/Skills page as a migration tool: the left inventory is the global Home migration-source candidate set, while a selected target shows its independently installed MCP/Skill inventory and resolved source paths. An empty global Skill source must not imply the writing Home has no Skills.
+
+## 2026-07-18 - 0.7.0 signed stable-release gate
+
+- Version the accumulated trusted-Home, existing-space reuse, macOS Lark Profile, capability inventory, and guarded macOS updater work as desktop `0.7.0`.
+- A stable `v0.7.0` tag must fail closed unless all five Apple signing and notarization Secrets are configured. An unsigned macOS build remains suitable only for local verification and must never reach the stable update channel.
+- Commit and push the reviewed source independently of the distribution tag. Create the tag only after Apple Developer Program access, a Developer ID Application certificate, notarization credentials, and CI artifact verification are available.
+- Preserve the six physical-Mac Bot records, Profiles, workspaces, Codex Homes, and active processes; source publication does not replace the installed local overlay.

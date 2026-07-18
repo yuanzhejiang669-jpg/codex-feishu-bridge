@@ -82,6 +82,8 @@ function normalizeFactory(raw = {}, options = {}) {
   if (!NAME_PATTERN.test(codexHomeName)) throw new Error("Codex Home 目录名格式无效");
   const initializeAgents = raw.initializeAgents === true
     || new Set(["1", "true", "on", "yes"]).has(String(raw.initializeAgents || "").trim().toLowerCase());
+  const reuseExistingHome = raw.reuseExistingHome === true
+    || new Set(["1", "true", "on", "yes"]).has(String(raw.reuseExistingHome || "").trim().toLowerCase());
   const codexHome = path.resolve(options.codexHomeRoot, codexHomeName);
   const reasoning = normalizeReasoningEffort(raw.reasoning);
   const reasoningPlan = resolveReasoningSelection({ provider: providerId, model, effort: reasoning });
@@ -92,6 +94,7 @@ function normalizeFactory(raw = {}, options = {}) {
     brand: String(raw.brand || "feishu").trim().toLowerCase(),
     codexHome,
     initializeAgents,
+    reuseExistingHome,
     agentsSource: path.join(options.sourceCodexHome, "AGENTS.md"),
     agentsTarget: path.join(codexHome, "AGENTS.md"),
   };
@@ -125,16 +128,22 @@ function previewWorkspaceFactory(raw, options) {
       conflicts,
     });
   }
-  if (fs.existsSync(path.join(factory.codexHome, "config.toml"))) {
+  const configExists = fs.existsSync(path.join(factory.codexHome, "config.toml"));
+  const trustedHomes = new Set((options.trustedCodexHomes || []).map((item) => path.resolve(item).toLowerCase()));
+  const reusable = factory.reuseExistingHome && configExists
+    && trustedHomes.has(path.resolve(factory.codexHome).toLowerCase());
+  if (factory.reuseExistingHome && !reusable) {
+    bots.forEach((bot) => bot.conflicts.push("只能复用已纳入客户端管理且包含 config.toml 的 Codex Home"));
+  } else if (configExists && !reusable) {
     bots.forEach((bot) => bot.conflicts.push("空间 Codex Home 已存在"));
   }
-  if (factory.initializeAgents && !fs.existsSync(factory.agentsSource)) {
+  if (factory.initializeAgents && !fs.existsSync(factory.agentsSource) && !reusable) {
     bots.forEach((bot) => bot.conflicts.push("全局 AGENTS.md 不存在"));
   }
-  if (factory.initializeAgents && fs.existsSync(factory.agentsTarget)) {
+  if (factory.initializeAgents && fs.existsSync(factory.agentsTarget) && !reusable) {
     bots.forEach((bot) => bot.conflicts.push("目标 AGENTS.md 已存在"));
   }
-  return { factory, bots, available: bots.every((bot) => bot.conflicts.length === 0) };
+  return { factory: { ...factory, reusingExistingHome: reusable }, bots, available: bots.every((bot) => bot.conflicts.length === 0) };
 }
 
 function createWorkspaceFactoryQueue(raw, options) {
@@ -149,15 +158,23 @@ function createWorkspaceFactoryQueue(raw, options) {
   const queueFile = queuePath(options.dataRoot);
   const codexHomeExisted = fs.existsSync(preview.factory.codexHome);
   const agentsTargetExisted = fs.existsSync(preview.factory.agentsTarget);
+  const configExisted = fs.existsSync(configPath);
   try {
     fs.mkdirSync(preview.factory.codexHome, { recursive: true });
-    atomicWrite(configPath, `${TOML.stringify({
-      model: preview.factory.model,
-      model_provider: preview.factory.providerId,
-      model_reasoning_effort: preview.factory.reasoningPlan.effectiveEffort,
-      model_providers: { [preview.factory.providerId]: provider.definition },
-    }).trim()}\n`);
-    if (preview.factory.initializeAgents) {
+    if (preview.factory.reusingExistingHome) {
+      const existing = TOML.parse(fs.readFileSync(configPath, "utf8").replace(/^\uFEFF/, ""));
+      if (!existing.model_providers?.[preview.factory.providerId]) {
+        throw new Error(`现有空间未包含所选 Provider：${preview.factory.providerId}`);
+      }
+    } else {
+      atomicWrite(configPath, `${TOML.stringify({
+        model: preview.factory.model,
+        model_provider: preview.factory.providerId,
+        model_reasoning_effort: preview.factory.reasoningPlan.effectiveEffort,
+        model_providers: { [preview.factory.providerId]: provider.definition },
+      }).trim()}\n`);
+    }
+    if (preview.factory.initializeAgents && !preview.factory.reusingExistingHome) {
       if (!fs.existsSync(preview.factory.agentsSource)) throw new Error("全局 AGENTS.md 不存在，请取消迁移或先创建源文件");
       if (agentsTargetExisted) throw new Error("目标 AGENTS.md 已存在，已拒绝覆盖");
       atomicWrite(preview.factory.agentsTarget, fs.readFileSync(preview.factory.agentsSource, "utf8"));
@@ -191,7 +208,7 @@ function createWorkspaceFactoryQueue(raw, options) {
     return state;
   } catch (error) {
     fs.rmSync(queueFile, { force: true });
-    fs.rmSync(configPath, { force: true });
+    if (!configExisted) fs.rmSync(configPath, { force: true });
     if (!agentsTargetExisted) fs.rmSync(preview.factory.agentsTarget, { force: true });
     if (!codexHomeExisted) {
       try { if (fs.readdirSync(preview.factory.codexHome).length === 0) fs.rmdirSync(preview.factory.codexHome); } catch {}

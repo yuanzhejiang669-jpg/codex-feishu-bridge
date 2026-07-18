@@ -64,6 +64,8 @@ jobs:
 
   build-macos:
     runs-on: macos-15-intel
+    env:
+      HAS_MAC_SIGNING: ${{ secrets.MAC_CSC_LINK != '' && secrets.MAC_CSC_KEY_PASSWORD != '' && secrets.APPLE_ID != '' && secrets.APPLE_APP_SPECIFIC_PASSWORD != '' && secrets.APPLE_TEAM_ID != '' }}
     defaults:
       run:
         working-directory: apps/desktop
@@ -92,13 +94,66 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Validate macOS release credential set
+        shell: bash
+        env:
+          HAS_CERTIFICATE: ${{ secrets.MAC_CSC_LINK != '' }}
+          HAS_CERTIFICATE_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD != '' }}
+          HAS_APPLE_ID: ${{ secrets.APPLE_ID != '' }}
+          HAS_APP_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD != '' }}
+          HAS_TEAM_ID: ${{ secrets.APPLE_TEAM_ID != '' }}
+        run: |
+          set -euo pipefail
+          values=("$HAS_CERTIFICATE" "$HAS_CERTIFICATE_PASSWORD" "$HAS_APPLE_ID" "$HAS_APP_PASSWORD" "$HAS_TEAM_ID")
+          configured=0
+          for value in "${values[@]}"; do
+            [[ "$value" == "true" ]] && configured=$((configured + 1))
+          done
+          if [[ $configured -ne ${#values[@]} ]]; then
+            echo "Stable desktop releases require the complete macOS signing/notarization secret set" >&2
+            exit 1
+          fi
+
       - name: Test desktop client
         run: npm run check
 
       - name: Build and verify macOS releases
         env:
-          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+          CSC_IDENTITY_AUTO_DISCOVERY: ${{ env.HAS_MAC_SIGNING }}
+          CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: npm run dist:mac
+
+      - name: Verify signed and notarized macOS release
+        if: ${{ env.HAS_MAC_SIGNING == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          apps=()
+          while IFS= read -r app; do
+            apps+=("$app")
+          done < <(find out -type d -name 'Codex Feishu Bridge.app' -print)
+          if [[ ${#apps[@]} -lt 2 ]]; then
+            echo "Expected signed x64 and arm64 application bundles" >&2
+            exit 1
+          fi
+          for app in "${apps[@]}"; do
+            codesign --verify --deep --strict --verbose=2 "$app"
+            codesign -dv --verbose=4 "$app" 2>&1 | grep -q '^Authority=Developer ID Application:'
+            spctl --assess --type execute --verbose=2 "$app"
+            xcrun stapler validate "$app"
+          done
+          dmgs=(out/Codex-Feishu-Bridge-*-mac-*.dmg)
+          if [[ ${#dmgs[@]} -ne 2 ]]; then
+            echo "Expected notarized x64 and arm64 DMGs, found ${#dmgs[@]}" >&2
+            exit 1
+          fi
+          for dmg in "${dmgs[@]}"; do
+            xcrun stapler validate "$dmg"
+          done
 
       - name: Upload macOS assets
         uses: actions/upload-artifact@v4

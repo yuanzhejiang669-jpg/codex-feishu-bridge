@@ -10,16 +10,17 @@ Windows and macOS clients are built from this repository through GitHub Actions.
 4. Verify Windows `latest.yml`, NSIS assets, and checksums, plus macOS `latest-mac.yml`, DMG/ZIP assets, bundled tool architectures, and checksums.
 5. Commit and push the release source.
 6. Create and push the matching tag, for example `v0.2.0`.
-7. `.github/workflows/release-desktop.yml` builds on clean Windows and macOS runners; its publish job runs only after both pass.
-8. Verify the GitHub Release is public and contains Windows x64 plus macOS x64/arm64 assets and metadata.
-9. Fast-forward the old Windows device repository to the released source without overwriting unrelated local modifications, run the root checks, and restart only affected idle script-managed Bots.
-10. Restart affected idle script-managed Bots on the current device; never interrupt the Bot carrying the release task.
-11. Upgrade the installed desktop client from the verified stable Release and verify the installed version, persistent data, and managed-Bot recovery.
-12. Confirm the local repository, `origin/main`, old-device repository, stable Release, and installed client all match the intended release before reporting completion.
+7. Configure the complete macOS signing/notarization Secret set before tagging: `MAC_CSC_LINK`, `MAC_CSC_KEY_PASSWORD`, `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, and `APPLE_TEAM_ID`.
+8. `.github/workflows/release-desktop.yml` builds on clean Windows and macOS runners; the workflow fails before publishing unless all five macOS release Secrets are present and both platform jobs pass.
+9. Verify the GitHub Release is public and contains Windows x64 plus signed/notarized macOS x64/arm64 assets and update metadata. CI validates the Developer ID authority, Gatekeeper assessment, application notarization ticket, and both DMG notarization tickets before publication.
+10. Fast-forward the old Windows device repository to the released source without overwriting unrelated local modifications, run the root checks, and restart only affected idle script-managed Bots.
+11. Restart affected idle script-managed Bots on the current device; never interrupt the Bot carrying the release task.
+12. Upgrade the installed desktop client from the verified stable Release and verify the installed version, persistent data, and managed-Bot recovery.
+13. Confirm the local repository, `origin/main`, old-device repository, stable Release, and installed client all match the intended release before reporting completion.
 
 Windows keeps `Codex-Feishu-Bridge-Setup-<version>.exe`. macOS uses `Codex-Feishu-Bridge-<version>-mac-<arch>.dmg` and `.zip`.
 
-The Windows updater compares the packaged application version with the latest stable GitHub Release. Unsigned macOS builds require manual replacement until signing and notarization are configured. Neither platform installs source from `main`.
+Both updaters compare the packaged application version with the latest stable GitHub Release. Stable tags require a signed and notarized macOS build; unsigned macOS builds are local development artifacts and must not be published as stable updates. Neither platform installs source from `main`.
 The build command always passes `--publish never`; only the final workflow step may create or upload a Release, preventing electron-builder's tag-triggered implicit publishing from producing partial assets.
 
 ## Runtime safety

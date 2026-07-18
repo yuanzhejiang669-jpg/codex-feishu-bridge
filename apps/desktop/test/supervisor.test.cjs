@@ -8,6 +8,7 @@ const {
   managedBotStartArguments,
   managedRuntimeRoot,
   processEnvironment,
+  resolveLarkProfileHome,
   setManagedBotAutoStart,
   startManagedBot,
   stopManagedBot,
@@ -137,6 +138,51 @@ test("builds a child environment with exact bundled tools and isolated profile h
   assert.equal(env.PATH.split(path.delimiter)[0], clientRoot);
 });
 
+test("uses a short symlinked Lark Profile home on macOS for Unix socket compatibility", {
+  skip: process.platform !== "darwin",
+}, () => {
+  const value = fixture();
+  const alias = path.join(value.root, ".cfb-lark-profile");
+  try {
+    const resolved = resolveLarkProfileHome({
+      dataRoot: value.dataRoot,
+      platform: "darwin",
+      larkProfileHome: alias,
+    });
+    assert.equal(resolved, alias);
+    assert.equal(fs.lstatSync(alias).isSymbolicLink(), true);
+    assert.equal(fs.realpathSync(alias), fs.realpathSync(path.join(value.dataRoot, "profile-home")));
+    const env = processEnvironment({
+      dataRoot: value.dataRoot,
+      localAppData: value.localAppData,
+      nodePath: path.join(value.root, "node"),
+      larkCliPath: path.join(value.root, "lark-cli"),
+      platform: "darwin",
+      larkProfileHome: alias,
+    });
+    assert.equal(env.HOME, alias);
+    assert.equal(env.USERPROFILE, alias);
+  } finally {
+    fs.rmSync(value.root, { recursive: true, force: true });
+  }
+});
+
+test("refuses to replace an occupied macOS Lark Profile alias", () => {
+  const value = fixture();
+  const alias = path.join(value.root, ".cfb-lark-profile");
+  try {
+    fs.writeFileSync(alias, "occupied", "utf8");
+    assert.throws(() => resolveLarkProfileHome({
+      dataRoot: value.dataRoot,
+      platform: "darwin",
+      larkProfileHome: alias,
+    }), /短路径已被其他文件占用/);
+    assert.equal(fs.readFileSync(alias, "utf8"), "occupied");
+  } finally {
+    fs.rmSync(value.root, { recursive: true, force: true });
+  }
+});
+
 test("injects a DPAPI-backed Provider key only into the managed Bot child environment", () => {
   const value = fixture();
   try {
@@ -189,7 +235,8 @@ test("starts and stops through the direct macOS launcher contract", async () => 
       codexPath: process.execPath,
       defaultCodexHome: path.join(value.root, "codex-home"),
       codexAvailable: true,
-      platform: "darwin",
+      platform: process.platform === "win32" ? "linux" : "darwin",
+      larkProfileHome: path.join(value.root, ".cfb-lark-profile"),
     };
     const started = await startManagedBot("assistant-1", options);
     assert.equal(started.online, true);
