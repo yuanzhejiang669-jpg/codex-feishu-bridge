@@ -69,4 +69,25 @@ function createCredentialStore(options) {
   return { credentialPath, hydrate, read, root, set };
 }
 
-module.exports = { createCredentialStore };
+async function waitForCredentialStoreHydration(options) {
+  const attempts = Math.max(1, Number(options.attempts || 1));
+  const delayMs = Math.max(0, Number(options.delayMs || 0));
+  const wait = options.wait || ((duration) => new Promise((resolve) => setTimeout(resolve, duration)));
+  let store = null;
+  let hydration = { loaded: [], failed: [] };
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    if (options.isAvailable()) {
+      store ||= options.createStore();
+      hydration = store.hydrate();
+      if (!hydration.failed.length) {
+        return { attempt, hydration, ready: true, store };
+      }
+    }
+    if (attempt < attempts) await wait(delayMs);
+  }
+
+  return { attempt: attempts, hydration, ready: false, store };
+}
+
+module.exports = { createCredentialStore, waitForCredentialStoreHydration };

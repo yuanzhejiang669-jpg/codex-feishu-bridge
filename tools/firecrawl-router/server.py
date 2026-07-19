@@ -5,12 +5,22 @@ import os
 import re
 import shutil
 import subprocess
+import sys
+import tempfile
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+
+
+TOOLS_ROOT = Path(__file__).resolve().parents[1]
+if str(TOOLS_ROOT) not in sys.path:
+    sys.path.insert(0, str(TOOLS_ROOT))
+
+from router_file_lock import interprocess_file_lock
 
 
 MCP_DATA_ROOT = Path.home() / "Documents" / "Codex" / "mcp-data"
@@ -21,6 +31,7 @@ POOL_PATH = Path(os.environ.get("FIRECRAWL_KEY_POOL_PATH", str(DEFAULT_POOL_PATH
 STATE_PATH = Path(os.environ.get("FIRECRAWL_ROUTER_STATE_PATH", str(DEFAULT_STATE_PATH)))
 
 mcp = FastMCP("firecrawl-router")
+STATE_LOCK = threading.RLock()
 
 
 def read_json(path: Path, fallback: Any) -> Any:
@@ -32,7 +43,13 @@ def read_json(path: Path, fallback: Any) -> Any:
 
 def write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False,
+                                     dir=path.parent, suffix=".tmp") as tmp:
+        json.dump(data, tmp, ensure_ascii=False, indent=2)
+        tmp.flush()
+        os.fsync(tmp.fileno())
+        temp_name = tmp.name
+    os.replace(temp_name, path)
 
 
 def now() -> float:
@@ -61,7 +78,21 @@ def load_state() -> dict[str, Any]:
 
 
 def save_state(state: dict[str, Any]) -> None:
-    write_json(STATE_PATH, state)
+    with STATE_LOCK, interprocess_file_lock(STATE_PATH):
+        write_json(STATE_PATH, state)
+
+
+def state_snapshot() -> dict[str, Any]:
+    with STATE_LOCK, interprocess_file_lock(STATE_PATH):
+        return load_state()
+
+
+def mutate_state(mutate: Any) -> Any:
+    with STATE_LOCK, interprocess_file_lock(STATE_PATH):
+        state = load_state()
+        result = mutate(state)
+        write_json(STATE_PATH, state)
+        return result
 
 
 def key_records() -> list[dict[str, Any]]:
@@ -72,6 +103,8 @@ def key_records() -> list[dict[str, Any]]:
         api_key = str(item.get("api_key") or "").strip()
         if api_key:
             result.append({"index": index, "alias": str(item.get("alias") or f"key-{index + 1}"), "api_key": api_key})
+    for position, record in enumerate(result):
+        record["position"] = position
     return result
 
 
@@ -172,10 +205,16 @@ def query_credit_usage(record: dict[str, Any], timeout: int = 20) -> dict[str, A
     }
 
 
-def cooldown_until(category: str, record: dict[str, Any]) -> tuple[float, dict[str, Any] | None]:
+def retry_after_seconds(detail: str) -> int | None:
+    match = re.search(r"(?i)retry-after\s*[:=]\s*(\d+)", detail or "")
+    return int(match.group(1)) if match else None
+
+
+def cooldown_until(category: str, record: dict[str, Any], detail: str = "") -> tuple[float, dict[str, Any] | None]:
     current = now()
     if category == "rate_limit":
-        return current + policy_seconds("rate_limit_cooldown_seconds", 180), None
+        seconds = retry_after_seconds(detail)
+        return current + (seconds if seconds is not None else policy_seconds("rate_limit_cooldown_seconds", 180)), None
     if category == "transient":
         return current + policy_seconds("transient_error_cooldown_seconds", 30), None
     if category == "credits_exhausted":
@@ -183,7 +222,9 @@ def cooldown_until(category: str, record: dict[str, Any]) -> tuple[float, dict[s
         period_end = parse_timestamp(usage.get("billingPeriodEnd")) if usage.get("ok") else None
         if period_end and period_end > current:
             return period_end + 60, usage
-        return current + policy_seconds("credits_error_fallback_cooldown_seconds", 21600), usage
+        fallback = policy_seconds("credits_error_fallback_cooldown_seconds",
+                                  policy_seconds("quota_error_cooldown_seconds", 21600))
+        return current + fallback, usage
     if category in {"auth", "payment"}:
         return current + policy_seconds(f"{category}_error_cooldown_seconds", 86400), None
     return current, None
@@ -201,38 +242,63 @@ def eligible_keys(state: dict[str, Any]) -> tuple[list[dict[str, Any]], float | 
 
 
 def run_firecrawl(args: list[str], timeout: int = 120) -> dict[str, Any]:
+    return _run_firecrawl_locked(args, timeout=timeout)
+
+
+def _run_firecrawl_locked(args: list[str], timeout: int = 120) -> dict[str, Any]:
     executable = shutil.which("firecrawl")
     if not executable:
         raise RuntimeError("firecrawl CLI not found. Install with: npm install -g firecrawl-cli")
-    state = load_state()
-    keys, next_retry_at = eligible_keys(state)
-    if not keys:
+    records = key_records()
+    def reserve_order(state: dict[str, Any]) -> tuple[list[dict[str, Any]], float | None]:
+        keys, next_retry_at = eligible_keys(state)
+        if not keys:
+            return [], next_retry_at
+        start_index = int(state.get("cursor", 0) or 0) % len(records)
+        full_order = records[start_index:] + records[:start_index]
+        eligible_aliases = {record["alias"] for record in keys}
+        ordered = [record for record in full_order if record["alias"] in eligible_aliases]
+        if ordered:
+            state["cursor"] = (int(ordered[0]["position"]) + 1) % max(1, len(records))
+        return ordered, next_retry_at
+    ordered, next_retry_at = mutate_state(reserve_order)
+    if not ordered:
         return {"ok": False, "used_key_alias": "", "attempts": [], "stdout": "", "stderr": "All keys are cooling down", "next_retry_at": next_retry_at}
-    start_index = int(state.get("cursor", 0) or 0) % len(keys)
-    ordered = keys[start_index:] + keys[:start_index]
     attempts: list[dict[str, Any]] = []
     for offset, record in enumerate(ordered):
-        completed = subprocess.run(
-            [executable, *args, "--api-key", record["api_key"]], text=True, encoding="utf-8",
-            errors="replace", stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, check=False,
-        )
-        stdout, stderr = completed.stdout or "", completed.stderr or ""
-        category = classify_error(stderr + "\n" + stdout, completed.returncode)
-        attempt = {"alias": record["alias"], "exitCode": completed.returncode, "reason": category, "stderrTail": sanitize(stderr)}
+        try:
+            completed = subprocess.run(
+                [executable, *args, "--api-key", record["api_key"]], text=True, encoding="utf-8",
+                errors="replace", stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, check=False,
+            )
+            stdout, stderr, exit_code = completed.stdout or "", completed.stderr or "", completed.returncode
+            category = classify_error(stderr + "\n" + stdout, exit_code)
+        except subprocess.TimeoutExpired as exc:
+            stdout = exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+            stderr = exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+            stderr = f"{stderr}\nfirecrawl CLI timed out after {timeout} seconds".strip()
+            exit_code, category = -1, "transient"
+        except OSError as exc:
+            stdout, stderr, exit_code, category = "", str(exc), -1, "transient"
+        attempt = {"alias": record["alias"], "exitCode": exit_code, "reason": category, "stderrTail": sanitize(stderr)}
         attempts.append(attempt)
-        key_state = state.setdefault("keys", {}).setdefault(record["alias"], {})
-        key_state.update({"last_used_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "last_exit_code": completed.returncode, "last_reason": category, "last_error_tail": sanitize(stderr)})
-        if completed.returncode == 0:
-            key_state["cooldown_until"] = 0
-            key_state.pop("credit_status", None)
-            state["cursor"] = (start_index + offset + 1) % max(1, len(keys))
-            save_state(state)
+        def record_attempt(state: dict[str, Any]) -> None:
+            key_state = state.setdefault("keys", {}).setdefault(record["alias"], {})
+            key_state.update({"last_used_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "last_exit_code": exit_code, "last_reason": category, "last_error_tail": sanitize(stderr)})
+            if exit_code == 0:
+                key_state["cooldown_until"] = 0
+                key_state.pop("credit_status", None)
+                state["cursor"] = (int(record["position"]) + 1) % max(1, len(records))
+                return
+            key_state["cooldown_until"], usage = cooldown_until(category, record, stderr + "\n" + stdout)
+            if usage is not None:
+                key_state["credit_status"] = usage
+        mutate_state(record_attempt)
+        if exit_code == 0:
             return {"ok": True, "used_key_alias": record["alias"], "attempts": attempts, "stdout": stdout, "stderr": sanitize(stderr), "next_retry_at": None}
-        key_state["cooldown_until"], usage = cooldown_until(category, record)
-        if usage is not None:
-            key_state["credit_status"] = usage
-        save_state(state)
-    return {"ok": False, "used_key_alias": "", "attempts": attempts, "stdout": "", "stderr": attempts[-1]["stderrTail"] if attempts else "", "next_retry_at": min(float(state["keys"][r["alias"]]["cooldown_until"]) for r in ordered)}
+    final_state = state_snapshot()
+    next_retry = min(float(final_state.get("keys", {}).get(r["alias"], {}).get("cooldown_until", 0) or 0) for r in ordered)
+    return {"ok": False, "used_key_alias": "", "attempts": attempts, "stdout": "", "stderr": attempts[-1]["stderrTail"] if attempts else "", "next_retry_at": next_retry}
 
 
 def parse_output(text: str) -> Any:
@@ -281,7 +347,7 @@ def firecrawl_map(url: str, limit: int = 20, search: str = "", include_subdomain
 
 @mcp.tool()
 def firecrawl_pool_status() -> dict[str, Any]:
-    state, records, current = load_state(), key_records(), now()
+    state, records, current = state_snapshot(), key_records(), now()
     keys = []
     for record in records:
         key_state = state.get("keys", {}).get(record["alias"], {})

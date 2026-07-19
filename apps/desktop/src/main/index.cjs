@@ -12,6 +12,8 @@ const { registerBotWithQr } = require("./services/feishu-registration.cjs");
 const { authorizeLarkUser } = require("./services/lark-user-auth.cjs");
 const {
   inspectManagedBots,
+  waitForMacosProviderEnvironment,
+  restartOnlineManagedBots,
   setManagedBotAutoStart,
   startManagedBot,
   stopManagedBot,
@@ -22,7 +24,7 @@ const { permissionImportJson, publicPermissionPolicy } = require("./services/per
 const { createRecoverySupervisor } = require("./services/recovery-supervisor.cjs");
 const { readDesktopSettings, writeDesktopSettings } = require("./services/desktop-settings.cjs");
 const { createDesktopStartup } = require("./services/windows-startup.cjs");
-const { createCredentialStore } = require("./services/credential-store.cjs");
+const { createCredentialStore, waitForCredentialStoreHydration } = require("./services/credential-store.cjs");
 const { applyCapabilityMigration, previewCapabilityMigration } = require("./services/capability-migration.cjs");
 const { inspectProvider, testProvider } = require("./services/provider-setup.cjs");
 const { reasoningRegistry } = require("./services/reasoning-effort.cjs");
@@ -98,6 +100,56 @@ let proxyStoppedForQuit = false;
 let desktopSettings = { launchAtLogin: false, closeToTray: true, error: "" };
 const desktopStartup = createDesktopStartup(app);
 let providerCredentialStore = null;
+let batchRestartInFlight = false;
+
+async function initializeMacProviderCredentialStore() {
+  if (process.platform !== "darwin") return;
+  const credentialRoot = path.join(managedDataRoot(), "provider-credentials");
+  providerCredentialStore = createCredentialStore({
+    root: credentialRoot,
+    encrypt: (value) => safeStorage.encryptString(value),
+    decrypt: (value) => safeStorage.decryptString(value),
+  });
+  let hasStoredCredentials = false;
+  try {
+    hasStoredCredentials = fs.readdirSync(credentialRoot).some((name) => name.endsWith(".bin"));
+  } catch {}
+  if (!hasStoredCredentials) return;
+
+  const result = await waitForCredentialStoreHydration({
+    attempts: 61,
+    delayMs: 1_000,
+    isAvailable: () => safeStorage.isEncryptionAvailable(),
+    createStore: () => providerCredentialStore,
+  });
+  if (!result.ready) {
+    const failedNames = result.hydration.failed.map((item) => item.name).filter(Boolean);
+    console.warn("macOS Provider credentials were not ready before startup timeout", {
+      attempts: result.attempt,
+      failedNames,
+    });
+  }
+
+}
+
+async function initializeMacProviderEnvironment() {
+  if (process.platform !== "darwin") return;
+  const result = await waitForMacosProviderEnvironment(
+    path.join(app.getPath("home"), ".codex"),
+    {
+      attempts: backgroundStart ? 61 : 1,
+      delayMs: 1_000,
+      environment: process.env,
+      platform: process.platform,
+    },
+  );
+  if (!result.ready) {
+    console.warn("macOS Provider environment was not ready before startup timeout", {
+      attempts: result.attempt,
+      missingNames: result.missingNames,
+    });
+  }
+}
 
 function assertStartupReady() {
   if (startupError) throw new Error(`客户端数据初始化失败：${startupError}`);
@@ -494,14 +546,10 @@ if (!singleInstance) {
         migrateDesktopData(managedDataRoot(), { appVersion: app.getVersion() });
         desktopSettings = readDesktopSettings(managedDataRoot());
         if (desktopSettings.error) throw new Error(`客户端设置损坏：${desktopSettings.error}`);
-        if (process.platform === "darwin" && safeStorage.isEncryptionAvailable()) {
-          providerCredentialStore = createCredentialStore({
-            root: path.join(managedDataRoot(), "provider-credentials"),
-            encrypt: (value) => safeStorage.encryptString(value),
-            decrypt: (value) => safeStorage.decryptString(value),
-          });
-          providerCredentialStore.hydrate();
-        }
+        await Promise.all([
+          initializeMacProviderCredentialStore(),
+          initializeMacProviderEnvironment(),
+        ]);
         if (desktopSettings.launchAtLogin && desktopStartup.supported()) desktopStartup.setEnabled(true);
       } catch (error) {
         startupError = error.message || String(error);
@@ -684,6 +732,25 @@ if (!singleInstance) {
       const result = await stopManagedBotAndDisableAutoStart(String(name || ""), supervisorOptions());
       await loadState();
       return result;
+    });
+    ipcMain.handle("desktop:restart-online-bots", async (event) => {
+      assertStartupReady();
+      if (batchRestartInFlight) throw new Error("批量重启正在进行，请等待当前操作完成");
+      batchRestartInFlight = true;
+      recoverySupervisor?.stop();
+      try {
+        const result = await restartOnlineManagedBots({
+          ...supervisorOptions(),
+          onProgress: (progress) => {
+            if (!event.sender.isDestroyed()) event.sender.send("desktop:bot-restart-progress", progress);
+          },
+        });
+        await loadState();
+        return result;
+      } finally {
+        batchRestartInFlight = false;
+        recoverySupervisor?.start();
+      }
     });
     ipcMain.handle("desktop:set-bot-autostart", async (_event, input) => {
       assertStartupReady();

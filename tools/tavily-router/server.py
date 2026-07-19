@@ -21,7 +21,7 @@ def tavily_search(
 ) -> dict[str, Any]:
     result = router.search(
         query=query,
-        search_depth='advanced',
+        search_depth=search_depth,
         max_results=max_results,
         include_answer=include_answer,
         include_raw_content=include_raw_content,
@@ -32,6 +32,11 @@ def tavily_search(
         'used_key_alias': result['used_key_alias'],
         'attempts': result['attempts'],
     }
+
+
+@mcp.tool()
+def tavily_pool_status(refresh: bool = False, refresh_limit: int = 10) -> dict[str, Any]:
+    return router.pool_status(refresh=refresh, refresh_limit=refresh_limit)
 
 
 if __name__ == '__main__':

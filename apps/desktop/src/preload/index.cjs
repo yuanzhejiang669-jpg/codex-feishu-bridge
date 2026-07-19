@@ -28,6 +28,7 @@ contextBridge.exposeInMainWorld("bridgeDesktop", Object.freeze({
   applyModelSourceSwitch: (value) => ipcRenderer.invoke("desktop:apply-model-source-switch", value),
   startBot: (name) => ipcRenderer.invoke("desktop:start-bot", name),
   stopBot: (name) => ipcRenderer.invoke("desktop:stop-bot", name),
+  restartOnlineBots: () => ipcRenderer.invoke("desktop:restart-online-bots"),
   setBotAutoStart: (value) => ipcRenderer.invoke("desktop:set-bot-autostart", value),
   previewManagedRemoval: (value) => ipcRenderer.invoke("desktop:preview-managed-removal", value),
   applyManagedRemoval: (value) => ipcRenderer.invoke("desktop:apply-managed-removal", value),
@@ -47,6 +48,11 @@ contextBridge.exposeInMainWorld("bridgeDesktop", Object.freeze({
     const listener = (_event, value) => callback(value);
     ipcRenderer.on("desktop:factory-registration-progress", listener);
     return () => ipcRenderer.removeListener("desktop:factory-registration-progress", listener);
+  },
+  onBotRestartProgress: (callback) => {
+    const listener = (_event, value) => callback(value);
+    ipcRenderer.on("desktop:bot-restart-progress", listener);
+    return () => ipcRenderer.removeListener("desktop:bot-restart-progress", listener);
   },
   onUpdateState: (callback) => {
     const listener = (_event, value) => callback(value);

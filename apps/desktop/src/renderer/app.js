@@ -29,6 +29,8 @@ const elements = {
   clearAllSkills: document.querySelector("#clear-all-skills"),
   setupMode: document.querySelector("#setup-mode"),
   createBot: document.querySelector("#create-bot-button"),
+  restartOnlineBots: document.querySelector("#restart-online-bots-button"),
+  botRestartStatus: document.querySelector("#bot-restart-status"),
   botDialog: document.querySelector("#bot-dialog"),
   botForm: document.querySelector("#bot-form"),
   botFormMode: document.querySelector("#bot-form-mode"),
@@ -1365,6 +1367,26 @@ elements.createBot.addEventListener("click", () => {
   elements.botDialog.showModal();
   document.querySelector("#bot-name").focus();
 });
+elements.restartOnlineBots.addEventListener("click", async () => {
+  elements.restartOnlineBots.disabled = true;
+  elements.error.classList.add("hidden");
+  elements.botRestartStatus.textContent = "正在准备批量重启";
+  try {
+    const result = await window.bridgeDesktop.restartOnlineBots();
+    const parts = [`已重启 ${result.restarted.length}/${result.targetCount}`];
+    if (result.skippedActive.length) parts.push(`跳过 ${result.skippedActive.length} 个活动 Bot`);
+    if (result.failed.length) parts.push(`${result.failed.length} 个失败`);
+    if (!result.onlineCount) parts.splice(0, parts.length, "当前没有在线 Bot");
+    elements.botRestartStatus.textContent = parts.join(" · ");
+    await refresh();
+  } catch (error) {
+    elements.error.textContent = error.message || String(error);
+    elements.error.classList.remove("hidden");
+    elements.botRestartStatus.textContent = "批量重启失败";
+  } finally {
+    elements.restartOnlineBots.disabled = false;
+  }
+});
 elements.createWorkspaceFactory.addEventListener("click", () => {
   elements.workspaceFactoryEditor.classList.toggle("hidden");
   if (!elements.workspaceFactoryEditor.classList.contains("hidden")) {
@@ -1595,6 +1617,16 @@ window.bridgeDesktop.onFactoryRegistrationProgress((progress) => {
     elements.workspaceFactoryQrImage.src = progress.qrDataUrl;
     elements.workspaceFactoryQrImage.classList.remove("hidden");
   }
+});
+window.bridgeDesktop.onBotRestartProgress((progress) => {
+  if (progress.stage === "ready" && progress.total === 0) {
+    elements.botRestartStatus.textContent = progress.skippedActive?.length
+      ? `跳过 ${progress.skippedActive.length} 个活动 Bot`
+      : "当前没有可重启的在线 Bot";
+    return;
+  }
+  const label = ({ stopping: "正在停止", starting: "正在启动", restarted: "已重启", failed: "重启失败" })[progress.stage];
+  if (label) elements.botRestartStatus.textContent = `${label} ${progress.name} · ${progress.completed}/${progress.total}`;
 });
 window.bridgeDesktop.onUpdateState((update) => {
   if (state) state.update = update;

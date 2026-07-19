@@ -9,6 +9,8 @@ const {
   managedBotStartArguments,
   managedRuntimeRoot,
   processEnvironment,
+  restartOnlineManagedBots,
+  waitForMacosProviderEnvironment,
   resolveLarkProfileHome,
   setManagedBotAutoStart,
   startManagedBot,
@@ -118,6 +120,65 @@ test("failed manual stop restores the previous auto-start setting", async () => 
   } finally {
     fs.rmSync(value.root, { recursive: true, force: true });
   }
+});
+
+test("restarts online idle Bots sequentially and skips active Bots", async () => {
+  const calls = [];
+  const progress = [];
+  const result = await restartOnlineManagedBots({
+    inspectBots: () => [
+      { name: "assistant-1", online: true, activeRunCount: 0 },
+      { name: "assistant-2", online: true, activeRunCount: 1 },
+      { name: "assistant-3", online: false, activeRunCount: 0 },
+      { name: "assistant-4", online: true, activeRunCount: 0 },
+    ],
+    stopBot: async (name) => { calls.push(`stop:${name}`); },
+    startBot: async (name) => { calls.push(`start:${name}`); },
+    onProgress: (value) => progress.push(value),
+  });
+
+  assert.deepEqual(calls, [
+    "stop:assistant-1",
+    "start:assistant-1",
+    "stop:assistant-4",
+    "start:assistant-4",
+  ]);
+  assert.deepEqual(result.restarted, ["assistant-1", "assistant-4"]);
+  assert.deepEqual(result.skippedActive, [{ name: "assistant-2", activeRunCount: 1 }]);
+  assert.deepEqual(result.failed, []);
+  assert.equal(progress.at(-1).stage, "restarted");
+});
+
+test("continues a batch restart after one Bot fails", async () => {
+  const calls = [];
+  const result = await restartOnlineManagedBots({
+    inspectBots: () => [
+      { name: "assistant-1", online: true, activeRunCount: 0 },
+      { name: "assistant-2", online: true, activeRunCount: 0 },
+    ],
+    stopBot: async (name) => {
+      calls.push(`stop:${name}`);
+      if (name === "assistant-1") throw new Error("stop failed");
+    },
+    startBot: async (name) => { calls.push(`start:${name}`); },
+  });
+
+  assert.deepEqual(calls, ["stop:assistant-1", "stop:assistant-2", "start:assistant-2"]);
+  assert.deepEqual(result.restarted, ["assistant-2"]);
+  assert.deepEqual(result.failed, [{ name: "assistant-1", error: "stop failed" }]);
+});
+
+test("does not start a Bot when a task becomes active during batch restart", async () => {
+  let started = false;
+  const result = await restartOnlineManagedBots({
+    inspectBots: () => [{ name: "assistant-1", online: true, activeRunCount: 0 }],
+    stopBot: async () => { throw new Error("Bot 仍有 1 个活动任务，已拒绝停止"); },
+    startBot: async () => { started = true; },
+  });
+
+  assert.equal(started, false);
+  assert.deepEqual(result.restarted, []);
+  assert.match(result.failed[0].error, /活动任务/);
 });
 
 test("builds a child environment with exact bundled tools and isolated profile home", () => {
@@ -238,6 +299,62 @@ test("does not replace a custom Provider key with launchctl state", () => {
   });
   assert.deepEqual(environment, {});
   assert.equal(queried, false);
+});
+
+test("waits for the macOS login Provider environment before desktop recovery", async () => {
+  const environment = {};
+  let launchctlReads = 0;
+  let kickstarts = 0;
+  const waits = [];
+  const result = await waitForMacosProviderEnvironment("/Users/example/.codex", {
+    platform: "darwin",
+    attempts: 3,
+    delayMs: 500,
+    environment,
+    inspectProviderCatalog: () => ({
+      error: "",
+      providers: [
+        { id: "lthome", envKey: "LTHOME_API_KEY" },
+        { id: "sub2api", envKey: "SUB2API_API_KEY" },
+      ],
+    }),
+    prepareProviderEnvironment: () => { kickstarts += 1; },
+    readLaunchctlEnvironmentVariable: (name) => {
+      launchctlReads += 1;
+      if (launchctlReads <= 2) return "";
+      return `${name.toLowerCase()}-secret`;
+    },
+    wait: async (duration) => { waits.push(duration); },
+  });
+
+  assert.equal(result.ready, true);
+  assert.equal(result.attempt, 2);
+  assert.deepEqual(result.missingNames, []);
+  assert.deepEqual(result.loadedNames, ["LTHOME_API_KEY", "SUB2API_API_KEY"]);
+  assert.equal(environment.LTHOME_API_KEY, "lthome_api_key-secret");
+  assert.equal(environment.SUB2API_API_KEY, "sub2api_api_key-secret");
+  assert.equal(kickstarts, 1);
+  assert.deepEqual(waits, [500]);
+});
+
+test("bounds macOS login Provider environment retries", async () => {
+  const result = await waitForMacosProviderEnvironment("/Users/example/.codex", {
+    platform: "darwin",
+    attempts: 2,
+    delayMs: 1,
+    environment: {},
+    inspectProviderCatalog: () => ({
+      error: "",
+      providers: [{ id: "lthome", envKey: "LTHOME_API_KEY" }],
+    }),
+    readLaunchctlEnvironmentVariable: () => "",
+    wait: async () => {},
+  });
+
+  assert.equal(result.ready, false);
+  assert.equal(result.attempt, 2);
+  assert.deepEqual(result.loadedNames, []);
+  assert.deepEqual(result.missingNames, ["LTHOME_API_KEY"]);
 });
 
 test("starts and stops through the direct macOS launcher contract", async () => {

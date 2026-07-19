@@ -112,11 +112,12 @@ function macosProviderEnvironment(codexHome, bot, options = {}) {
     ["getenv", name],
     { encoding: "utf8", timeout: 5_000, maxBuffer: 64 * 1024 },
   ));
+  const inheritedEnvironment = options.environment || process.env;
   const environment = {};
   for (const provider of catalog.providers || []) {
     const envKey = String(provider.envKey || "").trim();
     if (!ENV_NAME.test(envKey) || environment[envKey]) continue;
-    const inherited = String(process.env[envKey] || "");
+    const inherited = String(inheritedEnvironment[envKey] || "");
     let value = inherited;
     if (!value) {
       try { value = String(readLaunchctl(envKey) || "").trim(); } catch { value = ""; }
@@ -124,6 +125,55 @@ function macosProviderEnvironment(codexHome, bot, options = {}) {
     if (value) environment[envKey] = value;
   }
   return environment;
+}
+
+async function waitForMacosProviderEnvironment(codexHome, options = {}) {
+  if ((options.platform || process.platform) !== "darwin") {
+    return { attempt: 0, expectedNames: [], loadedNames: [], missingNames: [], ready: true };
+  }
+  const inspect = options.inspectProviderCatalog || inspectProviderCatalog;
+  const catalog = inspect(codexHome, {});
+  if (catalog.error) throw new Error(catalog.error);
+  const expectedNames = [...new Set((catalog.providers || [])
+    .map((provider) => String(provider.envKey || "").trim())
+    .filter((name) => ENV_NAME.test(name)))];
+  if (!expectedNames.length) {
+    return { attempt: 0, expectedNames, loadedNames: [], missingNames: [], ready: true };
+  }
+
+  const prepare = options.prepareProviderEnvironment || (() => {
+    const scriptPath = path.join(os.homedir(), ".config", "codex-feishu-bridge", "load-provider-env.sh");
+    if (fs.existsSync(scriptPath)) {
+      return execFileSync(scriptPath, [], { encoding: "utf8", timeout: 5_000, maxBuffer: 64 * 1024 });
+    }
+    return execFileSync(
+      "/bin/launchctl",
+      ["kickstart", `gui/${process.getuid()}/com.codex-feishu-bridge.provider-env`],
+      { encoding: "utf8", timeout: 5_000, maxBuffer: 64 * 1024 },
+    );
+  });
+  try { await Promise.resolve(prepare()); } catch {}
+
+  const attempts = Math.max(1, Number(options.attempts || 1));
+  const delayMs = Math.max(0, Number(options.delayMs || 0));
+  const wait = options.wait || ((duration) => new Promise((resolve) => setTimeout(resolve, duration)));
+  const environment = options.environment || process.env;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    Object.assign(environment, macosProviderEnvironment(codexHome, null, {
+      ...options,
+      environment,
+      inspectProviderCatalog: () => catalog,
+    }));
+    const missingNames = expectedNames.filter((name) => !environment[name]);
+    if (!missingNames.length) {
+      return { attempt, expectedNames, loadedNames: [...expectedNames], missingNames, ready: true };
+    }
+    if (attempt < attempts) await wait(delayMs);
+  }
+
+  const loadedNames = expectedNames.filter((name) => Boolean(environment[name]));
+  const missingNames = expectedNames.filter((name) => !environment[name]);
+  return { attempt: attempts, expectedNames, loadedNames, missingNames, ready: false };
 }
 
 function writeJsonAtomic(destination, value) {
@@ -330,16 +380,61 @@ async function stopManagedBotAndDisableAutoStart(name, options) {
   }
 }
 
+async function restartOnlineManagedBots(options) {
+  const inspectBots = options.inspectBots || (() => inspectManagedBots(options.dataRoot, options.localAppData));
+  const stopBot = options.stopBot || ((name) => stopManagedBot(name, options));
+  const startBot = options.startBot || ((name) => startManagedBot(name, options));
+  const onProgress = options.onProgress || (() => {});
+  const onlineBots = (await Promise.resolve(inspectBots())).filter((bot) => bot.online);
+  const skippedActive = onlineBots
+    .filter((bot) => Number(bot.activeRunCount || 0) > 0)
+    .map((bot) => ({ name: bot.name, activeRunCount: Number(bot.activeRunCount || 0) }));
+  const targets = onlineBots.filter((bot) => Number(bot.activeRunCount || 0) === 0);
+  const restarted = [];
+  const failed = [];
+
+  onProgress({
+    stage: "ready",
+    completed: 0,
+    total: targets.length,
+    skippedActive,
+  });
+  for (let index = 0; index < targets.length; index += 1) {
+    const bot = targets[index];
+    try {
+      onProgress({ stage: "stopping", name: bot.name, completed: index, total: targets.length });
+      await stopBot(bot.name);
+      onProgress({ stage: "starting", name: bot.name, completed: index, total: targets.length });
+      await startBot(bot.name);
+      restarted.push(bot.name);
+      onProgress({ stage: "restarted", name: bot.name, completed: index + 1, total: targets.length });
+    } catch (error) {
+      failed.push({ name: bot.name, error: String(error?.message || error) });
+      onProgress({ stage: "failed", name: bot.name, completed: index + 1, total: targets.length });
+    }
+  }
+
+  return {
+    onlineCount: onlineBots.length,
+    targetCount: targets.length,
+    restarted,
+    skippedActive,
+    failed,
+  };
+}
+
 module.exports = {
   inspectManagedBots,
   managedBotStartArguments,
   managedRuntimeRoot,
   macosProviderEnvironment,
+  waitForMacosProviderEnvironment,
   posixBridgeEnvironment,
   posixRuntimePaths,
   processEnvironment,
   resolveLarkProfileHome,
   runPowerShell,
+  restartOnlineManagedBots,
   setManagedBotAutoStart,
   startManagedBot,
   stopManagedBot,
