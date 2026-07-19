@@ -35,7 +35,7 @@ class TavilyNoAvailableKeyError(TavilyRouterError):
     pass
 
 
-@dataclass(slots=True)
+@dataclass
 class KeyEntry:
     alias: str
     api_key: str
