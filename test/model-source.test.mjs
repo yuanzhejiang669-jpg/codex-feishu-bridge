@@ -58,9 +58,11 @@ test("discovers future Codex Homes and deduplicates Bot bindings", () => {
         { codexHome: value.writing, source: "script", bot: { name: "writer-1", owner: "script" } },
       ],
     });
+    const writingHome = fs.realpathSync(value.writing);
+    const drawingHome = fs.realpathSync(value.drawing);
     assert.equal(homes.length, 3);
-    assert.equal(homes.find((item) => item.codexHome === value.writing).bots.length, 1);
-    assert.ok(homes.some((item) => item.codexHome === value.drawing));
+    assert.equal(homes.find((item) => item.codexHome === writingHome).bots.length, 1);
+    assert.ok(homes.some((item) => item.codexHome === drawingHome));
   } finally {
     fs.rmSync(value.root, { recursive: true, force: true });
   }
@@ -145,7 +147,7 @@ test("starts official login with the exact Codex Home and never handles token da
     assert.ok(job.expiresAt);
     assert.equal(invocation.command, codexPath);
     assert.deepEqual(invocation.args, ["login"]);
-    assert.equal(invocation.options.env.CODEX_HOME, value.writing);
+    assert.equal(invocation.options.env.CODEX_HOME, fs.realpathSync(value.writing));
     assert.equal(JSON.stringify(job).includes("token"), false);
     child.emit("exit", 0);
     assert.equal(manager.get(value.writing).status, "completed");
