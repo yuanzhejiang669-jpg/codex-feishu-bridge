@@ -271,12 +271,31 @@ async function stopManagedBotPosix(current, options) {
   const paths = posixRuntimePaths(options, current.name);
   fs.mkdirSync(paths.stateDir, { recursive: true });
   fs.writeFileSync(path.join(paths.stateDir, "bridge.stop"), `${new Date().toISOString()}\n`, "utf8");
-  const deadline = Date.now() + 10_000;
+  const force = options.force === true;
+  const deadline = Date.now() + (force ? 2_000 : 10_000);
   while (Date.now() < deadline) {
     if (!isProcessAlive(current.processId)) break;
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
-  if (isProcessAlive(current.processId)) {
+  if (force) {
+    try { process.kill(-current.processId, "SIGTERM"); } catch {
+      try { process.kill(current.processId, "SIGTERM"); } catch {}
+    }
+    const killDeadline = Date.now() + 5_000;
+    while (Date.now() < killDeadline && isProcessAlive(current.processId)) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    if (isProcessAlive(current.processId)) {
+      try { process.kill(-current.processId, "SIGKILL"); } catch {
+        try { process.kill(current.processId, "SIGKILL"); } catch {}
+      }
+      const forceDeadline = Date.now() + 2_000;
+      while (Date.now() < forceDeadline && isProcessAlive(current.processId)) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    }
+    if (isProcessAlive(current.processId)) throw new Error(`Bridge process group ${current.processId} did not stop after SIGKILL`);
+  } else if (isProcessAlive(current.processId)) {
     try { process.kill(current.processId, "SIGTERM"); } catch {}
     const killDeadline = Date.now() + 5_000;
     while (Date.now() < killDeadline && isProcessAlive(current.processId)) {
@@ -303,6 +322,20 @@ function managedBotStartArguments(bot, codexHome) {
   ];
   if (bot.provider?.reasoning) args.push("-Reasoning", bot.provider.reasoning);
   return args;
+}
+
+function managedBotStopArguments(name, force = false) {
+  const args = ["-Name", name];
+  if (force) args.push("-Force");
+  return args;
+}
+
+function clearManagedBotActiveRuns(name, options) {
+  const statePath = path.join(managedRuntimeRoot(options.localAppData, name), "state", "active-runs.json");
+  const previous = readJson(statePath);
+  const cleared = activeRunCount(previous);
+  writeJsonAtomic(statePath, { runs: {} });
+  return cleared;
 }
 
 function setManagedBotAutoStart(name, enabled, options) {
@@ -361,12 +394,15 @@ async function stopManagedBot(name, options) {
   const current = inspectManagedBots(options.dataRoot, options.localAppData).find((item) => item.name === name);
   if (!current?.online) return current;
   if (current.activeRunCount > 0 && !options.force) {
-    throw new Error(`Bot 仍有 ${current.activeRunCount} 个活动任务，已拒绝停止`);
+    const error = new Error(`Bot 仍有 ${current.activeRunCount} 个活动任务，已拒绝停止`);
+    error.code = "BOT_ACTIVE";
+    error.activeRunCount = current.activeRunCount;
+    throw error;
   }
   if ((options.platform || process.platform) === "win32") {
     const scriptPath = path.join(options.engineRoot, "stop-codex-feishu-bridge.ps1");
     if (!fs.existsSync(scriptPath)) throw new Error("客户端 Bridge 停止脚本缺失");
-    await runPowerShell(scriptPath, ["-Name", name], {
+    await runPowerShell(scriptPath, managedBotStopArguments(name, options.force === true), {
       env: processEnvironment(options),
       timeoutMs: 30_000,
     });
@@ -389,52 +425,118 @@ async function stopManagedBotAndDisableAutoStart(name, options) {
   }
 }
 
-async function restartOnlineManagedBots(options) {
+async function restartSelectedManagedBots(options) {
   const inspectBots = options.inspectBots || (() => inspectManagedBots(options.dataRoot, options.localAppData));
-  const stopBot = options.stopBot || ((name) => stopManagedBot(name, options));
+  const stopBot = options.stopBot || ((name, mode) => stopManagedBot(name, { ...options, force: mode.force }));
   const startBot = options.startBot || ((name) => startManagedBot(name, options));
+  const clearActiveRuns = options.clearActiveRuns || ((name) => clearManagedBotActiveRuns(name, options));
   const onProgress = options.onProgress || (() => {});
-  const onlineBots = (await Promise.resolve(inspectBots())).filter((bot) => bot.online);
-  const skippedActive = onlineBots
+  const force = options.force === true;
+  const names = [...new Set((options.names || []).map((name) => String(name || "").trim()).filter(Boolean))];
+  if (!names.length) throw new Error("请先选择至少一个客户端管理的 Bot");
+  const availableBots = await Promise.resolve(inspectBots());
+  const availableByName = new Map(availableBots.map((bot) => [bot.name, bot]));
+  const unknownNames = names.filter((name) => !availableByName.has(name));
+  if (unknownNames.length) throw new Error(`找不到客户端管理的 Bot：${unknownNames.join("、")}`);
+  const selectedBots = names.map((name) => availableByName.get(name));
+  const onlineBots = selectedBots.filter((bot) => bot.online);
+  const skippedOffline = selectedBots.filter((bot) => !bot.online).map((bot) => ({ name: bot.name }));
+  const skippedActive = force ? [] : onlineBots
     .filter((bot) => Number(bot.activeRunCount || 0) > 0)
     .map((bot) => ({ name: bot.name, activeRunCount: Number(bot.activeRunCount || 0) }));
-  const targets = onlineBots.filter((bot) => Number(bot.activeRunCount || 0) === 0);
+  const targets = force ? onlineBots : onlineBots.filter((bot) => Number(bot.activeRunCount || 0) === 0);
   const restarted = [];
+  const clearedActiveRuns = [];
+  const recovered = [];
   const failed = [];
 
   onProgress({
     stage: "ready",
+    mode: force ? "force" : "safe",
     completed: 0,
     total: targets.length,
     skippedActive,
+    skippedOffline,
   });
   for (let index = 0; index < targets.length; index += 1) {
     const bot = targets[index];
     try {
+      const latest = (await Promise.resolve(inspectBots())).find((item) => item.name === bot.name);
+      if (!latest?.online) {
+        if (!skippedOffline.some((item) => item.name === bot.name)) skippedOffline.push({ name: bot.name });
+        onProgress({ stage: "skipped-offline", name: bot.name, completed: index + 1, total: targets.length });
+        continue;
+      }
+      if (!force && Number(latest.activeRunCount || 0) > 0) {
+        skippedActive.push({ name: bot.name, activeRunCount: Number(latest.activeRunCount || 0) });
+        onProgress({ stage: "skipped-active", name: bot.name, completed: index + 1, total: targets.length });
+        continue;
+      }
       onProgress({ stage: "stopping", name: bot.name, completed: index, total: targets.length });
-      await stopBot(bot.name);
+      await stopBot(bot.name, { force });
+      if (force) {
+        const cleared = Number(await Promise.resolve(clearActiveRuns(bot.name))) || 0;
+        clearedActiveRuns.push({ name: bot.name, count: cleared });
+      }
       onProgress({ stage: "starting", name: bot.name, completed: index, total: targets.length });
       await startBot(bot.name);
       restarted.push(bot.name);
       onProgress({ stage: "restarted", name: bot.name, completed: index + 1, total: targets.length });
     } catch (error) {
-      failed.push({ name: bot.name, error: String(error?.message || error) });
+      if (!force && error?.code === "BOT_ACTIVE") {
+        skippedActive.push({ name: bot.name, activeRunCount: Number(error.activeRunCount || 0) });
+        onProgress({ stage: "skipped-active", name: bot.name, completed: index + 1, total: targets.length });
+        continue;
+      }
+      let recoveryError = "";
+      try {
+        const current = (await Promise.resolve(inspectBots())).find((item) => item.name === bot.name);
+        if (current && !current.online) {
+          await startBot(bot.name);
+          recovered.push(bot.name);
+        }
+      } catch (recoveryFailure) {
+        recoveryError = String(recoveryFailure?.message || recoveryFailure);
+      }
+      failed.push({
+        name: bot.name,
+        error: String(error?.message || error),
+        recovered: recovered.includes(bot.name),
+        recoveryError,
+      });
       onProgress({ stage: "failed", name: bot.name, completed: index + 1, total: targets.length });
     }
   }
 
   return {
+    mode: force ? "force" : "safe",
+    selectedCount: selectedBots.length,
     onlineCount: onlineBots.length,
     targetCount: targets.length,
     restarted,
     skippedActive,
+    skippedOffline,
+    clearedActiveRuns,
+    recovered,
     failed,
   };
 }
 
+async function restartOnlineManagedBots(options) {
+  const inspectBots = options.inspectBots || (() => inspectManagedBots(options.dataRoot, options.localAppData));
+  const bots = await Promise.resolve(inspectBots());
+  return restartSelectedManagedBots({
+    ...options,
+    names: bots.filter((bot) => bot.online).map((bot) => bot.name),
+    inspectBots,
+  });
+}
+
 module.exports = {
   inspectManagedBots,
+  clearManagedBotActiveRuns,
   managedBotStartArguments,
+  managedBotStopArguments,
   managedRuntimeRoot,
   macosProviderEnvironment,
   waitForMacosProviderEnvironment,
@@ -444,6 +546,7 @@ module.exports = {
   resolveLarkProfileHome,
   runPowerShell,
   restartOnlineManagedBots,
+  restartSelectedManagedBots,
   setManagedBotAutoStart,
   startManagedBot,
   stopManagedBot,

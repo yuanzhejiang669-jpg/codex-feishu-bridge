@@ -29,7 +29,11 @@ const elements = {
   clearAllSkills: document.querySelector("#clear-all-skills"),
   setupMode: document.querySelector("#setup-mode"),
   createBot: document.querySelector("#create-bot-button"),
-  restartOnlineBots: document.querySelector("#restart-online-bots-button"),
+  selectedBotCount: document.querySelector("#selected-bot-count"),
+  selectAllBots: document.querySelector("#select-all-bots-button"),
+  clearAllBots: document.querySelector("#clear-all-bots-button"),
+  safeRestartBots: document.querySelector("#safe-restart-bots-button"),
+  forceRestartBots: document.querySelector("#force-restart-bots-button"),
   botRestartStatus: document.querySelector("#bot-restart-status"),
   botDialog: document.querySelector("#bot-dialog"),
   botForm: document.querySelector("#bot-form"),
@@ -130,6 +134,14 @@ const elements = {
   closeRemovalDialog: document.querySelector("#close-removal-dialog"),
   cancelRemoval: document.querySelector("#cancel-removal-button"),
   applyRemoval: document.querySelector("#apply-removal-button"),
+  forceRestartDialog: document.querySelector("#force-restart-dialog"),
+  forceRestartForm: document.querySelector("#force-restart-form"),
+  forceRestartError: document.querySelector("#force-restart-error"),
+  forceRestartImpact: document.querySelector("#force-restart-impact"),
+  forceRestartConfirm: document.querySelector("#force-restart-confirm"),
+  closeForceRestartDialog: document.querySelector("#close-force-restart-dialog"),
+  cancelForceRestart: document.querySelector("#cancel-force-restart-button"),
+  applyForceRestart: document.querySelector("#apply-force-restart-button"),
   providerRemovalDialog: document.querySelector("#provider-removal-dialog"),
   providerRemovalForm: document.querySelector("#provider-removal-form"),
   providerRemovalTitle: document.querySelector("#provider-removal-title"),
@@ -149,6 +161,8 @@ let removalPreview = null;
 let providerRemovalPreview = null;
 let modelSourcePollTimer = null;
 const modelSourceDrafts = new Map();
+const selectedManagedBotNames = new Set();
+let botRestartInProgress = false;
 
 function text(value, fallback = "-") {
   const result = String(value ?? "").trim();
@@ -221,6 +235,31 @@ function statusBadge(instance) {
   return `<span class="${badgeClass(instance.online ? "good" : "bad")}">${instance.online ? "在线" : "离线"}</span>`;
 }
 
+function selectedManagedBots() {
+  return (state?.setup?.managedBots || []).filter((bot) => selectedManagedBotNames.has(bot.name));
+}
+
+function updateBotSelectionControls(managedBots = state?.setup?.managedBots || []) {
+  const availableNames = new Set(managedBots.map((bot) => bot.name));
+  for (const name of selectedManagedBotNames) {
+    if (!availableNames.has(name)) selectedManagedBotNames.delete(name);
+  }
+  const selectedCount = selectedManagedBotNames.size;
+  elements.selectedBotCount.textContent = `已选择 ${selectedCount} 个`;
+  elements.selectAllBots.disabled = botRestartInProgress || managedBots.length === 0 || selectedCount === managedBots.length;
+  elements.clearAllBots.disabled = botRestartInProgress || selectedCount === 0;
+  elements.safeRestartBots.disabled = botRestartInProgress || selectedCount === 0;
+  elements.forceRestartBots.disabled = botRestartInProgress || selectedCount === 0;
+}
+
+function syncBotSelectionInputs() {
+  elements.botList.querySelectorAll(".managed-bot-selection").forEach((input) => {
+    input.checked = selectedManagedBotNames.has(input.dataset.botName);
+    input.disabled = botRestartInProgress;
+  });
+  updateBotSelectionControls();
+}
+
 function renderBots(bridge, setup = {}) {
   const instances = bridge.instances || [];
   const managedBots = setup.managedBots || [];
@@ -261,6 +300,7 @@ function renderBots(bridge, setup = {}) {
     const stateKind = recoveryFailed ? "bad" : bot.online ? "good" : "warn";
     return `
     <div class="bot-row">
+      <label class="bot-selector" title="选择 ${escapeHtml(bot.label || bot.name)}"><input class="managed-bot-selection" data-bot-name="${escapeHtml(bot.name)}" type="checkbox" aria-label="选择 ${escapeHtml(bot.label || bot.name)}" ${selectedManagedBotNames.has(bot.name) ? "checked" : ""}></label>
       <strong>${escapeHtml(bot.label || bot.name)}<small>客户端管理</small></strong>
       <span><span class="${badgeClass(stateKind)}" title="${escapeHtml(recovery?.lastError || "")}">${stateLabel}</span></span>
       <span>${bot.activeRunCount} 个任务</span>
@@ -274,12 +314,14 @@ function renderBots(bridge, setup = {}) {
     </div>`;
   }).join("") + legacyBots.map((instance) => `
     <div class="bot-row">
+      <span aria-hidden="true"></span>
       <strong>${escapeHtml(instance.name)}<small>现有 Bridge · 只读</small></strong>
       <span>${statusBadge(instance)}</span>
       <span>${instance.activeRunCount} 个任务</span>
       <span class="path-text">${escapeHtml(instance.workspace)}</span>
       <span></span>
     </div>`).join("");
+  updateBotSelectionControls(managedBots);
 
   const spaces = setup.managedSpaces || [];
   const managedHomes = new Set(spaces.map((space) => String(space.codexHome || "").toLowerCase()));
@@ -1312,6 +1354,13 @@ elements.providerRemovalForm.addEventListener("submit", async (event) => {
   }
 });
 elements.botList.addEventListener("change", async (event) => {
+  const selection = event.target.closest(".managed-bot-selection");
+  if (selection) {
+    if (selection.checked) selectedManagedBotNames.add(selection.dataset.botName);
+    else selectedManagedBotNames.delete(selection.dataset.botName);
+    updateBotSelectionControls();
+    return;
+  }
   const toggle = event.target.closest(".managed-bot-autostart");
   if (!toggle || !state) return;
   const bot = state.setup.managedBots[Number(toggle.dataset.managedIndex)];
@@ -1367,25 +1416,74 @@ elements.createBot.addEventListener("click", () => {
   elements.botDialog.showModal();
   document.querySelector("#bot-name").focus();
 });
-elements.restartOnlineBots.addEventListener("click", async () => {
-  elements.restartOnlineBots.disabled = true;
+
+elements.selectAllBots.addEventListener("click", () => {
+  (state?.setup?.managedBots || []).forEach((bot) => selectedManagedBotNames.add(bot.name));
+  syncBotSelectionInputs();
+});
+elements.clearAllBots.addEventListener("click", () => {
+  selectedManagedBotNames.clear();
+  syncBotSelectionInputs();
+});
+
+async function runSelectedBotRestart(force) {
+  const names = selectedManagedBots().map((bot) => bot.name);
+  if (!names.length) return false;
+  botRestartInProgress = true;
+  syncBotSelectionInputs();
   elements.error.classList.add("hidden");
-  elements.botRestartStatus.textContent = "正在准备批量重启";
+  elements.forceRestartError.classList.add("hidden");
+  elements.botRestartStatus.textContent = force ? "正在准备强制重启" : "正在准备安全重启";
   try {
-    const result = await window.bridgeDesktop.restartOnlineBots();
-    const parts = [`已重启 ${result.restarted.length}/${result.targetCount}`];
+    const result = await window.bridgeDesktop.restartBots({ names, force });
+    const parts = [`${force ? "强制" : "安全"}重启 ${result.restarted.length}/${result.targetCount}`];
     if (result.skippedActive.length) parts.push(`跳过 ${result.skippedActive.length} 个活动 Bot`);
+    if (result.skippedOffline.length) parts.push(`跳过 ${result.skippedOffline.length} 个离线 Bot`);
     if (result.failed.length) parts.push(`${result.failed.length} 个失败`);
-    if (!result.onlineCount) parts.splice(0, parts.length, "当前没有在线 Bot");
+    if (result.recovered.length) parts.push(`${result.recovered.length} 个已恢复在线`);
+    if (!result.onlineCount) parts.splice(0, parts.length, "所选 Bot 当前都不在线");
     elements.botRestartStatus.textContent = parts.join(" · ");
     await refresh();
+    return true;
   } catch (error) {
-    elements.error.textContent = error.message || String(error);
-    elements.error.classList.remove("hidden");
-    elements.botRestartStatus.textContent = "批量重启失败";
+    const target = force ? elements.forceRestartError : elements.error;
+    target.textContent = error.message || String(error);
+    target.classList.remove("hidden");
+    elements.botRestartStatus.textContent = `${force ? "强制" : "安全"}重启失败`;
+    return false;
   } finally {
-    elements.restartOnlineBots.disabled = false;
+    botRestartInProgress = false;
+    syncBotSelectionInputs();
   }
+}
+
+elements.safeRestartBots.addEventListener("click", () => runSelectedBotRestart(false));
+elements.forceRestartBots.addEventListener("click", () => {
+  const bots = selectedManagedBots();
+  if (!bots.length) return;
+  const online = bots.filter((bot) => bot.online);
+  const active = online.filter((bot) => Number(bot.activeRunCount || 0) > 0);
+  const offline = bots.filter((bot) => !bot.online);
+  elements.forceRestartImpact.innerHTML = `
+    <strong>已选择 ${bots.length} 个 Bot</strong>
+    <span>在线 ${online.length} 个，其中 ${active.length} 个显示有活动任务；离线 ${offline.length} 个将跳过。</span>
+    ${active.length ? `<span class="bad">将被中断：${active.map((bot) => escapeHtml(bot.label || bot.name)).join("、")}</span>` : ""}
+    <span>强制停止后会清理这些 Bot 的活动任务状态，再逐个重新连接飞书。</span>`;
+  elements.forceRestartConfirm.checked = false;
+  elements.applyForceRestart.disabled = true;
+  elements.forceRestartError.classList.add("hidden");
+  elements.forceRestartDialog.showModal();
+});
+elements.closeForceRestartDialog.addEventListener("click", () => elements.forceRestartDialog.close());
+elements.cancelForceRestart.addEventListener("click", () => elements.forceRestartDialog.close());
+elements.forceRestartConfirm.addEventListener("change", () => {
+  elements.applyForceRestart.disabled = !elements.forceRestartConfirm.checked || botRestartInProgress;
+});
+elements.forceRestartForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!elements.forceRestartConfirm.checked) return;
+  elements.applyForceRestart.disabled = true;
+  if (await runSelectedBotRestart(true)) elements.forceRestartDialog.close();
 });
 elements.createWorkspaceFactory.addEventListener("click", () => {
   elements.workspaceFactoryEditor.classList.toggle("hidden");
@@ -1620,12 +1718,11 @@ window.bridgeDesktop.onFactoryRegistrationProgress((progress) => {
 });
 window.bridgeDesktop.onBotRestartProgress((progress) => {
   if (progress.stage === "ready" && progress.total === 0) {
-    elements.botRestartStatus.textContent = progress.skippedActive?.length
-      ? `跳过 ${progress.skippedActive.length} 个活动 Bot`
-      : "当前没有可重启的在线 Bot";
+    const skipped = Number(progress.skippedActive?.length || 0) + Number(progress.skippedOffline?.length || 0);
+    elements.botRestartStatus.textContent = skipped ? `没有可重启目标，已跳过 ${skipped} 个 Bot` : "当前没有可重启的所选 Bot";
     return;
   }
-  const label = ({ stopping: "正在停止", starting: "正在启动", restarted: "已重启", failed: "重启失败" })[progress.stage];
+  const label = ({ stopping: "正在停止", starting: "正在启动", restarted: "已重启", failed: "重启失败", "skipped-active": "已跳过活动 Bot", "skipped-offline": "已跳过离线 Bot" })[progress.stage];
   if (label) elements.botRestartStatus.textContent = `${label} ${progress.name} · ${progress.completed}/${progress.total}`;
 });
 window.bridgeDesktop.onUpdateState((update) => {

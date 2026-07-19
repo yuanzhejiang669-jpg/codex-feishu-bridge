@@ -1,5 +1,6 @@
 param(
-  [string]$Name = ""
+  [string]$Name = "",
+  [switch]$Force
 )
 
 $ErrorActionPreference = "Stop"
@@ -45,6 +46,20 @@ if (-not $process) {
 }
 
 Set-Content -LiteralPath $stopFile -Value (Get-Date).ToString("o") -Encoding UTF8
+
+if ($Force) {
+  $taskkillArgs = @('/PID', $pidText, '/T', '/F')
+  & taskkill.exe @taskkillArgs | Out-Null
+  $taskkillExitCode = $LASTEXITCODE
+  Start-Sleep -Milliseconds 500
+  if (Get-Process -Id ([int]$pidText) -ErrorAction SilentlyContinue) {
+    throw "Bridge process tree did not stop after taskkill. PID: $pidText; exit code: $taskkillExitCode"
+  }
+  Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $stopFile -Force -ErrorAction SilentlyContinue
+  Write-Host "Codex Feishu Bridge force-stopped with its process tree. Instance: $(if ($safeName) { $safeName } else { 'default' }); PID: $pidText"
+  exit 0
+}
 
 for ($i = 0; $i -lt 10; $i++) {
   Start-Sleep -Seconds 1

@@ -5,11 +5,14 @@ const path = require("node:path");
 const test = require("node:test");
 const {
   inspectManagedBots,
+  clearManagedBotActiveRuns,
   macosProviderEnvironment,
   managedBotStartArguments,
+  managedBotStopArguments,
   managedRuntimeRoot,
   processEnvironment,
   restartOnlineManagedBots,
+  restartSelectedManagedBots,
   waitForMacosProviderEnvironment,
   resolveLarkProfileHome,
   setManagedBotAutoStart,
@@ -23,6 +26,11 @@ test("passes only an explicitly recorded reasoning request to the launcher", () 
   assert.equal(managedBotStartArguments(base, "C:\\codex-home").includes("-Reasoning"), false);
   const args = managedBotStartArguments({ ...base, provider: { reasoning: "xhigh" } }, "C:\\codex-home");
   assert.deepEqual(args.slice(-2), ["-Reasoning", "xhigh"]);
+});
+
+test("adds the process-tree flag only for a forced Windows stop", () => {
+  assert.deepEqual(managedBotStopArguments("assistant-1", false), ["-Name", "assistant-1"]);
+  assert.deepEqual(managedBotStopArguments("assistant-1", true), ["-Name", "assistant-1", "-Force"]);
 });
 
 function fixture() {
@@ -149,6 +157,91 @@ test("restarts online idle Bots sequentially and skips active Bots", async () =>
   assert.equal(progress.at(-1).stage, "restarted");
 });
 
+test("safe selected restart touches only selected online idle Bots", async () => {
+  const calls = [];
+  const result = await restartSelectedManagedBots({
+    names: ["assistant-1", "assistant-2", "assistant-3"],
+    inspectBots: () => [
+      { name: "assistant-1", online: true, activeRunCount: 0 },
+      { name: "assistant-2", online: true, activeRunCount: 1 },
+      { name: "assistant-3", online: false, activeRunCount: 0 },
+      { name: "assistant-4", online: true, activeRunCount: 0 },
+    ],
+    stopBot: async (name, mode) => { calls.push(`stop:${name}:${mode.force}`); },
+    startBot: async (name) => { calls.push(`start:${name}`); },
+  });
+
+  assert.deepEqual(calls, ["stop:assistant-1:false", "start:assistant-1"]);
+  assert.deepEqual(result.restarted, ["assistant-1"]);
+  assert.deepEqual(result.skippedActive, [{ name: "assistant-2", activeRunCount: 1 }]);
+  assert.deepEqual(result.skippedOffline, [{ name: "assistant-3" }]);
+  assert.equal(result.selectedCount, 3);
+  assert.equal(result.mode, "safe");
+});
+
+test("forced selected restart clears active state between stop and start", async () => {
+  const calls = [];
+  const result = await restartSelectedManagedBots({
+    names: ["assistant-1"],
+    force: true,
+    inspectBots: () => [{ name: "assistant-1", online: true, activeRunCount: 2 }],
+    stopBot: async (name, mode) => { calls.push(`stop:${name}:${mode.force}`); },
+    clearActiveRuns: async (name) => { calls.push(`clear:${name}`); return 2; },
+    startBot: async (name) => { calls.push(`start:${name}`); },
+  });
+
+  assert.deepEqual(calls, ["stop:assistant-1:true", "clear:assistant-1", "start:assistant-1"]);
+  assert.deepEqual(result.restarted, ["assistant-1"]);
+  assert.deepEqual(result.clearedActiveRuns, [{ name: "assistant-1", count: 2 }]);
+  assert.deepEqual(result.skippedActive, []);
+  assert.equal(result.mode, "force");
+});
+
+test("restart failure attempts to recover a Bot left offline", async () => {
+  const calls = [];
+  let inspection = 0;
+  const result = await restartSelectedManagedBots({
+    names: ["assistant-1"],
+    force: true,
+    inspectBots: () => {
+      inspection += 1;
+      return [{ name: "assistant-1", online: inspection < 3, activeRunCount: 1 }];
+    },
+    stopBot: async () => { calls.push("stop"); },
+    clearActiveRuns: async () => { calls.push("clear"); throw new Error("state write failed"); },
+    startBot: async () => { calls.push("recover-start"); },
+  });
+
+  assert.deepEqual(calls, ["stop", "clear", "recover-start"]);
+  assert.deepEqual(result.recovered, ["assistant-1"]);
+  assert.equal(result.failed[0].recovered, true);
+  assert.match(result.failed[0].error, /state write failed/);
+});
+
+test("selected restart rejects unknown managed Bot names before stopping anything", async () => {
+  let stopped = false;
+  await assert.rejects(() => restartSelectedManagedBots({
+    names: ["missing"],
+    inspectBots: () => [{ name: "assistant-1", online: true, activeRunCount: 0 }],
+    stopBot: async () => { stopped = true; },
+  }), /找不到客户端管理的 Bot/);
+  assert.equal(stopped, false);
+});
+
+test("forced cleanup replaces only the selected Bot active-run state", () => {
+  const value = fixture();
+  try {
+    const stateDir = path.join(managedRuntimeRoot(value.localAppData, "assistant-1"), "state");
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.writeFileSync(path.join(stateDir, "active-runs.json"), JSON.stringify({ runs: { one: {}, two: {} } }), "utf8");
+    assert.equal(clearManagedBotActiveRuns("assistant-1", value), 2);
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(stateDir, "active-runs.json"), "utf8")), { runs: {} });
+    assert.equal(fs.readdirSync(stateDir).some((name) => name.endsWith(".tmp")), false);
+  } finally {
+    fs.rmSync(value.root, { recursive: true, force: true });
+  }
+});
+
 test("continues a batch restart after one Bot fails", async () => {
   const calls = [];
   const result = await restartOnlineManagedBots({
@@ -165,7 +258,12 @@ test("continues a batch restart after one Bot fails", async () => {
 
   assert.deepEqual(calls, ["stop:assistant-1", "stop:assistant-2", "start:assistant-2"]);
   assert.deepEqual(result.restarted, ["assistant-2"]);
-  assert.deepEqual(result.failed, [{ name: "assistant-1", error: "stop failed" }]);
+  assert.deepEqual(result.failed, [{
+    name: "assistant-1",
+    error: "stop failed",
+    recovered: false,
+    recoveryError: "",
+  }]);
 });
 
 test("does not start a Bot when a task becomes active during batch restart", async () => {

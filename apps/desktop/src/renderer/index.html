@@ -76,7 +76,11 @@
       <section id="bots-view" class="view hidden">
         <div class="view-actions">
           <span id="bot-restart-status" class="section-meta" aria-live="polite"></span>
-          <button id="restart-online-bots-button" class="secondary-button" type="button">重启全部在线 Bot</button>
+          <span id="selected-bot-count" class="section-meta">已选择 0 个</span>
+          <button id="select-all-bots-button" class="link-button" type="button">全选</button>
+          <button id="clear-all-bots-button" class="link-button" type="button">取消全选</button>
+          <button id="safe-restart-bots-button" class="secondary-button" type="button" disabled>安全重启所选 Bot</button>
+          <button id="force-restart-bots-button" class="danger-button" type="button" disabled>强制重启所选 Bot</button>
           <button id="create-bot-button" class="primary-button" type="button">+ 新建 Bot</button>
         </div>
         <section class="content-section">
@@ -366,6 +370,21 @@
       <div class="dialog-actions">
         <button id="cancel-removal-button" class="secondary-button" type="button">取消</button>
         <button id="apply-removal-button" class="danger-button" type="submit">确认删除</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="force-restart-dialog" class="bot-dialog removal-dialog">
+    <form id="force-restart-form" method="dialog">
+      <div class="dialog-heading">
+        <div><h2>强制重启所选 Bot</h2><span>正在运行的任务会立即终止</span></div>
+        <button id="close-force-restart-dialog" class="icon-button" type="button" aria-label="关闭" title="关闭">×</button>
+      </div>
+      <div id="force-restart-error" class="error-band hidden" role="alert"></div>
+      <div id="force-restart-impact" class="removal-impact"></div>
+      <label class="checkbox-field"><input id="force-restart-confirm" type="checkbox" required><span>我确认终止所选在线 Bot 的当前任务，并清理其活动任务状态</span></label>
+      <div class="dialog-actions">
+        <button id="cancel-force-restart-button" class="secondary-button" type="button">取消</button>
+        <button id="apply-force-restart-button" class="danger-button" type="submit" disabled>确认强制重启</button>
       </div>
     </form>
   </dialog>

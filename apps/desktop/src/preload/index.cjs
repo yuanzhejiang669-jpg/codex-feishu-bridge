@@ -28,7 +28,7 @@ contextBridge.exposeInMainWorld("bridgeDesktop", Object.freeze({
   applyModelSourceSwitch: (value) => ipcRenderer.invoke("desktop:apply-model-source-switch", value),
   startBot: (name) => ipcRenderer.invoke("desktop:start-bot", name),
   stopBot: (name) => ipcRenderer.invoke("desktop:stop-bot", name),
-  restartOnlineBots: () => ipcRenderer.invoke("desktop:restart-online-bots"),
+  restartBots: (value) => ipcRenderer.invoke("desktop:restart-bots", value),
   setBotAutoStart: (value) => ipcRenderer.invoke("desktop:set-bot-autostart", value),
   previewManagedRemoval: (value) => ipcRenderer.invoke("desktop:preview-managed-removal", value),
   applyManagedRemoval: (value) => ipcRenderer.invoke("desktop:apply-managed-removal", value),

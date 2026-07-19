@@ -13,7 +13,7 @@ const { authorizeLarkUser } = require("./services/lark-user-auth.cjs");
 const {
   inspectManagedBots,
   waitForMacosProviderEnvironment,
-  restartOnlineManagedBots,
+  restartSelectedManagedBots,
   setManagedBotAutoStart,
   startManagedBot,
   stopManagedBot,
@@ -733,14 +733,16 @@ if (!singleInstance) {
       await loadState();
       return result;
     });
-    ipcMain.handle("desktop:restart-online-bots", async (event) => {
+    ipcMain.handle("desktop:restart-bots", async (event, input) => {
       assertStartupReady();
       if (batchRestartInFlight) throw new Error("批量重启正在进行，请等待当前操作完成");
       batchRestartInFlight = true;
       recoverySupervisor?.stop();
       try {
-        const result = await restartOnlineManagedBots({
+        const result = await restartSelectedManagedBots({
           ...supervisorOptions(),
+          names: Array.isArray(input?.names) ? input.names : [],
+          force: input?.force === true,
           onProgress: (progress) => {
             if (!event.sender.isDestroyed()) event.sender.send("desktop:bot-restart-progress", progress);
           },
