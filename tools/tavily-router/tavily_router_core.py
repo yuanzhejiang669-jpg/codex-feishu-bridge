@@ -8,7 +8,7 @@ import threading
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -125,7 +125,7 @@ class TavilyRouter:
                     refresh_attempts.append({"alias": alias, "status": "transient_error",
                                              "detail": str(exc)[:500]})
             state = self._state_snapshot(pool)
-            current = datetime.now(UTC)
+            current = datetime.now(timezone.utc)
             keys = []
             for alias in state["order"]:
                 entry, status = pool[alias], state["key_status"][alias]
@@ -231,7 +231,7 @@ class TavilyRouter:
         self._move_to_end(state["order"], alias)
 
     def _cooldown_for_category(self, category: str, *, retry_after_seconds: int | None = None) -> str | None:
-        now = datetime.now(UTC)
+        now = datetime.now(timezone.utc)
         if category == "quota_exhausted":
             return self._next_period_start_iso()
         if category == "rate_limited":
@@ -275,16 +275,16 @@ class TavilyRouter:
         os.replace(temp_name, self.state_path)
 
     def _current_period(self) -> str:
-        now = datetime.now(UTC)
+        now = datetime.now(timezone.utc)
         return f"{now.year:04d}-{now.month:02d}"
 
     def _next_period_start_iso(self) -> str:
-        now = datetime.now(UTC)
-        next_month = datetime(now.year + 1, 1, 1, tzinfo=UTC) if now.month == 12 else datetime(now.year, now.month + 1, 1, tzinfo=UTC)
+        now = datetime.now(timezone.utc)
+        next_month = datetime(now.year + 1, 1, 1, tzinfo=timezone.utc) if now.month == 12 else datetime(now.year, now.month + 1, 1, tzinfo=timezone.utc)
         return next_month.isoformat()
 
     def _now_iso(self) -> str:
-        return datetime.now(UTC).isoformat()
+        return datetime.now(timezone.utc).isoformat()
 
     def _empty_status(self) -> dict[str, Any]:
         return {"last_result": "unknown", "cooldown_until": None, "last_error": None,
@@ -307,7 +307,7 @@ class TavilyRouter:
         usage = status.get("usage") if isinstance(status.get("usage"), dict) else {}
         checked = self._parse_iso(usage.get("checked_at"))
         ttl = self._policy_seconds("usage_cache_ttl_seconds", 900)
-        return checked is None or (datetime.now(UTC) - checked).total_seconds() >= ttl
+        return checked is None or (datetime.now(timezone.utc) - checked).total_seconds() >= ttl
 
     def _policy_seconds(self, name: str, default: int) -> int:
         try:

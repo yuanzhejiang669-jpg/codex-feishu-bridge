@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -36,7 +36,7 @@ class TavilyRouterTest(unittest.TestCase):
         self.assertEqual("rate_limited", self.router._categorize_http_error(429, "too many requests"))
         self.assertEqual("quota_exhausted", self.router._categorize_http_error(429, "USAGE_LIMIT_EXCEEDED"))
         cooldown = self.router._cooldown_for_category("rate_limited", retry_after_seconds=3)
-        delta = datetime.fromisoformat(cooldown) - datetime.now(UTC)
+        delta = datetime.fromisoformat(cooldown) - datetime.now(timezone.utc)
         self.assertGreater(delta.total_seconds(), 1)
         self.assertLessEqual(delta.total_seconds(), 3)
 
