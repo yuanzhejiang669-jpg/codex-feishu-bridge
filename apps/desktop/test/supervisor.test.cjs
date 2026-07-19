@@ -192,6 +192,7 @@ test("builds a child environment with exact bundled tools and isolated profile h
     localAppData: runtimeRoot,
     nodePath,
     larkCliPath,
+    platform: "win32",
   });
   assert.equal(env.LOCALAPPDATA, runtimeRoot);
   assert.equal(env.USERPROFILE, path.join(dataRoot, "profile-home"));
@@ -285,6 +286,7 @@ test("injects a DPAPI-backed Provider key only into the managed Bot child enviro
       localAppData: value.localAppData,
       nodePath: "C:\\Client\\node.exe",
       larkCliPath: "C:\\Client\\lark-cli.exe",
+      platform: "win32",
       decryptSecret: (valueBuffer) => valueBuffer.toString("utf8") === "encrypted" ? "decrypted-key" : "",
     }, bot);
     assert.equal(env.BOT_API_KEY, "decrypted-key");
