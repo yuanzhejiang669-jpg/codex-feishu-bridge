@@ -229,6 +229,33 @@ test("uses a short symlinked Lark Profile home on macOS for Unix socket compatib
   }
 });
 
+test("adds installed macOS writing tool directories to the child PATH", {
+  skip: process.platform === "win32",
+}, () => {
+  const value = fixture();
+  const texBin = path.join(value.root, "Library", "TeX", "texbin");
+  const homebrewBin = path.join(value.root, "opt", "homebrew", "bin");
+  fs.mkdirSync(texBin, { recursive: true });
+  fs.mkdirSync(homebrewBin, { recursive: true });
+  try {
+    const env = processEnvironment({
+      dataRoot: value.dataRoot,
+      localAppData: value.localAppData,
+      nodePath: path.join(value.root, "node"),
+      larkCliPath: path.join(value.root, "lark-cli"),
+      platform: "darwin",
+      larkProfileHome: path.join(value.root, ".cfb-lark-profile"),
+      macosToolDirs: [texBin, homebrewBin, path.join(value.root, "missing")],
+    });
+    const directories = env.PATH.split(path.delimiter);
+    assert.equal(directories.includes(texBin), true);
+    assert.equal(directories.includes(homebrewBin), true);
+    assert.equal(directories.includes(path.join(value.root, "missing")), false);
+  } finally {
+    fs.rmSync(value.root, { recursive: true, force: true });
+  }
+});
+
 test("refuses to replace an occupied macOS Lark Profile alias", () => {
   const value = fixture();
   const alias = path.join(value.root, ".cfb-lark-profile");

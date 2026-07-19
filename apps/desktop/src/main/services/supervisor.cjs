@@ -80,7 +80,16 @@ function resolveLarkProfileHome(options) {
 
 function processEnvironment(options, bot = null) {
   const profileHome = resolveLarkProfileHome(options);
-  const toolDirs = [path.dirname(options.nodePath), path.dirname(options.larkCliPath)];
+  const platform = options.platform || process.platform;
+  const macosToolDirs = platform === "darwin"
+    ? (options.macosToolDirs || ["/Library/TeX/texbin", "/opt/homebrew/bin", "/usr/local/bin"])
+      .filter((directory) => fs.existsSync(directory))
+    : [];
+  const toolDirs = [...new Set([
+    path.dirname(options.nodePath),
+    path.dirname(options.larkCliPath),
+    ...macosToolDirs,
+  ])];
   const environment = {
     ...process.env,
     LOCALAPPDATA: options.localAppData,
