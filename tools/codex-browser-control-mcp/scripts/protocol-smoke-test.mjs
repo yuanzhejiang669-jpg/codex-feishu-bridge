@@ -148,7 +148,8 @@ try {
     name: "browser_start",
     arguments: { port: 65528, executablePath: fakeChrome },
   });
-  if (!rejectedExecutable.isError || !rejectedExecutable.content?.[0]?.text?.includes("approved Chrome/Edge installation path")) {
+  const rejectedExecutableText = rejectedExecutable.content?.[0]?.text || "";
+  if (!rejectedExecutable.isError || !/(approved Chrome\/Edge installation path|real executable path)/.test(rejectedExecutableText)) {
     throw new Error(`Fake chrome.exe outside approved install roots was not rejected: ${JSON.stringify(rejectedExecutable)}`);
   }
 

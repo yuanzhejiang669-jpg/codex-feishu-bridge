@@ -1556,11 +1556,37 @@ async function evaluateValue(cdp, expression, timeoutMs = 15000) {
 }
 
 function standardBrowserExecutablePaths() {
+  if (process.platform === "darwin") {
+    const canonicalHome = realpathSync.native(os.homedir());
+    return [
+      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+      path.join(canonicalHome, "Applications", "Google Chrome.app", "Contents", "MacOS", "Google Chrome"),
+      "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+      path.join(canonicalHome, "Applications", "Microsoft Edge.app", "Contents", "MacOS", "Microsoft Edge"),
+    ];
+  }
+  if (process.platform === "linux") {
+    return [
+      "/usr/bin/google-chrome",
+      "/usr/bin/google-chrome-stable",
+      "/usr/bin/chromium",
+      "/usr/bin/chromium-browser",
+      "/usr/bin/microsoft-edge",
+      "/usr/bin/microsoft-edge-stable",
+    ];
+  }
   const roots = [process.env.ProgramFiles, process.env["ProgramFiles(x86)"], process.env.LOCALAPPDATA].filter(Boolean);
   return roots.flatMap((root) => [
     path.join(root, "Google", "Chrome", "Application", "chrome.exe"),
     path.join(root, "Microsoft", "Edge", "Application", "msedge.exe"),
   ]);
+}
+
+function browserExecutableKind(executablePath) {
+  const basename = path.basename(executablePath).toLowerCase();
+  if (["chrome.exe", "google chrome", "google-chrome", "google-chrome-stable", "chromium", "chromium-browser"].includes(basename)) return "chrome";
+  if (["msedge.exe", "microsoft edge", "microsoft-edge", "microsoft-edge-stable"].includes(basename)) return "edge";
+  return "";
 }
 
 function allowedPortableBrowserPaths() {
@@ -1571,11 +1597,31 @@ function allowedPortableBrowserPaths() {
     .map((item) => path.resolve(item));
 }
 
+function browserProcessEnv() {
+  const env = Object.fromEntries(
+    Object.entries(process.env).filter(([, value]) => typeof value === "string"),
+  );
+  const configuredHome = String(process.env.BROWSER_CONTROL_BROWSER_HOME || "").trim();
+  const browserHome = configuredHome || (process.platform === "darwin" ? os.userInfo().homedir : "");
+  if (!browserHome) return env;
+  if (!path.isAbsolute(browserHome)) {
+    throw new Error("BROWSER_CONTROL_BROWSER_HOME must be an absolute path.");
+  }
+  const resolvedHome = path.resolve(browserHome);
+  if (!existsSync(resolvedHome)) {
+    throw new Error(`Browser HOME does not exist: ${resolvedHome}`);
+  }
+  const canonicalHome = realpathSync.native(resolvedHome);
+  if (canonicalHome !== resolvedHome) {
+    throw new Error("Browser HOME must be a canonical path, not a symlink.");
+  }
+  return { ...env, HOME: canonicalHome };
+}
+
 function validateBrowserExecutable(executablePath, source = "executablePath") {
   const resolved = path.resolve(String(executablePath));
-  const basename = path.basename(resolved).toLowerCase();
-  if (!["chrome.exe", "msedge.exe"].includes(basename)) {
-    throw new Error(`${source} must point to Google Chrome (chrome.exe) or Microsoft Edge (msedge.exe).`);
+  if (!browserExecutableKind(resolved)) {
+    throw new Error(`${source} must point to a supported Google Chrome, Chromium, or Microsoft Edge executable.`);
   }
   if (!existsSync(resolved)) throw new Error(`${source} does not exist: ${resolved}`);
   const canonical = realpathSync.native(resolved);
@@ -1596,11 +1642,12 @@ function findBrowserExecutable(browser, explicitPath) {
   if (process.env.BROWSER_CONTROL_BROWSER_PATH) return validateBrowserExecutable(process.env.BROWSER_CONTROL_BROWSER_PATH, "BROWSER_CONTROL_BROWSER_PATH");
 
   const standard = standardBrowserExecutablePaths();
-  const chrome = standard.filter((candidate) => path.basename(candidate).toLowerCase() === "chrome.exe");
-  const edge = standard.filter((candidate) => path.basename(candidate).toLowerCase() === "msedge.exe");
-  const candidates = String(browser || "edge").toLowerCase().includes("chrome") ? chrome : edge;
+  const chrome = standard.filter((candidate) => browserExecutableKind(candidate) === "chrome");
+  const edge = standard.filter((candidate) => browserExecutableKind(candidate) === "edge");
+  const requestedBrowser = String(browser || (process.platform === "win32" ? "edge" : "chrome"));
+  const candidates = requestedBrowser.toLowerCase().includes("chrome") ? chrome : edge;
   const found = candidates.find((candidate) => existsSync(candidate));
-  if (!found) throw new Error(`No standard ${String(browser || "edge")} executable was found. Configure BROWSER_CONTROL_BROWSER_PATH and allow its exact path with BROWSER_CONTROL_ALLOWED_BROWSER_PATHS for a portable installation.`);
+  if (!found) throw new Error(`No standard ${requestedBrowser} executable was found. Configure BROWSER_CONTROL_BROWSER_PATH and allow its exact path with BROWSER_CONTROL_ALLOWED_BROWSER_PATHS for a portable installation.`);
   return validateBrowserExecutable(found, "auto-detected browser executable");
 }
 
@@ -1645,7 +1692,12 @@ async function toolBrowserStart(args = {}) {
   if (Array.isArray(args.extraArgs)) flags.push(...args.extraArgs.map(String));
   flags.push(String(args.url || "about:blank"));
 
-  const child = spawn(executable, flags, { detached: true, stdio: "ignore", windowsHide: Boolean(args.headless) });
+  const child = spawn(executable, flags, {
+    detached: true,
+    stdio: "ignore",
+    windowsHide: Boolean(args.headless),
+    env: browserProcessEnv(),
+  });
   child.unref();
   launched.set(port, { pid: child.pid, executable, userDataDir, host });
 
@@ -2073,8 +2125,9 @@ async function toolBrowserPlaywrightStart(args = {}) {
   const engine = mod[browserName];
   if (!engine?.launch && !engine?.launchPersistentContext) throw new Error(`Unsupported Playwright browser: ${browserName}`);
   const headless = args.headless !== false;
-  const launchOptions = { headless };
+  const launchOptions = { headless, env: browserProcessEnv() };
   if (args.executablePath) launchOptions.executablePath = validateBrowserExecutable(args.executablePath);
+  else if (browserName === "chromium") launchOptions.executablePath = findBrowserExecutable("chrome");
   if (Array.isArray(args.args)) launchOptions.args = args.args.map(String);
   const id = randomUUID();
   let browser = null;
@@ -2531,11 +2584,7 @@ async function toolBrowserLocatorType(args = {}) {
     if (!result.ok) throw new Error(result.error || "Locator is not editable");
     await dispatchMouseClick(cdp, result.actionability.clickPoint, args);
     if (args.clear) {
-      await cdp.send("Input.dispatchKeyEvent", { type: "keyDown", key: "Control", code: "ControlLeft", windowsVirtualKeyCode: 17, nativeVirtualKeyCode: 17, modifiers: 2 });
-      await cdp.send("Input.dispatchKeyEvent", { type: "keyDown", key: "a", code: "KeyA", windowsVirtualKeyCode: 65, nativeVirtualKeyCode: 65, modifiers: 2 });
-      await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", key: "a", code: "KeyA", windowsVirtualKeyCode: 65, nativeVirtualKeyCode: 65, modifiers: 2 });
-      await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", key: "Control", code: "ControlLeft", windowsVirtualKeyCode: 17, nativeVirtualKeyCode: 17, modifiers: 0 });
-      await dispatchKey(cdp, "Backspace", "Backspace", 8);
+      await clearFocusedEditable(cdp);
     }
     if (args.value) await cdp.send("Input.insertText", { text: args.value });
     if (args.pressEnter) await dispatchKey(cdp, "Enter", "Enter", 13);
@@ -2547,6 +2596,25 @@ async function toolBrowserLocatorType(args = {}) {
 async function dispatchKey(cdp, key, code, windowsVirtualKeyCode, modifiers = 0) {
   await cdp.send("Input.dispatchKeyEvent", { type: "keyDown", key, code, windowsVirtualKeyCode, nativeVirtualKeyCode: windowsVirtualKeyCode, modifiers });
   await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", key, code, windowsVirtualKeyCode, nativeVirtualKeyCode: windowsVirtualKeyCode, modifiers });
+}
+
+async function clearFocusedEditable(cdp) {
+  const result = await cdp.send("Runtime.evaluate", {
+    expression: `(() => {
+      const el = document.activeElement;
+      if (!el || (!(el instanceof HTMLInputElement) && !(el instanceof HTMLTextAreaElement) && !el.isContentEditable)) {
+        return { ok: false, reason: "focused element is not editable" };
+      }
+      if (el.isContentEditable) el.textContent = "";
+      else el.value = "";
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+      return { ok: true };
+    })()`,
+    returnByValue: true,
+    userGesture: true,
+  });
+  if (!result.result?.value?.ok) throw new Error(result.result?.value?.reason || "Failed to clear focused editable element");
 }
 
 async function toolBrowserClick(args = {}) {
@@ -2568,11 +2636,7 @@ async function toolBrowserType(args = {}) {
     if (!found.ok) throw new Error(found.error);
     await dispatchMouseClick(cdp, found.center, args);
     if (args.clear) {
-      await cdp.send("Input.dispatchKeyEvent", { type: "keyDown", key: "Control", code: "ControlLeft", windowsVirtualKeyCode: 17, nativeVirtualKeyCode: 17, modifiers: 2 });
-      await cdp.send("Input.dispatchKeyEvent", { type: "keyDown", key: "a", code: "KeyA", windowsVirtualKeyCode: 65, nativeVirtualKeyCode: 65, modifiers: 2 });
-      await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", key: "a", code: "KeyA", windowsVirtualKeyCode: 65, nativeVirtualKeyCode: 65, modifiers: 2 });
-      await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", key: "Control", code: "ControlLeft", windowsVirtualKeyCode: 17, nativeVirtualKeyCode: 17, modifiers: 0 });
-      await dispatchKey(cdp, "Backspace", "Backspace", 8);
+      await clearFocusedEditable(cdp);
     }
     if (args.value) await cdp.send("Input.insertText", { text: args.value });
     if (args.pressEnter) await dispatchKey(cdp, "Enter", "Enter", 13);

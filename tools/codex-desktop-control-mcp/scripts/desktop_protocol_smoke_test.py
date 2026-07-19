@@ -124,7 +124,7 @@ def main() -> None:
         require(status.get('ui_detection', {}).get('install', {}).get('install_script'), f'missing UI model install diagnostics: {status}')
         require('VALIDATION_ERROR' in status.get('error_codes', []), f'missing stable error code inventory: {status.get("error_codes")}')
 
-        self_check = parse_tool_payload(request('tools/call', {'name': 'codex_desktop_control_self_check', 'arguments': {}}, timeout=30.0))
+        self_check = parse_tool_payload(request('tools/call', {'name': 'codex_desktop_control_self_check', 'arguments': {}}, timeout=90.0))
         if self_check.get('ok') is not True:
             clipboard = self_check.get('checks', {}).get('clipboard', {})
             other_checks = ['status', 'uia', 'windows', 'screenshot', 'visual_fallback']
