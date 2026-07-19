@@ -109,7 +109,8 @@ do {
 } while ((Get-Date) -lt $deadline)
 if (-not $desktopMain) { throw 'Upgraded desktop client did not start' }
 
-$recoveryDeadline = (Get-Date).AddMinutes(5)
+$recoveryTimeoutSeconds = [Math]::Max(300, ($before.Count * 120) + 90)
+$recoveryDeadline = (Get-Date).AddSeconds($recoveryTimeoutSeconds)
 $stableSince = $null
 $stableSignature = ''
 do {
@@ -147,7 +148,7 @@ do {
 } while ((Get-Date) -lt $recoveryDeadline)
 if (@($botRows | Where-Object { -not $_.online }).Count -gt 0 -or $null -eq $stableSince -or ((Get-Date) - $stableSince).TotalSeconds -lt 60) {
     $offlineNames = ($botRows | Where-Object { -not $_.online } | Select-Object -ExpandProperty name) -join ', '
-    throw "Managed Bots did not remain stable for 60 seconds after upgrade: $offlineNames"
+    throw "Managed Bots did not remain stable for 60 seconds within ${recoveryTimeoutSeconds}s: $offlineNames"
 }
 
 [pscustomobject]@{

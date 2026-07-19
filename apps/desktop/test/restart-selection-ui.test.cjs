@@ -27,3 +27,10 @@ test("ships selected safe and forced Bot restart controls through every desktop 
   assert.match(main, /restartSelectedManagedBots/);
   assert.doesNotMatch(html, /restart-online-bots-button/);
 });
+
+test("installed-upgrade verification scales its recovery window with managed Bot count", () => {
+  const script = read("scripts/verify-installed-upgrade.ps1");
+  assert.match(script, /\$recoveryTimeoutSeconds\s*=\s*\[Math\]::Max\(300, \(\$before\.Count \* 120\) \+ 90\)/);
+  assert.match(script, /AddSeconds\(\$recoveryTimeoutSeconds\)/);
+  assert.doesNotMatch(script, /AddMinutes\(5\)/);
+});
