@@ -29,7 +29,7 @@
 C:\Users\<you>\Documents\Codex\codex-homes\codex-assistant-writing
 ```
 
-这样空间 Bot 的配置、Skills、MCP 和会话状态不会直接污染全局 `.codex`。如果配置了 `desktopCodexHome`，空间会话可以镜像到全局桌面侧边栏，删除时也会同步清理镜像。
+这样空间 Bot 的配置、Skills、MCP 和会话状态不会直接污染全局 `.codex`。空间工厂默认不配置 `desktopCodexHome`，空间会话不会镜像到全局桌面侧边栏；`/list all` 也只聚合同一 Codex Home 下的 Bot 会话。
 
 ## Provider 同步
 

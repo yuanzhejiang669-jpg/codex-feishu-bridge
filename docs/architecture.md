@@ -48,7 +48,7 @@ Codex 飞书 Bridge 的职责是把飞书 Bot 消息转成 Codex 本机任务，
 - 当前 Codex Home 的 `sessions/**/rollout-*.jsonl`
 - 当前 Codex Home 的 `session_index.jsonl`
 - 当前 Codex Home 的 `.codex-global-state.json`
-- 垂类 Bot 配置的 `desktopCodexHome` 镜像空间
+- 与当前 Bot 使用同一 Codex Home 的其他 Bridge 实例绑定
 
 展示时会标注来源，让用户区分正常会话、仅残留文件、侧边栏残留和 Bridge 绑定。
 
@@ -59,7 +59,7 @@ Codex 飞书 Bridge 的职责是把飞书 Bot 消息转成 Codex 本机任务，
 1. `/delete <序号>`：只按当时 `/list` 结果保存 threadId 快照，并要求二次确认。
 2. `/confirm delete <序号>`：按快照 threadId 清理实际存在的位置。
 
-清理范围包括 DB 主记录、rollout 文件、`session_index.jsonl`、`.codex-global-state.json` 和 Bridge 绑定。垂类 Bot 还会清理 `desktopCodexHome` 镜像。不会删除配置、密钥、日志、watchdog、Bot 配置或飞书聊天消息。
+清理范围包括当前 Codex Home 的 DB 主记录、rollout 文件、`session_index.jsonl`、`.codex-global-state.json`，以及同一 Codex Home 的 Bridge 绑定。不会跨 Codex Home 删除会话，也不会删除配置、密钥、日志、watchdog、Bot 配置或飞书聊天消息。
 
 ## 控制面板配置加载
 

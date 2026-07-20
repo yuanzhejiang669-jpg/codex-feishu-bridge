@@ -88,6 +88,8 @@ import { createSessionStore } from "./src/sessions/store.mjs";
 import {
   discoverCodexHomeRegistry,
   loadRegisteredBridgeBindings,
+  removeThreadFromRegisteredBridgeSessions,
+  stateDirsForCodexHome,
 } from "./src/sessions/codex-home-registry.mjs";
 import {
   findDeepKey,
@@ -116,6 +118,12 @@ const DEFAULT_TOOLS = resolveDefaultTools();
 const DEFAULT_DATA_ROOT = resolveDefaultDataRoot();
 const LARK_PROFILE = String(process.env.CODEX_FEISHU_LARK_PROFILE || process.env.LARK_CLI_PROFILE || "").trim();
 const EVENT_KEYS = parseEventKeys(process.env.CODEX_FEISHU_EVENT_KEYS || process.env.CODEX_FEISHU_EVENT_KEY || "im.message.receive_v1");
+const CODEX_HOME_PATH = path.resolve(process.env.CODEX_HOME || path.join(os.homedir(), ".codex"));
+const CONFIGURED_DESKTOP_CODEX_HOME = String(process.env.CODEX_FEISHU_DESKTOP_CODEX_HOME || "").trim();
+const DESKTOP_CODEX_HOME_PATH = CONFIGURED_DESKTOP_CODEX_HOME
+  && sameResolvedPath(CONFIGURED_DESKTOP_CODEX_HOME, CODEX_HOME_PATH)
+  ? CODEX_HOME_PATH
+  : "";
 
 const CONFIG = {
   workspace: process.env.CODEX_FEISHU_WORKSPACE || process.cwd(),
@@ -161,10 +169,8 @@ const CONFIG = {
   sidebarReconcileIntervalMs: parseDurationMs(process.env.CODEX_FEISHU_SIDEBAR_RECONCILE_INTERVAL_MS, 60_000),
   syncSessionsFromCodex: (process.env.CODEX_FEISHU_SYNC_SESSIONS_FROM_CODEX || "1") !== "0",
   keepEmptySessionMs: Number(process.env.CODEX_FEISHU_KEEP_EMPTY_SESSION_MS || `${10 * 60_000}`),
-  codexHome: path.resolve(process.env.CODEX_HOME || path.join(os.homedir(), ".codex")),
-  desktopCodexHome: String(process.env.CODEX_FEISHU_DESKTOP_CODEX_HOME || "").trim()
-    ? path.resolve(String(process.env.CODEX_FEISHU_DESKTOP_CODEX_HOME).trim())
-    : "",
+  codexHome: CODEX_HOME_PATH,
+  desktopCodexHome: DESKTOP_CODEX_HOME_PATH,
 };
 
 const logPath = path.join(CONFIG.logDir, "codex-feishu-bridge.log");
@@ -1321,7 +1327,8 @@ async function mergedSessionEntries(chatId) {
   }
 
   const registry = registeredCodexHomeRegistry();
-  for (const binding of loadRegisteredBridgeBindings(registry.stateDirs)) {
+  const sameHomeStateDirs = stateDirsForCodexHome(registry, CONFIG.codexHome);
+  for (const binding of loadRegisteredBridgeBindings(sameHomeStateDirs)) {
     if (sameResolvedPath(binding.stateDir, CONFIG.stateDir)) continue;
     const session = normalizeSessionData(binding.session);
     mergeThreadInventoryEntry(entryMap, {
@@ -4467,10 +4474,7 @@ async function deleteCodexLocalThread(threadId) {
   const id = String(threadId || "").trim();
   if (!id) throw new Error("thread id is required");
 
-  const registry = registeredCodexHomeRegistry();
-  const homes = registry.homes
-    .map((item) => item.codexHome)
-    .filter((codexHome) => fs.existsSync(codexHome) || sameResolvedPath(codexHome, CONFIG.codexHome));
+  const homes = [path.resolve(CONFIG.codexHome)];
   await markCodexThreadDeletedAcrossHomes(id, homes);
 
   const homeResults = [];
@@ -4493,7 +4497,7 @@ async function deleteCodexLocalThread(threadId) {
     }
   }
   if (failures.length || residues.length) {
-    throw new Error(`Cross-home thread delete incomplete: ${safeJson({ threadId: id, failures, residues })}`);
+    throw new Error(`Codex Home thread delete incomplete: ${safeJson({ threadId: id, failures, residues })}`);
   }
 
   const firstWithTitle = homeResults.find((item) => item.title);
@@ -7068,7 +7072,14 @@ async function handleConfirmCommand(chatId, rest, messageId) {
         throw new Error(`会话已开始运行，已跳过删除：${item.threadId}`);
       }
       const result = await deleteCodexLocalThread(item.threadId);
-      const bridgeRemoved = removeThreadFromBridgeSessions(item.threadId);
+      const registry = registeredCodexHomeRegistry();
+      const sameHomeStateDirs = stateDirsForCodexHome(registry, CONFIG.codexHome);
+      const externalBindings = removeThreadFromRegisteredBridgeSessions(
+        sameHomeStateDirs,
+        item.threadId,
+        { excludeStateDirs: [CONFIG.stateDir] },
+      );
+      const bridgeRemoved = removeThreadFromBridgeSessions(item.threadId) + externalBindings.removed;
       bridgeRemovedTotal += bridgeRemoved;
       forgetDeleteConfirmationsForThread(item.threadId);
       successes.push({ item, result, bridgeRemoved });

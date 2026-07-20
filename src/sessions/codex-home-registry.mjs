@@ -2,6 +2,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { writeJsonFileAtomicSync } from "../utils/json.mjs";
+
 function readJson(filePath) {
   try {
     const raw = fs.readFileSync(filePath, "utf8").replace(/^\uFEFF/, "");
@@ -44,13 +46,28 @@ function addHome(homes, value, source) {
   homes.set(key, current);
 }
 
+function addStateDir(registry, value, codexHome, source, { authoritative = false } = {}) {
+  const stateDir = normalizedPath(value);
+  if (!stateDir) return;
+  const key = pathKey(stateDir);
+  const resolvedHome = normalizedPath(codexHome);
+  const current = registry.instances.get(key) || {
+    stateDir,
+    codexHome: "",
+    sources: [],
+  };
+  if (resolvedHome && (authoritative || !current.codexHome)) current.codexHome = resolvedHome;
+  if (source && !current.sources.includes(source)) current.sources.push(source);
+  registry.instances.set(key, current);
+}
+
 function addLaunchConfig(registry, launchConfigPath) {
   const config = readJson(launchConfigPath);
   if (!config) return;
   addHome(registry.homes, config.codexHome, "launch-config:codexHome");
   addHome(registry.homes, config.desktopCodexHome, "launch-config:desktopCodexHome");
   const stateDir = path.dirname(launchConfigPath);
-  registry.stateDirs.set(pathKey(stateDir), stateDir);
+  addStateDir(registry, stateDir, config.codexHome, "launch-config", { authoritative: true });
 }
 
 function scanInstancesRoot(registry, instancesRoot) {
@@ -80,7 +97,7 @@ function addInstancesConfig(registry, configPath, instancesRoots) {
     const runtimeRoot = normalizedPath(instance?.runtimeRoot);
     if (!runtimeRoot) continue;
     const stateDir = path.join(runtimeRoot, "state");
-    registry.stateDirs.set(pathKey(stateDir), stateDir);
+    addStateDir(registry, stateDir, instance?.codexHome || config.defaults?.codexHome, "instances-config");
     const instancesRoot = path.dirname(runtimeRoot);
     if (path.basename(instancesRoot).toLowerCase() === "instances") addInstancesRoot(instancesRoots, instancesRoot);
   }
@@ -100,12 +117,13 @@ export function discoverCodexHomeRegistry({
 } = {}) {
   const registry = {
     homes: new Map(),
-    stateDirs: new Map(),
+    instances: new Map(),
   };
   const instancesRoots = new Map();
 
   addHome(registry.homes, currentCodexHome, "current");
   addHome(registry.homes, desktopCodexHome, "desktop");
+  addStateDir(registry, stateDir, currentCodexHome, "current", { authoritative: true });
   addInstancesRoot(instancesRoots, instancesRootFromStateDir(stateDir));
   addInstancesRoot(instancesRoots, defaultDataRoot ? path.join(defaultDataRoot, "instances") : "");
 
@@ -130,9 +148,18 @@ export function discoverCodexHomeRegistry({
 
   return {
     homes: [...registry.homes.values()],
-    stateDirs: [...registry.stateDirs.values()],
+    instances: [...registry.instances.values()],
+    stateDirs: [...registry.instances.values()].map((item) => item.stateDir),
     instancesRoots: [...instancesRoots.values()],
   };
+}
+
+export function stateDirsForCodexHome(registry, codexHome) {
+  const targetKey = pathKey(codexHome);
+  if (!targetKey) return [];
+  return (registry?.instances || [])
+    .filter((item) => pathKey(item?.codexHome) === targetKey)
+    .map((item) => item.stateDir);
 }
 
 export function loadRegisteredBridgeBindings(stateDirs = []) {
@@ -164,4 +191,38 @@ export function loadRegisteredBridgeBindings(stateDirs = []) {
     }
   }
   return bindings;
+}
+
+export function removeThreadFromRegisteredBridgeSessions(stateDirs, threadId, { excludeStateDirs = [] } = {}) {
+  const id = String(threadId || "").trim();
+  if (!id) return { removed: 0, filesChanged: [] };
+  const excluded = new Set(excludeStateDirs.map(pathKey).filter(Boolean));
+  const filesChanged = [];
+  let removed = 0;
+
+  for (const stateDir of stateDirs || []) {
+    const resolvedStateDir = normalizedPath(stateDir);
+    if (!resolvedStateDir || excluded.has(pathKey(resolvedStateDir))) continue;
+    const sessionsPath = path.join(resolvedStateDir, "sessions.json");
+    const persisted = readJson(sessionsPath);
+    if (!persisted?.chats || typeof persisted.chats !== "object") continue;
+    let fileRemoved = 0;
+    for (const chatState of Object.values(persisted.chats)) {
+      if (!Array.isArray(chatState?.sessions)) continue;
+      const before = chatState.sessions.length;
+      chatState.sessions = chatState.sessions.filter((session) => (
+        String(session?.codexThreadId || "").trim() !== id
+      ));
+      fileRemoved += before - chatState.sessions.length;
+      if (!chatState.sessions.some((session) => session?.id === chatState.currentSessionId)) {
+        chatState.currentSessionId = chatState.sessions[0]?.id || "";
+      }
+    }
+    if (!fileRemoved) continue;
+    writeJsonFileAtomicSync(sessionsPath, persisted);
+    removed += fileRemoved;
+    filesChanged.push(sessionsPath);
+  }
+
+  return { removed, filesChanged };
 }

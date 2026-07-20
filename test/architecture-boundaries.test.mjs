@@ -487,6 +487,18 @@ test("single-instance lock fails instead of spinning when a stale lock cannot be
   assert.throws(() => lock.acquire(), /Unable to remove stale Bridge lock/);
 });
 
+test("workspace factory and runtime keep distinct Codex homes isolated", () => {
+  const bridgeSource = fs.readFileSync(new URL("../codex-feishu-bridge.mjs", import.meta.url), "utf8");
+  const panelSource = fs.readFileSync(new URL("../control-panel.mjs", import.meta.url), "utf8");
+  const factoryStart = panelSource.indexOf("function buildFactoryPreview(payload)");
+  const factoryEnd = panelSource.indexOf("function resolveLarkCliTool()", factoryStart);
+  const factorySource = panelSource.slice(factoryStart, factoryEnd);
+
+  assert.match(bridgeSource, /DESKTOP_CODEX_HOME_PATH[\s\S]*sameResolvedPath/);
+  assert.doesNotMatch(factorySource, /--desktop-codex-home|-DesktopCodexHome/);
+  assert.match(factorySource, /desktopCodexHome:\s*""/);
+});
+
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }

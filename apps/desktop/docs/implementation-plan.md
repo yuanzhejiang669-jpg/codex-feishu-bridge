@@ -520,3 +520,12 @@ These risks are addressed with protocol versioning, active-run guards, transacti
 - Refuse deletion when any registered Bot is actively using the thread, and repeat that check immediately before each batch item is removed.
 - Lock batch selection to preview-time thread IDs. `/delete 2-9` followed by `/confirm delete 2-9` must remove exactly eight sessions without including item `1`.
 - Deliver the same engine through Windows script deployment, Windows desktop `0.7.6`, GitHub source/Windows Release, and the SSH-maintained physical Apple Silicon Mac. The powered-off old Windows device remains excluded.
+
+## 2026-07-20 - Codex Home session isolation correction
+
+- Treat the resolved Codex Home as the visibility and deletion ownership boundary.
+- Aggregate `/list all` bindings only from Bot state directories assigned to the current Home.
+- Delete physical Codex records only from the current Home, while removing matching Bridge bindings from other Bots sharing that Home.
+- Continue checking active runs across every registered Bot before deletion, including Bots in other Homes, so isolation does not weaken task protection.
+- Disable cross-Home `desktopCodexHome` mirroring at runtime and make the workspace factory emit no mirror target for future spaces.
+- Ship and validate Windows desktop `0.7.7` first. Update the physical Mac through Tailscale and SSH only after user acceptance; do not contact the powered-off old Windows device.

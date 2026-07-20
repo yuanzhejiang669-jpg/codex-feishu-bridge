@@ -1859,7 +1859,6 @@ function buildFactoryPreview(payload) {
   const paths = config.paths || {};
   const knownNames = new Set((config.instances || []).map((item) => item.name || item.id).filter(Boolean));
   const knownTaskNames = new Set((config.instances || []).map((item) => item.taskName).filter(Boolean));
-  const globalCodexHome = paths.codexHome || path.join(os.homedir(), ".codex");
   const sourceRoot = paths.sourceRoot || __dirname;
   const instances = [];
 
@@ -1886,8 +1885,6 @@ function buildFactoryPreview(payload) {
       workspace,
       "--codex-home",
       factory.codexHome,
-      "--desktop-codex-home",
-      globalCodexHome,
       "--brand",
       factory.brand,
       "--install-startup",
@@ -1906,7 +1903,7 @@ function buildFactoryPreview(payload) {
       runtimeRoot: runtimeRootForInstance,
       workspace,
       codexHome: factory.codexHome,
-      desktopCodexHome: globalCodexHome,
+      desktopCodexHome: "",
       taskName,
       conflicts: {
         instanceName: knownNames.has(name),
@@ -1929,8 +1926,6 @@ function buildFactoryPreview(payload) {
           workspace,
           "-CodexHome",
           factory.codexHome,
-          "-DesktopCodexHome",
-          globalCodexHome,
           "-EnableMcp",
         ].map(quoteCommandArg).join(" "),
         installWatchdog: [
@@ -1976,7 +1971,7 @@ function buildFactoryPreview(payload) {
       workspaceRoot: factory.workspaceRoot,
       codexHomeRoot: factory.codexHomeRoot,
       spaceCodexHome: factory.codexHome,
-      desktopCodexHome: globalCodexHome,
+      desktopCodexHome: "",
       codexConfig: paths.codexConfig || codexConfigPath,
       bridgeInstancesJson: instancesConfigPath,
       registerScript: path.join(sourceRoot, "register-codex-feishu-bot.mjs"),

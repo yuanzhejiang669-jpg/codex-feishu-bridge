@@ -30,7 +30,7 @@ Provider 添加、测试、环境变量替换、同步到空间 Codex Home 和�
 - 多 Bot 实例：每个 Bot 独立飞书 profile、运行目录、日志、workspace、watchdog。
 - 会话命令：`/help`、`/list`、`/switch`、`/new`、`/delete`、`/confirm delete`、`/rename` 等。
 - 安全删除：先按 `/list` 序号生成 threadId 快照，二次确认后清理 Codex DB、rollout、索引、侧边栏状态和 Bridge 绑定。
-- 垂类空间：支持写作、百科、画图等空间 Bot，共用或独立 Codex Home，并可配置桌面侧边栏镜像。
+- 垂类空间：支持写作、百科、画图等空间 Bot，共用或独立 Codex Home；不同 Codex Home 的会话严格隔离，不再镜像到全局侧边栏。
 - 控制面板：查看进程、日志、Provider、MCP、工作空间工厂、Bot 卸载和空间卸载。
 - 自动注册辅助：生成飞书 Bot、写入 lark-cli profile、校验 scopes、安装 watchdog、启动实例。
 - Provider 同步：从全局 Codex 配置同步可枚举 provider 到空间 Codex Home，密钥走环境变量。
@@ -154,7 +154,7 @@ http://127.0.0.1:8320/
 /provider list
 ```
 
-`/list` 会合并当前 Bot 绑定、Codex DB、rollout 文件、`session_index.jsonl`、`.codex-global-state.json` 和必要的桌面镜像，并标注来源。`/delete` 只生成待删除快照，`/confirm delete` 才真正按 threadId 清理，避免列表顺序变化造成误删。
+`/list` 会合并当前 Bot 绑定、同一 Codex Home 的其他 Bot 绑定、Codex DB、rollout 文件、`session_index.jsonl` 和 `.codex-global-state.json`，并标注来源；不会列出其他 Codex Home 的会话。`/delete` 只生成待删除快照，`/confirm delete` 才真正按 threadId 清理当前 Home 和同 Home Bridge 绑定，避免列表顺序变化造成误删或跨空间删除。
 
 ## 文档
 
