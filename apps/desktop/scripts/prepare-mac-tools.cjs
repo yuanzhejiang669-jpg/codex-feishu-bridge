@@ -22,7 +22,8 @@ function download(url, destination) {
   if (!new Set(["github.com", "nodejs.org"]).has(parsed.hostname)) throw new Error(`Download host is not allowed: ${parsed.hostname}`);
   execFileSync("curl", [
     "--fail", "--location", "--silent", "--show-error",
-    "--connect-timeout", "15", "--max-time", "300", "--max-redirs", "5",
+    "--connect-timeout", "15", "--max-time", "1200", "--max-redirs", "5",
+    "--retry", "5", "--retry-all-errors", "--retry-delay", "2", "--retry-max-time", "1800",
     "--output", destination, url,
   ], { stdio: ["ignore", "inherit", "inherit"] });
 }
