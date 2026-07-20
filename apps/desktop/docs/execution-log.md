@@ -1662,3 +1662,21 @@ Permanent fix:
 - All six Mac ordinary/writing Bots restarted with replacement PIDs `66988`, `67282`, `67700`, `67116`, `67468`, and `67957`. Final audit found all six alive, idle, launched from the installed `0.7.6` engine, and carrying an event-consumer/WebSocket-ready log marker.
 - Restarted the remaining 13 idle current-device script instances after the final source change. Final script audit found all 15 live instances on the shared source path with ready connection logs; the current `codex-assistant-1` run remained uninterrupted and every other instance was idle.
 - The powered-off old Windows device remains the user's explicit synchronization exception and was not contacted.
+
+## 2026-07-20 - 0.7.7 Codex Home session isolation correction
+
+- Corrected the 0.7.6 ownership model: `/list all` now loads cross-instance Bridge bindings only from state directories assigned to the current resolved Codex Home. Persisted `launch-config.json` is authoritative over stale instance-list metadata.
+- Confirmed deletion now writes tombstones and removes physical Codex records only in the current Home, then removes matching bindings from other Bots sharing that Home. Active-run checks intentionally remain global across every registered Bot.
+- Disabled different-Home `desktopCodexHome` targets at runtime, removed mirror targets from future workspace-factory output and public examples, and migrated the current device's four writing launch configs plus `180bot` to empty mirror targets. The three drawing Bot configs were already empty.
+- Historical-mirror audit found zero source threads in the writing and drawing Homes, zero specialized Bridge bindings, and one global thread belonging to the active ordinary conversation. No SQLite, rollout, index, or global-state record was deleted during migration.
+- Root verification passed 65/65 tests. Desktop verification passed 171 tests with three expected platform skips. The first local package was rejected because staging correctly reported old Git HEAD `b52fe10`; after implementation commit `e9e6188`, packaging was repeated and verified the packaged engine manifest against `e9e618884403238b1a8f6943fc412fc949ef7ca8`.
+- GitHub Actions run `29753298247` completed both clean Windows build and atomic publish jobs successfully. Public Release `v0.7.7` is neither draft nor prerelease and contains exactly five Windows assets. The downloaded installer SHA-256 is `9aa3dab9604da12b9d9a51dcd735bb32cd61d0975a80f32dc54cdb4d83d54b72`.
+- Upgraded the current Windows client to file/product version `0.7.7` / `0.7.7.0`; its installed engine manifest points to `e9e6188`. The NSIS process returned code 2 while finalizing, but independent file-version, uninstall-registry, packaged-manifest, process, and Bot-recovery checks all confirmed a complete installation.
+- Safely restarted all 14 idle script-managed Bots and skipped the active `codex-assistant-1` conversation PID `27052`. All 14 received replacement PIDs with zero failures. The upgraded client recovered drawing Bot PIDs `21972`, `73560`, and `71488`.
+- Final writing/drawing audit found all seven relevant Bots alive, idle, and carrying connection-ready log markers; every launch config has an empty `desktopCodexHome`. The physical Mac remains on 0.7.6 pending user acceptance, and the powered-off old Windows device was not contacted.
+
+Adversarial review for the most likely three-month regressions:
+
+1. A stale instance list could assign a Bot to the wrong Home and reintroduce cross-space bindings. Fixed by retaining launch-config authority and adding an explicit stale-config regression test.
+2. A future workspace could silently restore global mirroring. Fixed by removing mirror arguments from factory registration/start commands, forcing an empty factory field, rejecting different-Home mirror targets at runtime, and covering the boundary statically.
+3. Another same-Home Bot could retain or rewrite a deleted binding. Fixed by directly cleaning all same-Home session files while preserving the shared Home tombstone and periodic reconciliation as the race-resistant fallback; focused tests verify selected-file cleanup and current-session repair.
