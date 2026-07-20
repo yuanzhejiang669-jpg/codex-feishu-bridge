@@ -1680,3 +1680,13 @@ Adversarial review for the most likely three-month regressions:
 1. A stale instance list could assign a Bot to the wrong Home and reintroduce cross-space bindings. Fixed by retaining launch-config authority and adding an explicit stale-config regression test.
 2. A future workspace could silently restore global mirroring. Fixed by removing mirror arguments from factory registration/start commands, forcing an empty factory field, rejecting different-Home mirror targets at runtime, and covering the boundary statically.
 3. Another same-Home Bot could retain or rewrite a deleted binding. Fixed by directly cleaning all same-Home session files while preserving the shared Home tombstone and periodic reconciliation as the race-resistant fallback; focused tests verify selected-file cleanup and current-session repair.
+
+## 2026-07-20 - 0.7.7 physical Mac rollout
+
+- Reached `CathydeMacBook-Pro.local` through Tailscale SSH at `100.71.171.84`. Before mutation, the installed client was `0.7.6`; all six managed Bots were alive with zero active runs, and every launch config already had an empty `desktopCodexHome`.
+- Transferred reviewed source through a local Git bundle and fast-forwarded the Mac checkout from `b52fe10` to `4186c81`. The existing untracked Browser Control `.crx` and `.pem` files remained untouched.
+- Mac-native verification passed all 65 Bridge tests. The desktop suite passed 172 tests with two expected platform skips. Tests used isolated temporary application-data roots and the installed arm64 Node runtime.
+- Built the local overlay from the existing Apple Silicon application bundle, replacing only tested desktop source, version metadata, and Bridge engine files while retaining Mac-native unpacked dependencies and tools.
+- The first recovery wait used unavailable zsh `EPOCHSECONDS` state after the new app had already installed and launched. Corrected the wait to `date +%s`, fixed PID-zero diagnostics, and verified the live installation instead of repeating the transaction.
+- Final installed version is `0.7.7`; packaged engine commit is `4186c811b950ea22f7b965e7752057ef3a8c22c7`; installed `app.asar` SHA-256 is `f349278ef4085fc17bfab6163ebba10e08922aec043604c880de9e419ead0767`.
+- All six Bots recovered sequentially with PIDs `73403`, `73465`, `73515`, `73581`, `73627`, and `73670`. Every Bot is alive, idle, has an empty desktop mirror target, and has a connection-ready log marker. The transactional rollback bundle and all remote deployment intermediates were removed after verification.
