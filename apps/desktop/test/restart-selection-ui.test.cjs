@@ -32,5 +32,8 @@ test("installed-upgrade verification scales its recovery window with managed Bot
   const script = read("scripts/verify-installed-upgrade.ps1");
   assert.match(script, /\$recoveryTimeoutSeconds\s*=\s*\[Math\]::Max\(300, \(\$before\.Count \* 120\) \+ 90\)/);
   assert.match(script, /AddSeconds\(\$recoveryTimeoutSeconds\)/);
+  assert.match(script, /\$notRestartedCount\s*=/);
+  assert.match(script, /Where-Object \{ -not \$_\.restarted \}/);
+  assert.match(script, /\$offlineCount -eq 0 -and \$notRestartedCount -eq 0/);
   assert.doesNotMatch(script, /AddMinutes\(5\)/);
 });

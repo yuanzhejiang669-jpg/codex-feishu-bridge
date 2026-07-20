@@ -133,8 +133,9 @@ do {
         }
     }
     $offlineCount = @($botRows | Where-Object { -not $_.online }).Count
+    $notRestartedCount = @($botRows | Where-Object { -not $_.restarted }).Count
     $signature = (@($botRows | Sort-Object name | ForEach-Object { "$($_.name):$($_.processId)" })) -join '|'
-    if ($offlineCount -eq 0) {
+    if ($offlineCount -eq 0 -and $notRestartedCount -eq 0) {
         if ($stableSignature -ne $signature) {
             $stableSignature = $signature
             $stableSince = Get-Date
@@ -146,9 +147,10 @@ do {
     }
     Start-Sleep -Seconds 2
 } while ((Get-Date) -lt $recoveryDeadline)
-if (@($botRows | Where-Object { -not $_.online }).Count -gt 0 -or $null -eq $stableSince -or ((Get-Date) - $stableSince).TotalSeconds -lt 60) {
+if (@($botRows | Where-Object { -not $_.online }).Count -gt 0 -or @($botRows | Where-Object { -not $_.restarted }).Count -gt 0 -or $null -eq $stableSince -or ((Get-Date) - $stableSince).TotalSeconds -lt 60) {
     $offlineNames = ($botRows | Where-Object { -not $_.online } | Select-Object -ExpandProperty name) -join ', '
-    throw "Managed Bots did not remain stable for 60 seconds within ${recoveryTimeoutSeconds}s: $offlineNames"
+    $notRestartedNames = ($botRows | Where-Object { -not $_.restarted } | Select-Object -ExpandProperty name) -join ', '
+    throw "Managed Bots did not restart and remain stable for 60 seconds within ${recoveryTimeoutSeconds}s; offline=[$offlineNames]; notRestarted=[$notRestartedNames]"
 }
 
 [pscustomobject]@{
