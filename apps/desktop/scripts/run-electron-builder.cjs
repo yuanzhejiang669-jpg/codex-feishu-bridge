@@ -1,7 +1,7 @@
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 
-const RETRYABLE_NETWORK_ERROR = /\b(?:ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|ENETUNREACH|ENOTFOUND)\b|socket hang up/i;
+const RETRYABLE_NETWORK_ERROR = /\b(?:ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|ENETUNREACH|ENOTFOUND)\b|socket hang up|Timeout awaiting ['"]request['"]/i;
 
 function isRetryableNetworkError(output) {
   return RETRYABLE_NETWORK_ERROR.test(String(output || ""));
