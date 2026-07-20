@@ -503,3 +503,10 @@ These risks are addressed with protocol versioning, active-run guards, transacti
 - Register one shared Desktop Control program body in both the ordinary and writing Codex Homes, with separate per-Home output directories. Installation must be idempotent and must not rewrite unrelated Provider, MCP, Skill, or secret configuration.
 - Keep the unpacked Browser Control extension as an explicit Chrome developer-mode installation. The bootstrap verifies the extension directory and token file, while the user performs Chrome's one-time `Load unpacked` confirmation.
 - Acceptance requires Windows protocol/smoke regression tests plus physical-Mac MCP protocol status, window listing, screenshot, clipboard, and non-destructive permission checks. Pointer and keyboard mutation tests run only after macOS Accessibility consent is visible.
+
+## 2026-07-20 - Split Windows release and macOS maintenance channels
+
+- Publish only the Windows x64 installer, blockmap, update metadata, and checksums through the stable GitHub Release workflow.
+- Maintain the physical Apple Silicon Mac directly through Tailscale and SSH. Transfer reviewed changes from the trusted Windows device, then build, install, and verify locally without requiring GitHub connectivity on the Mac.
+- Do not publish unsigned or locally overlaid macOS artifacts in the stable Windows channel. A future public Mac distribution requires a separate, explicitly approved signing and notarization project.
+- Preserve the same shared supervisor contract for ordinary and writing Bots while retaining platform-specific launchers: PowerShell on Windows and direct detached process groups on macOS.

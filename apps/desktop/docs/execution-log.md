@@ -1630,3 +1630,14 @@ Permanent fix:
 
 - The macOS supervisor now inspects every Provider definition in the Bot's selected Codex Home on each start and fills missing `env_key` values from the current `launchctl` session. It does not log values, mutate `process.env`, query malformed names, or override client-encrypted custom Provider credentials.
 - Added regression coverage for login-item stale snapshots, duplicate Provider references, value trimming, process-environment isolation, and custom-Provider precedence.
+
+## 2026-07-20 - 0.7.5 Windows restart latency and release-channel split
+
+- Replaced the Windows supervisor's `execFile` close-based completion with an exit-based PowerShell process contract. A successful launcher now completes when its PowerShell process exits instead of waiting for output handles retained by descendants.
+- Added a regression test that keeps simulated child pipes open after process exit. The supervisor must resolve immediately and close its local pipe readers.
+- Physical Windows verification reduced a selected safe restart of three drawing Bots from about 180 seconds to 18.1 seconds. All three replacement Bridge processes remained online with zero active runs.
+- Physical macOS verification restarted three ordinary Bots in 3.89 seconds. All six ordinary and writing Bots were then confirmed online with zero active runs, proving the direct macOS launcher does not require the Windows fix.
+- Adopted separate distribution channels: GitHub Releases publish Windows assets only; the physical Mac remains maintained through Tailscale and SSH. The Mac is intentionally unchanged for this Windows-specific fix.
+- Prepared desktop version `0.7.5` and changed the tag workflow to publish only the five verified Windows release files after a clean Windows build.
+- Workflow YAML parsing and the new Windows-only release regression test passed. The complete desktop suite passed 171 tests with zero failures and three expected platform skips; the root Bridge suite passed 57/57.
+- Local Windows packaging staged engine commit `b89494c26884206b68e793b029d7b3da9af941b5`, passed the protocol-proxy smoke, built the x64 NSIS installer and blockmap, generated update metadata/checksums, and verified every packaged version as `0.7.5`.
