@@ -5537,6 +5537,16 @@ async function testCurrentProviderModel(session, modelId) {
   }
 }
 
+async function assertCurrentProviderModelAvailable(session, modelId) {
+  const model = cleanOverride(modelId);
+  if (!model || model.toLowerCase() === "default") return;
+  const result = await listCurrentProviderModels(session);
+  if (result.source !== "provider" || !result.models.length) return;
+  if (!result.models.some((item) => item.id === model)) {
+    throw new Error(`模型 ${model} 不在 provider ${result.provider.id} 当前实时 /models 列表中；请先执行 /model list 查看可用模型。`);
+  }
+}
+
 async function startOrResumeAppServerThread(client, session, options = {}) {
   if (session.codexThreadId) {
     const previousThreadId = session.codexThreadId;
@@ -7384,6 +7394,7 @@ async function handleModelCommand(chatId, rest, messageId) {
       await sendText(chatId, "推理强度只能是：`none`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`。", "model-effort-invalid", messageId);
       return;
     }
+    await assertCurrentProviderModelAvailable(session, model);
     if (effort) validateReasoningSelection(effectiveSessionSettings(session).provider, model, effort);
 
     if (model.toLowerCase() === "default") {
@@ -7464,8 +7475,9 @@ function modelCapabilityMarkdown(session, { includeUsage = false } = {}) {
     "",
     `当前映射：\`${settings.requestedReasoning}\` → \`${mapping.supported ? mapping.effectiveEffort : "不支持"}\` → \`${mapping.supported ? mapping.upstreamValue : "不支持"}\``,
     capability.sourceUrl ? `来源：${capability.sourceUrl}` : "来源：暂无模型专属来源",
+    capability.verificationNote ? `核验说明：${capability.verificationNote}` : "",
     `能力池版本：\`${MODEL_REASONING_REGISTRY.registryVersion}\``,
-  ];
+  ].filter(Boolean);
   if (includeUsage) {
     lines.push(
       "",
@@ -7535,7 +7547,7 @@ async function modelListMarkdown(session) {
   }
   lines.push("");
   if (result.source === "provider") {
-    lines.push("`/model list` 和 `/model refresh` 都会实时查询当前 provider 的 `/models`；这个列表只是发现工具，不是白名单。");
+    lines.push("`/model list` 和 `/model refresh` 都会实时查询当前 provider 的 `/models`；模型切换和保存会再次核对这份实时列表。");
   }
   lines.push("切当前会话：`/model <模型ID> [推理强度]`，例如 `/model gpt-5.6-sol max`");
   lines.push("保存为全局默认：`/model save <模型ID> [推理强度]`");

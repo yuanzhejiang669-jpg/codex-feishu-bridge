@@ -230,6 +230,7 @@ test("validates Chat Completions and stores a client-proxy Responses endpoint", 
   const value = fixture();
   const writes = [];
   let committed = false;
+  let preparedModels = [];
   try {
     const fetchImpl = async (url) => url.endsWith("/models")
       ? response(200, { data: [{ id: "qwen-test" }] })
@@ -245,16 +246,20 @@ test("validates Chat Completions and stores a client-proxy Responses endpoint", 
       fetchImpl,
       readUserEnvironmentVariable: async () => "",
       setUserEnvironmentVariable: async (name, secret) => writes.push([name, secret]),
-      prepareProtocolProxyProvider: () => ({
+      prepareProtocolProxyProvider: (_provider, _defaultModel, models) => {
+        preparedModels = models;
+        return {
         codexProvider: { id: "qwen", name: "Qwen", baseUrl: "http://127.0.0.1:18788/v1", envKey: "QWEN_API_KEY", wireApi: "responses" },
         commit: async () => { committed = true; }, rollback: async () => {},
-      }),
+        };
+      },
     });
     const text = fs.readFileSync(path.join(value.codexHome, "config.toml"), "utf8");
     assert.match(text, /base_url = "http:\/\/127\.0\.0\.1:18788\/v1"/);
     assert.match(text, /wire_api = "responses"/);
     assert.doesNotMatch(text, /chat\.example|secret/);
     assert.equal(committed, true);
+    assert.deepEqual(preparedModels.map((item) => item.id), ["qwen-test"]);
     assert.deepEqual(writes, [["QWEN_API_KEY", "secret"]]);
   } finally { fs.rmSync(value.root, { recursive: true, force: true }); }
 });
@@ -279,7 +284,7 @@ test("restores an absent user key when writing a new Provider fails", async () =
   } finally { fs.rmSync(value.root, { recursive: true, force: true }); }
 });
 
-test("previews models and probes before replacing a key", async () => {
+test("replaces a key directly without requiring a model request", async () => {
   const value = fixture();
   const writes = [];
   let calls = 0;
@@ -290,16 +295,15 @@ test("previews models and probes before replacing a key", async () => {
         ? response(200, { data: [{ id: "gpt-test" }] })
         : response(200, { id: "resp_1" });
     };
-    const preview = await listProviderModels({ id: "existing", baseUrl: "https://existing.example/v1", envKey: "EXISTING_API_KEY", apiKey: "new-secret" }, { fetchImpl });
-    assert.deepEqual(preview.models.map((item) => item.id), ["gpt-test"]);
-    const result = await replaceGlobalProviderKey({ id: "existing", apiKey: "new-secret", model: "gpt-test" }, {
+    const result = await replaceGlobalProviderKey({ id: "existing", apiKey: "new-secret" }, {
       codexHome: value.codexHome,
       fetchImpl,
       readUserEnvironmentVariable: async () => "old-secret",
       setUserEnvironmentVariable: async (name, secret) => writes.push([name, secret]),
     });
-    assert.equal(result.probe.ok, true);
-    assert.equal(calls, 3);
+    assert.equal(result.validation, "not-requested");
+    assert.equal(result.requiresBotRestart, true);
+    assert.equal(calls, 0);
     assert.deepEqual(writes, [["EXISTING_API_KEY", "new-secret"]]);
     assert.equal(JSON.stringify(result).includes("new-secret"), false);
   } finally { fs.rmSync(value.root, { recursive: true, force: true }); }

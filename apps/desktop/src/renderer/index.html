@@ -188,7 +188,7 @@
               <label><span>Base URL</span><input name="baseUrl" required type="url" placeholder="https://api.example.com/v1"></label>
               <label><span>环境变量名</span><input name="envKey" required pattern="[A-Z_][A-Z0-9_]*" placeholder="COMPANY_API_KEY"></label>
               <label><span>API Key</span><input name="apiKey" required type="password" autocomplete="new-password"></label>
-              <label><span>测试模型</span><input name="model" placeholder="Chat Completions 必填；可先拉取模型"></label>
+              <label><span>默认模型</span><input name="model" placeholder="Chat Completions 可选；留空时使用拉取结果的第一个模型"></label>
               <div class="inline-actions">
                 <button id="provider-add-models" class="secondary-button" type="button">拉取模型</button>
                 <button id="provider-add-probe" class="secondary-button" type="button">测试请求</button>
@@ -198,17 +198,15 @@
           </section>
 
           <section class="content-section">
-            <div class="section-heading"><h2>替换 API Key</h2><span class="section-meta">先验证再保存</span></div>
+            <div class="section-heading"><h2>替换 API Key</h2><span class="section-meta">直接替换</span></div>
             <form id="provider-replace-form" class="stack-form">
               <label><span>已有 Provider</span><select name="id" required><option value="">请选择</option></select></label>
               <label><span>新 API Key</span><input name="apiKey" required type="password" autocomplete="new-password"></label>
-              <label><span>测试模型</span><input name="model" required placeholder="用于 /responses 测试"></label>
               <div class="inline-actions">
-                <button id="provider-replace-models" class="secondary-button" type="button">拉取模型</button>
-                <button class="primary-button" type="submit">验证并替换</button>
+                <button class="primary-button" type="submit">替换 API Key</button>
               </div>
             </form>
-            <p class="form-note">新 Key 写入当前系统的安全凭据存储。已运行的 Bot 不会热更新，之后新启动的进程才会读取它。</p>
+            <p class="form-note">不发送模型测试请求。托管 Chat Provider 会立即重载自己的代理；直接 Responses Provider 需要重启使用它的 Bot。</p>
           </section>
         </div>
 

@@ -9,6 +9,6 @@
     "reviewAfterDays": {"type": "integer", "minimum": 1},
     "defaultRequestedEffort": {"type": "string"},
     "canonicalEfforts": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}},
-    "entries": {"type": "array", "items": {"type": "object", "required": ["id", "name", "providerPatterns", "modelPatterns", "selectableEfforts", "defaultRequestedEffort", "maximumEffort", "controlKind", "mapping", "upstreamValues", "sourceUrl", "verifiedAt"]}}
+    "entries": {"type": "array", "items": {"type": "object", "required": ["id", "name", "providerPatterns", "modelPatterns", "selectableEfforts", "defaultRequestedEffort", "maximumEffort", "controlKind", "mapping", "upstreamValues", "sourceUrl", "verifiedAt"], "properties": {"supportsReasoning": {"type": "boolean"}, "supportsVision": {"type": "boolean"}, "verificationNote": {"type": "string"}}}}
   }
 }

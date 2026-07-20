@@ -3,14 +3,28 @@ const test = require("node:test");
 const {
   REASONING_EFFORTS,
   reasoningRegistry,
+  resolveModelCapabilities,
   resolveReasoningSelection,
 } = require("../src/main/services/reasoning-effort.cjs");
 
 test("loads the shared reasoning registry in the desktop backend", () => {
   const registry = reasoningRegistry();
-  assert.equal(registry.registryVersion, "2026-07-16");
+  assert.equal(registry.registryVersion, "2026-07-20");
   assert.equal(registry.defaultRequestedEffort, "medium");
   assert.deepEqual(REASONING_EFFORTS, registry.canonicalEfforts);
+});
+
+test("marks verified Jiuuij Gemini models as reasoning and vision capable", () => {
+  assert.deepEqual(resolveModelCapabilities({
+    provider: "jiuuij-api",
+    model: "gemini-3.5-flash",
+  }), { supportsReasoning: true, supportsVision: true });
+});
+
+test("maps Jiuuij Gemini requests to each model's verified ceiling and floor", () => {
+  assert.equal(resolveReasoningSelection({ provider: "jiuuij-api", model: "gemini-3.5-flash", effort: "max" }).effectiveEffort, "high");
+  assert.equal(resolveReasoningSelection({ provider: "jiuuij-api", model: "gemini-3.1-flash-lite", effort: "none" }).effectiveEffort, "minimal");
+  assert.equal(resolveReasoningSelection({ provider: "jiuuij-api", model: "gemini-3.1-pro", effort: "minimal" }).effectiveEffort, "low");
 });
 
 test("maps a model-specific request without losing the requested effort", () => {

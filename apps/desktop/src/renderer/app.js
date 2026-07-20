@@ -79,7 +79,6 @@ const elements = {
   providerAddModels: document.querySelector("#provider-add-models"),
   providerAddProbe: document.querySelector("#provider-add-probe"),
   providerReplaceForm: document.querySelector("#provider-replace-form"),
-  providerReplaceModels: document.querySelector("#provider-replace-models"),
   providerSyncTargetCount: document.querySelector("#provider-sync-target-count"),
   providerSyncPreview: document.querySelector("#provider-sync-preview-button"),
   providerSyncApply: document.querySelector("#provider-sync-apply-button"),
@@ -824,7 +823,6 @@ function replacementProviderInput() {
     ...provider,
     wireApi: provider.managedProxy ? "chat" : provider.wireApi,
     apiKey: text(data.get("apiKey"), ""),
-    model: text(data.get("model"), ""),
   };
 }
 
@@ -1633,12 +1631,6 @@ elements.providerAddForm.addEventListener("submit", (event) => {
     await refresh();
   }).catch(() => {});
 });
-elements.providerReplaceModels.addEventListener("click", () => {
-  runProviderAction(elements.providerReplaceModels, async () => {
-    const result = await window.bridgeDesktop.listProviderModels(replacementProviderInput());
-    showProviderResult("模型拉取成功", providerModelsText(result));
-  }).catch(() => {});
-});
 elements.providerReplaceForm.addEventListener("submit", (event) => {
   event.preventDefault();
   const button = event.submitter;
@@ -1646,7 +1638,12 @@ elements.providerReplaceForm.addEventListener("submit", (event) => {
   runProviderAction(button, async () => {
     const result = await window.bridgeDesktop.replaceGlobalProviderKey(replacementProviderInput());
     elements.providerReplaceForm.elements.apiKey.value = "";
-    showProviderResult("API Key 已替换", `已验证 ${result.modelCount} 个模型，${result.probe.model} 响应耗时 ${result.probe.elapsedMs} ms；新启动的 Bot 将使用新 Key`);
+    showProviderResult(
+      "API Key 已替换",
+      result.requiresBotRestart
+        ? "新 Key 已直接写入安全凭据存储；请重启使用该 Responses Provider 的 Bot。"
+        : "新 Key 已直接写入安全凭据存储；该 Chat Provider 的独立代理已完成重载。",
+    );
     await refresh();
   }).catch(() => {});
 });

@@ -26,6 +26,7 @@ function validateRegistry(registry) {
     }
     if (!/^https:\/\//.test(entry.sourceUrl || "")) throw new Error(`Capability ${entry.id} has an invalid source URL`);
     if (!/^\d{4}-\d{2}-\d{2}$/.test(entry.verifiedAt || "")) throw new Error(`Capability ${entry.id} has an invalid verification date`);
+    if (entry.verificationNote !== undefined && typeof entry.verificationNote !== "string") throw new Error(`Capability ${entry.id} has an invalid verification note`);
   }
   return registry;
 }

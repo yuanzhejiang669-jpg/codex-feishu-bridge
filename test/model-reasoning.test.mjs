@@ -7,10 +7,21 @@ const { capabilityMappingLines, capabilityMappings, capabilityOutcomeLines, load
 const registry = loadRegistry();
 
 test("reasoning registry resolves current non-GPT model families", () => {
+  assert.equal(resolveCapability({ provider: "jiuuij-api", model: "gemini-3.5-flash" }, registry).id, "jiuuij-gemini-3.5-flash");
+  assert.equal(resolveCapability({ provider: "jiuuij-api", model: "gemini-3.1-flash-lite" }, registry).id, "jiuuij-gemini-3.1-flash-lite");
+  assert.equal(resolveCapability({ provider: "jiuuij-api", model: "gemini-3.1-pro" }, registry).id, "jiuuij-gemini-3.1-pro");
   assert.equal(resolveCapability({ provider: "mimo2codex", model: "deepseek-v4-pro" }, registry).id, "deepseek-v4");
   assert.equal(resolveCapability({ provider: "moonshot", model: "kimi-k2.6" }, registry).id, "kimi-k2.6");
   assert.equal(resolveCapability({ provider: "zai", model: "glm-5.2" }, registry).id, "glm-5.2");
   assert.equal(resolveCapability({ provider: "xai", model: "grok-4.5" }, registry).id, "grok-4.5");
+});
+
+test("reasoning registry maps the seven canonical efforts onto Gemini model limits", () => {
+  const outcomes = (model) => capabilityMappings({ provider: "jiuuij-api", model }, registry)
+    .map(({ effectiveEffort }) => effectiveEffort);
+  assert.deepEqual(outcomes("gemini-3.5-flash"), ["none", "minimal", "low", "medium", "high", "high", "high"]);
+  assert.deepEqual(outcomes("gemini-3.1-flash-lite"), ["minimal", "minimal", "low", "medium", "high", "high", "high"]);
+  assert.deepEqual(outcomes("gemini-3.1-pro"), ["low", "low", "low", "medium", "high", "high", "high"]);
 });
 
 test("reasoning registry exposes requested and effective effort", () => {

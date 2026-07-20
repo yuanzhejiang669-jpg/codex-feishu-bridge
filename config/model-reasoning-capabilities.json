@@ -1,10 +1,40 @@
 {
   "schemaVersion": 1,
-  "registryVersion": "2026-07-16",
+  "registryVersion": "2026-07-20",
   "reviewAfterDays": 90,
   "defaultRequestedEffort": "medium",
   "canonicalEfforts": ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
   "entries": [
+    {
+      "id": "jiuuij-gemini-3.5-flash", "name": "Jiuuij Gemini 3.5 Flash",
+      "providerPatterns": ["jiuuij-api"], "modelPatterns": ["gemini-3.5-flash*"],
+      "selectableEfforts": ["none", "minimal", "low", "medium", "high", "xhigh", "max"], "defaultRequestedEffort": "medium", "maximumEffort": "high",
+      "controlKind": "reasoning_effort_with_provider_none", "supportsReasoning": true, "supportsVision": true,
+      "mapping": {"none": "none", "minimal": "minimal", "low": "low", "medium": "medium", "high": "high", "xhigh": "high", "max": "high"},
+      "upstreamValues": {"none": "none", "minimal": "minimal", "low": "low", "medium": "medium", "high": "high"},
+      "sourceUrl": "https://ai.google.dev/gemini-api/docs/openai", "verifiedAt": "2026-07-20",
+      "verificationNote": "Google 官方为 minimal/low/medium/high 四档；Jiuuij 的 none 已实测可用；xhigh/max 由 Bridge 归并为 high。"
+    },
+    {
+      "id": "jiuuij-gemini-3.1-flash-lite", "name": "Jiuuij Gemini 3.1 Flash-Lite",
+      "providerPatterns": ["jiuuij-api"], "modelPatterns": ["gemini-3.1-flash-lite*"],
+      "selectableEfforts": ["none", "minimal", "low", "medium", "high", "xhigh", "max"], "defaultRequestedEffort": "medium", "maximumEffort": "high",
+      "controlKind": "thinking_level", "supportsReasoning": true, "supportsVision": true,
+      "mapping": {"none": "minimal", "minimal": "minimal", "low": "low", "medium": "medium", "high": "high", "xhigh": "high", "max": "high"},
+      "upstreamValues": {"minimal": "minimal", "low": "low", "medium": "medium", "high": "high"},
+      "sourceUrl": "https://ai.google.dev/gemini-api/docs/openai", "verifiedAt": "2026-07-20",
+      "verificationNote": "Gemini 3 官方不能关闭思考；none 映射到最低档 minimal；xhigh/max 归并为 high。"
+    },
+    {
+      "id": "jiuuij-gemini-3.1-pro", "name": "Jiuuij Gemini 3.1 Pro",
+      "providerPatterns": ["jiuuij-api"], "modelPatterns": ["gemini-3.1-pro*"],
+      "selectableEfforts": ["none", "minimal", "low", "medium", "high", "xhigh", "max"], "defaultRequestedEffort": "medium", "maximumEffort": "high",
+      "controlKind": "thinking_level", "supportsReasoning": true, "supportsVision": true,
+      "mapping": {"none": "low", "minimal": "low", "low": "low", "medium": "medium", "high": "high", "xhigh": "high", "max": "high"},
+      "upstreamValues": {"low": "low", "medium": "medium", "high": "high"},
+      "sourceUrl": "https://ai.google.dev/gemini-api/docs/openai", "verifiedAt": "2026-07-20",
+      "verificationNote": "Gemini 3.1 Pro 官方最低有效档为 low；none/minimal 均映射到 low；xhigh/max 归并为 high。"
+    },
     {
       "id": "deepseek-v4", "name": "DeepSeek V4",
       "providerPatterns": ["deepseek*", "mimo2codex*"], "modelPatterns": ["deepseek-v4-*"],

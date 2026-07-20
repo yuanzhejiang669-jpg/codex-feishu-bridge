@@ -21,6 +21,14 @@ function reasoningRegistry() {
   return sharedReasoningModule().publicRegistry();
 }
 
+function resolveModelCapabilities({ provider = "", model = "" } = {}) {
+  const capability = sharedReasoningModule().resolveCapability({ provider, model });
+  return {
+    supportsReasoning: capability.supportsReasoning !== false,
+    supportsVision: capability.supportsVision === true,
+  };
+}
+
 const REASONING_EFFORTS = Object.freeze(reasoningRegistry().canonicalEfforts);
 
 function normalizeReasoningEffort(value, fallback = "medium") {
@@ -54,5 +62,6 @@ module.exports = {
   REASONING_EFFORTS,
   normalizeReasoningEffort,
   reasoningRegistry,
+  resolveModelCapabilities,
   resolveReasoningSelection,
 };

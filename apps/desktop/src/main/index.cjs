@@ -27,7 +27,7 @@ const { createDesktopStartup } = require("./services/windows-startup.cjs");
 const { createCredentialStore, waitForCredentialStoreHydration } = require("./services/credential-store.cjs");
 const { applyCapabilityMigration, previewCapabilityMigration } = require("./services/capability-migration.cjs");
 const { inspectProvider, testProvider } = require("./services/provider-setup.cjs");
-const { reasoningRegistry } = require("./services/reasoning-effort.cjs");
+const { reasoningRegistry, resolveModelCapabilities } = require("./services/reasoning-effort.cjs");
 const {
   applyDesktopModelSourceSwitch,
   listDesktopModelSources,
@@ -235,9 +235,11 @@ function providerManagerOptions() {
     codexHome: path.join(app.getPath("home"), ".codex"),
     dataRoot: managedDataRoot(),
     timeoutMs: 30_000,
-    prepareProtocolProxyProvider: (provider, model) => protocolProxyService?.prepareProvider(provider, model),
+    prepareProtocolProxyProvider: (provider, model, models) => protocolProxyService?.prepareProvider(provider, model, models),
     prepareProtocolProxyRemoval: (id) => protocolProxyService?.prepareProviderRemoval(id),
-    restartProtocolProxy: () => protocolProxyService?.restart(),
+    restartProtocolProxy: (providerId) => providerId
+      ? protocolProxyService?.restartProvider(providerId)
+      : protocolProxyService?.restart(),
     decorateProviderCatalog: (catalog) => protocolProxyService?.decorateCatalog(catalog) || catalog,
   };
   if (providerCredentialStore) {
@@ -572,6 +574,7 @@ if (!singleInstance) {
         nodePath: currentState?.engine?.nodePath || "",
         proxyCliPath,
         readUserEnvironmentVariable: providerCredentialStore?.read || readUserEnvironmentVariable,
+        resolveModelCapabilities,
       });
       await protocolProxyService.start().catch(() => {});
       createTray();

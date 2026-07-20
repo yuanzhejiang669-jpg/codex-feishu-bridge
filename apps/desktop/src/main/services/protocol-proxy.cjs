@@ -1,12 +1,25 @@
 const crypto = require("node:crypto");
 const fs = require("node:fs");
+const http = require("node:http");
 const net = require("node:net");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 
 const DEFAULT_PORT = 18788;
-const REGISTRY_SCHEMA_VERSION = 1;
+const DEFAULT_INNER_PORT = 19788;
+const PORT_RANGE = 100;
+const REGISTRY_SCHEMA_VERSION = 2;
 const PROXY_VERSION = "0.5.28";
+const BUILTIN_PROVIDER_KEYS = [
+  "MIMO_API_KEY",
+  "DS_API_KEY",
+  "DEEPSEEK_API_KEY",
+  "GENERIC_API_KEY",
+  "QWEN_API_KEY",
+  "KIMI_API_KEY",
+  "GLM_API_KEY",
+  "OPENAI_API_KEY",
+];
 
 function atomicWriteJson(destination, value) {
   const temporary = `${destination}.${crypto.randomUUID()}.tmp`;
@@ -19,23 +32,51 @@ function registryPath(dataRoot) {
   return path.join(dataRoot, "protocol-proxy", "registry.json");
 }
 
+function normalizeModels(models, defaultModel = "") {
+  const seen = new Set();
+  const result = [];
+  for (const raw of Array.isArray(models) ? models : []) {
+    const id = String(typeof raw === "string" ? raw : raw?.id || "").trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    result.push({
+      id,
+      ownedBy: String(raw?.ownedBy || raw?.owned_by || "").trim(),
+    });
+  }
+  const fallback = String(defaultModel || "").trim();
+  if (!result.length && fallback) result.push({ id: fallback, ownedBy: "" });
+  return result;
+}
+
 function readRegistry(dataRoot) {
   try {
     const parsed = JSON.parse(fs.readFileSync(registryPath(dataRoot), "utf8"));
-    return {
-      schemaVersion: REGISTRY_SCHEMA_VERSION,
-      port: Number(parsed.port) || DEFAULT_PORT,
-      providers: Array.isArray(parsed.providers) ? parsed.providers : [],
-    };
+    const legacyPort = Number(parsed.port) || DEFAULT_PORT;
+    const providers = (Array.isArray(parsed.providers) ? parsed.providers : []).map((provider, index) => ({
+      id: String(provider.id || "").trim(),
+      name: String(provider.name || provider.id || "").trim(),
+      upstreamBaseUrl: String(provider.upstreamBaseUrl || "").trim().replace(/\/+$/, ""),
+      envKey: String(provider.envKey || "").trim(),
+      defaultModel: String(provider.defaultModel || "").trim(),
+      wireApi: "chat",
+      port: Number(provider.port) || legacyPort + index,
+      models: normalizeModels(provider.models, provider.defaultModel),
+    })).filter((provider) => provider.id);
+    return { schemaVersion: REGISTRY_SCHEMA_VERSION, providers };
   } catch (error) {
-    if (error?.code === "ENOENT") return { schemaVersion: REGISTRY_SCHEMA_VERSION, port: DEFAULT_PORT, providers: [] };
-    throw new Error(`无法读取托管协议代理配置：${error.message}`);
+    if (error?.code === "ENOENT") return { schemaVersion: REGISTRY_SCHEMA_VERSION, providers: [] };
+    throw new Error(`Unable to read the managed Chat Provider registry: ${error.message}`);
   }
 }
 
-function providersFileValue(registry) {
+function defaultModelCapabilities() {
+  return { supportsReasoning: true, supportsVision: false };
+}
+
+function providersFileValue(registry, resolveModelCapabilities = defaultModelCapabilities) {
   return {
-    providers: registry.providers.map((provider) => ({
+    providers: (registry.providers || []).map((provider) => ({
       id: provider.id,
       shortcut: provider.id,
       displayName: provider.name,
@@ -43,7 +84,14 @@ function providersFileValue(registry) {
       envKey: provider.envKey,
       defaultModel: provider.defaultModel,
       wireApi: "chat",
-      models: [{ id: provider.defaultModel, supportsReasoning: true }],
+      models: normalizeModels(provider.models, provider.defaultModel).map((model) => {
+        const capabilities = resolveModelCapabilities({ provider: provider.id, model: model.id });
+        return {
+          id: model.id,
+          supportsReasoning: capabilities.supportsReasoning !== false,
+          supportsImages: capabilities.supportsImages === true || capabilities.supportsVision === true,
+        };
+      }),
       features: { forceParallelToolCalls: true },
     })),
   };
@@ -63,6 +111,13 @@ function canListen(host, port) {
   });
 }
 
+async function firstAvailablePort(host, start, used = new Set()) {
+  for (let candidate = start; candidate < start + PORT_RANGE; candidate += 1) {
+    if (!used.has(candidate) && await canListen(host, candidate)) return candidate;
+  }
+  throw new Error(`No local port is available in ${start}-${start + PORT_RANGE - 1}`);
+}
+
 async function waitForHealth(baseUrl, fetchImpl = fetch, timeoutMs = 20_000, cancelled = () => false) {
   const deadline = Date.now() + timeoutMs;
   let lastError = "";
@@ -77,70 +132,322 @@ async function waitForHealth(baseUrl, fetchImpl = fetch, timeoutMs = 20_000, can
     }
     await new Promise((resolve) => setTimeout(resolve, 300));
   }
-  throw new Error(`托管协议代理未能在 20 秒内就绪${lastError ? `：${lastError}` : ""}`);
+  throw new Error(`The protocol proxy was not ready within 20 seconds${lastError ? `: ${lastError}` : ""}`);
+}
+
+function parseUpstreamModels(text) {
+  let parsed;
+  try { parsed = JSON.parse(text); } catch { return []; }
+  return normalizeModels((Array.isArray(parsed?.data) ? parsed.data : []).map((item) => ({
+    id: String(typeof item === "string" ? item : item?.id || item?.model || item?.name || "").trim(),
+    ownedBy: String(item?.owned_by || item?.ownedBy || "").trim(),
+  })));
+}
+
+function sameModels(left, right) {
+  return JSON.stringify(normalizeModels(left).map((item) => item.id).sort())
+    === JSON.stringify(normalizeModels(right).map((item) => item.id).sort());
 }
 
 function createProtocolProxyService(options) {
   const host = "127.0.0.1";
-  let child = null;
-  let lastError = "";
-  let status = "stopped";
+  const externalPortStart = Number(options.defaultPort) || DEFAULT_PORT;
+  const innerPortStart = Number(options.defaultInnerPort) || DEFAULT_INNER_PORT;
+  const runtimes = new Map();
   let shouldRun = false;
-  let restartTimer = null;
-  let restartAttempts = 0;
   let lifecycleGeneration = 0;
+  let status = "stopped";
+  let lastError = "";
+  let restartAttempts = 0;
 
-  function paths() {
-    const root = path.join(options.dataRoot, "protocol-proxy");
+  function providerPaths(providerId) {
+    const root = path.join(options.dataRoot, "protocol-proxy", "providers", providerId);
     return {
       root,
       providers: path.join(root, "providers.json"),
       stdout: path.join(root, "proxy.stdout.log"),
       stderr: path.join(root, "proxy.stderr.log"),
-      cli: options.proxyCliPath,
     };
   }
 
   function snapshot() {
     const registry = readRegistry(options.dataRoot);
-    const running = Boolean(child && isProcessAlive(child.pid));
+    const details = registry.providers.map((provider) => {
+      const runtime = runtimes.get(provider.id);
+      return {
+        id: provider.id,
+        port: provider.port,
+        baseUrl: `http://${host}:${provider.port}/v1`,
+        modelCount: provider.models.length,
+        processId: runtime?.inner && isProcessAlive(runtime.inner.child.pid) ? runtime.inner.child.pid : null,
+        status: runtime?.status || "stopped",
+        error: runtime?.error || "",
+      };
+    });
+    const online = details.filter((item) => item.status === "online").length;
     return {
       supported: fs.existsSync(options.proxyCliPath) && fs.existsSync(options.nodePath),
-      status: running ? "online" : registry.providers.length ? (lastError ? "failed" : status) : "unused",
+      status: !details.length ? "unused" : online === details.length ? "online" : lastError ? "failed" : status,
       version: PROXY_VERSION,
       host,
-      port: registry.port,
-      baseUrl: `http://${host}:${registry.port}/v1`,
-      providerCount: registry.providers.length,
-      processId: running ? child.pid : null,
+      port: details[0]?.port || externalPortStart,
+      baseUrl: details[0]?.baseUrl || `http://${host}:${externalPortStart}/v1`,
+      providerCount: details.length,
+      processId: details[0]?.processId || null,
+      providers: details,
       error: lastError,
       restartAttempts,
       registryPath: registryPath(options.dataRoot),
-      providersPath: paths().providers,
-      logDir: paths().root,
+      providersPath: path.join(options.dataRoot, "protocol-proxy", "providers"),
+      logDir: path.join(options.dataRoot, "protocol-proxy", "providers"),
     };
+  }
+
+  async function readSecret(provider) {
+    const secret = await options.readUserEnvironmentVariable(provider.envKey);
+    if (!secret) throw new Error(`Chat Provider credential is unavailable: ${provider.envKey}`);
+    return secret;
+  }
+
+  async function fetchUpstreamModels(provider) {
+    const secret = await readSecret(provider);
+    const response = await (options.fetchImpl || fetch)(`${provider.upstreamBaseUrl}/models`, {
+      method: "GET",
+      headers: { accept: "application/json", authorization: `Bearer ${secret}` },
+      signal: AbortSignal.timeout(Number(options.timeoutMs || 30_000)),
+    });
+    const body = await response.text();
+    const models = response.ok ? parseUpstreamModels(body) : [];
+    return { status: response.status, ok: response.ok, body, models };
+  }
+
+  function updateRegistryProvider(providerId, patch) {
+    const registry = readRegistry(options.dataRoot);
+    const index = registry.providers.findIndex((provider) => provider.id === providerId);
+    if (index < 0) return null;
+    registry.providers[index] = { ...registry.providers[index], ...patch };
+    atomicWriteJson(registryPath(options.dataRoot), registry);
+    return registry.providers[index];
+  }
+
+  async function stopChild(inner) {
+    if (!inner?.child) return;
+    if (isProcessAlive(inner.child.pid)) {
+      inner.child.kill();
+      await new Promise((resolve) => {
+        const timer = setTimeout(() => {
+          try { inner.child.kill("SIGKILL"); } catch {}
+          resolve();
+        }, 5000);
+        timer.unref?.();
+        inner.child.once("exit", () => { clearTimeout(timer); resolve(); });
+      });
+    }
+    if (inner.dataDir) {
+      const ownedRoot = path.resolve(options.dataRoot, "protocol-proxy", "providers");
+      const resolved = path.resolve(inner.dataDir);
+      if (resolved.startsWith(`${ownedRoot}${path.sep}`)) fs.rmSync(resolved, { recursive: true, force: true });
+    }
+  }
+
+  function retireInner(inner) {
+    if (!inner) return;
+    const retire = () => {
+      if (inner.activeRequests > 0) {
+        const timer = setTimeout(retire, 250);
+        timer.unref?.();
+        return;
+      }
+      void stopChild(inner);
+    };
+    retire();
+  }
+
+  async function spawnInner(provider, models, generation) {
+    const used = new Set([...runtimes.values()].map((runtime) => runtime.inner?.port).filter(Boolean));
+    const innerPort = await firstAvailablePort(host, innerPortStart, used);
+    const runtimePaths = providerPaths(provider.id);
+    const value = providersFileValue({ providers: [{ ...provider, models }] }, options.resolveModelCapabilities);
+    atomicWriteJson(runtimePaths.providers, value);
+    fs.mkdirSync(runtimePaths.root, { recursive: true });
+    const environment = { ...process.env };
+    for (const name of BUILTIN_PROVIDER_KEYS) {
+      if (name !== provider.envKey) delete environment[name];
+    }
+    environment.MIMO2CODEX_PROVIDERS_FILE = runtimePaths.providers;
+    environment.MIMO2CODEX_NO_UPDATE_CHECK = "1";
+    environment[provider.envKey] = await readSecret(provider);
+    const stdout = fs.openSync(runtimePaths.stdout, "a");
+    const stderr = fs.openSync(runtimePaths.stderr, "a");
+    const dataDir = path.join(runtimePaths.root, `runtime-${crypto.randomUUID()}`);
+    const child = spawn(options.nodePath, [
+      options.proxyCliPath,
+      "--no-load-env",
+      "--no-update-check",
+      "--no-admin",
+      "--auth", "off",
+      "--data-dir", dataDir,
+      "--model", provider.id,
+      "--host", host,
+      "--port", String(innerPort),
+    ], {
+      cwd: runtimePaths.root,
+      env: environment,
+      windowsHide: true,
+      stdio: ["ignore", stdout, stderr],
+    });
+    fs.closeSync(stdout);
+    fs.closeSync(stderr);
+    const inner = { child, port: innerPort, activeRequests: 0, models: normalizeModels(models), dataDir };
+    try {
+      const ready = await waitForHealth(
+        `http://${host}:${innerPort}`,
+        options.fetchImpl,
+        20_000,
+        () => !shouldRun || generation !== lifecycleGeneration,
+      );
+      if (!ready || !shouldRun || generation !== lifecycleGeneration) {
+        await stopChild(inner);
+        return null;
+      }
+      return inner;
+    } catch (error) {
+      await stopChild(inner);
+      throw error;
+    }
+  }
+
+  function attachInnerExit(providerId, inner) {
+    inner.child.once("exit", (code) => {
+      const runtime = runtimes.get(providerId);
+      if (!runtime || runtime.inner !== inner) return;
+      runtime.inner = null;
+      runtime.status = "failed";
+      runtime.error = `Protocol converter exited (code ${code ?? "unknown"})`;
+      lastError = runtime.error;
+      if (shouldRun && !runtime.restartTimer) {
+        restartAttempts += 1;
+        const delay = Math.min(60_000, 2000 * (2 ** Math.min(restartAttempts - 1, 5)));
+        runtime.restartTimer = setTimeout(() => {
+          runtime.restartTimer = null;
+          void restartProvider(providerId).catch(() => {});
+        }, delay);
+        runtime.restartTimer.unref?.();
+      }
+    });
+  }
+
+  async function refreshModels(providerId, models) {
+    const runtime = runtimes.get(providerId);
+    if (!runtime || sameModels(runtime.inner?.models, models)) return;
+    const registry = readRegistry(options.dataRoot);
+    const current = registry.providers.find((provider) => provider.id === providerId);
+    if (!current) return;
+    const provider = { ...current, models: normalizeModels(models) };
+    const next = await spawnInner(provider, provider.models, lifecycleGeneration);
+    if (!next) return;
+    attachInnerExit(providerId, next);
+    updateRegistryProvider(providerId, { models: provider.models });
+    const previous = runtime.inner;
+    runtime.provider = provider;
+    runtime.inner = next;
+    runtime.status = "online";
+    runtime.error = "";
+    retireInner(previous);
+  }
+
+  function sendJson(res, statusCode, value) {
+    const body = `${JSON.stringify(value)}\n`;
+    res.writeHead(statusCode, { "content-type": "application/json; charset=utf-8", "content-length": Buffer.byteLength(body) });
+    res.end(body);
+  }
+
+  async function forwardToInner(providerId, req, res) {
+    const runtime = runtimes.get(providerId);
+    const inner = runtime?.inner;
+    if (!inner || !isProcessAlive(inner.child.pid)) {
+      sendJson(res, 503, { error: { message: `Provider ${providerId} converter is not ready`, type: "proxy_unavailable" } });
+      return;
+    }
+    inner.activeRequests += 1;
+    const headers = { ...req.headers, host: `${host}:${inner.port}` };
+    const outgoing = http.request({ host, port: inner.port, method: req.method, path: req.url, headers }, (incoming) => {
+      res.writeHead(incoming.statusCode || 502, incoming.headers);
+      incoming.pipe(res);
+      incoming.once("end", () => { inner.activeRequests = Math.max(0, inner.activeRequests - 1); });
+      incoming.once("error", () => { inner.activeRequests = Math.max(0, inner.activeRequests - 1); });
+    });
+    outgoing.once("error", (error) => {
+      inner.activeRequests = Math.max(0, inner.activeRequests - 1);
+      if (!res.headersSent) sendJson(res, 502, { error: { message: error.message, type: "proxy_error" } });
+      else res.destroy(error);
+    });
+    req.pipe(outgoing);
+  }
+
+  async function handleGateway(providerId, req, res) {
+    const runtime = runtimes.get(providerId);
+    const url = new URL(req.url || "/", `http://${host}`);
+    if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/healthz")) {
+      sendJson(res, 200, { ok: true, provider: providerId, converterReady: Boolean(runtime?.inner) });
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/v1/models") {
+      try {
+        const result = await fetchUpstreamModels(runtime.provider);
+        if (result.ok && result.models.length) await refreshModels(providerId, result.models);
+        res.writeHead(result.status, { "content-type": "application/json; charset=utf-8", "content-length": Buffer.byteLength(result.body) });
+        res.end(result.body);
+      } catch (error) {
+        sendJson(res, 502, { error: { message: error.message, type: "model_discovery_failed" } });
+      }
+      return;
+    }
+    await forwardToInner(providerId, req, res);
+  }
+
+  async function startProvider(provider, generation) {
+    if (!await canListen(host, provider.port)) throw new Error(`Local Provider port ${provider.port} is already in use`);
+    let models = normalizeModels(provider.models, provider.defaultModel);
+    try {
+      const discovery = await fetchUpstreamModels(provider);
+      if (discovery.ok && discovery.models.length) {
+        models = discovery.models;
+        provider = updateRegistryProvider(provider.id, { models }) || provider;
+      }
+    } catch {}
+    const inner = await spawnInner(provider, models, generation);
+    if (!inner) return null;
+    const runtime = { provider, inner, gateway: null, status: "starting", error: "", restartTimer: null };
+    runtimes.set(provider.id, runtime);
+    attachInnerExit(provider.id, inner);
+    const gateway = http.createServer((req, res) => { void handleGateway(provider.id, req, res); });
+    runtime.gateway = gateway;
+    await new Promise((resolve, reject) => {
+      gateway.once("error", reject);
+      gateway.listen(provider.port, host, resolve);
+    });
+    runtime.status = "online";
+    return runtime;
+  }
+
+  async function stopRuntime(runtime) {
+    if (!runtime) return;
+    if (runtime.restartTimer) clearTimeout(runtime.restartTimer);
+    runtime.restartTimer = null;
+    if (runtime.gateway?.listening) {
+      await new Promise((resolve) => runtime.gateway.close(resolve));
+    }
+    await stopChild(runtime.inner);
+    runtime.status = "stopped";
   }
 
   async function stop() {
     lifecycleGeneration += 1;
     shouldRun = false;
-    if (restartTimer) clearTimeout(restartTimer);
-    restartTimer = null;
-    const running = child;
-    child = null;
-    if (!running || !isProcessAlive(running.pid)) {
-      status = "stopped";
-      return;
-    }
-    running.kill();
-    await new Promise((resolve) => {
-      const timer = setTimeout(() => {
-        try { running.kill("SIGKILL"); } catch {}
-        resolve();
-      }, 5000);
-      timer.unref?.();
-      running.once("exit", () => { clearTimeout(timer); resolve(); });
-    });
+    const current = [...runtimes.values()];
+    runtimes.clear();
+    await Promise.all(current.map((runtime) => stopRuntime(runtime)));
     status = "stopped";
   }
 
@@ -155,93 +462,31 @@ function createProtocolProxyService(options) {
       return snapshot();
     }
     shouldRun = true;
-    if (child && isProcessAlive(child.pid)) return snapshot();
+    if (runtimes.size) return snapshot();
     if (!fs.existsSync(options.proxyCliPath) || !fs.existsSync(options.nodePath)) {
-      lastError = "客户端托管协议代理运行时不完整，请重新安装客户端";
+      lastError = "The bundled protocol conversion runtime is incomplete";
       status = "failed";
       throw new Error(lastError);
     }
-    if (!await canListen(host, registry.port)) {
-      lastError = `本地端口 ${registry.port} 已被其他程序占用`;
-      status = "failed";
-      throw new Error(lastError);
-    }
-
-    const value = providersFileValue(registry);
-    const runtimePaths = paths();
-    atomicWriteJson(runtimePaths.providers, value);
-    const environment = {
-      ...process.env,
-      MIMO2CODEX_PROVIDERS_FILE: runtimePaths.providers,
-      MIMO2CODEX_NO_UPDATE_CHECK: "1",
-    };
-    const readSecret = options.readUserEnvironmentVariable;
-    for (const provider of registry.providers) {
-      const secret = await readSecret(provider.envKey);
-      if (!secret) throw new Error(`Chat Provider 环境变量不可用：${provider.envKey}`);
-      environment[provider.envKey] = secret;
-    }
-    if (!shouldRun || generation !== lifecycleGeneration) return snapshot();
-    fs.mkdirSync(runtimePaths.root, { recursive: true });
-    const stdout = fs.openSync(runtimePaths.stdout, "a");
-    const stderr = fs.openSync(runtimePaths.stderr, "a");
     status = "starting";
     lastError = "";
-    const launched = spawn(options.nodePath, [
-      options.proxyCliPath,
-      "--no-load-env",
-      "--no-update-check",
-      "--no-admin",
-      "--auth", "off",
-      "--data-dir", runtimePaths.root,
-      "--model", registry.providers[0].id,
-      "--host", host,
-      "--port", String(registry.port),
-    ], {
-      cwd: runtimePaths.root,
-      env: environment,
-      windowsHide: true,
-      stdio: ["ignore", stdout, stderr],
-    });
-    child = launched;
-    launched.once("exit", (code) => {
-      if (child !== launched) return;
-      child = null;
-      if (status !== "stopped") {
-        status = "failed";
-        lastError = `托管协议代理已退出（code ${code ?? "unknown"}）`;
-      }
-      if (shouldRun && !restartTimer) {
-        restartAttempts += 1;
-        const delay = Math.min(60_000, 2000 * (2 ** Math.min(restartAttempts - 1, 5)));
-        restartTimer = setTimeout(() => {
-          restartTimer = null;
-          void start().catch(() => {});
-        }, delay);
-        restartTimer.unref?.();
-      }
-    });
     try {
-      const ready = await waitForHealth(
-        `http://${host}:${registry.port}`,
-        options.fetchImpl,
-        20_000,
-        () => !shouldRun || generation !== lifecycleGeneration,
-      );
-      if (!ready || !shouldRun || generation !== lifecycleGeneration) return snapshot();
-      status = "online";
-      restartAttempts = 0;
+      atomicWriteJson(registryPath(options.dataRoot), registry);
+      for (const provider of registry.providers) {
+        if (!shouldRun || generation !== lifecycleGeneration) break;
+        await startProvider(provider, generation);
+      }
+      if (shouldRun && generation === lifecycleGeneration) {
+        status = "online";
+        restartAttempts = 0;
+      }
       return snapshot();
     } catch (error) {
-      if (!shouldRun || generation !== lifecycleGeneration) return snapshot();
       lastError = error.message;
       status = "failed";
       await stop();
       status = "failed";
       throw error;
-    } finally {
-      fs.closeSync(stdout);
-      fs.closeSync(stderr);
     }
   }
 
@@ -250,38 +495,41 @@ function createProtocolProxyService(options) {
     return start();
   }
 
-  async function prepareProvider(provider, model) {
-    const defaultModel = String(model || "").trim();
-    if (!defaultModel) throw new Error("Chat Completions Provider 必须填写测试模型");
+  async function restartProvider(providerId) {
+    const id = String(providerId || "").trim();
+    const provider = readRegistry(options.dataRoot).providers.find((item) => item.id === id);
+    if (!provider) return snapshot();
+    const previous = runtimes.get(id);
+    if (previous) {
+      runtimes.delete(id);
+      await stopRuntime(previous);
+    }
+    if (shouldRun) await startProvider(provider, lifecycleGeneration);
+    return snapshot();
+  }
+
+  async function prepareProvider(provider, model, discoveredModels = []) {
     const previous = readRegistry(options.dataRoot);
-    if (previous.providers.some((item) => item.id === provider.id)) throw new Error(`托管 Chat Provider 已存在：${provider.id}`);
-    const modelOwner = previous.providers.find((item) => item.defaultModel === defaultModel);
-    if (modelOwner) {
-      throw new Error(`模型 ${defaultModel} 已由 Chat Provider ${modelOwner.id} 托管；当前版本要求每个托管 Provider 使用不同的模型 ID，以避免路由到错误上游`);
+    if (previous.providers.some((item) => item.id === provider.id)) throw new Error(`Managed Chat Provider already exists: ${provider.id}`);
+    const models = normalizeModels(discoveredModels);
+    const defaultModel = String(model || "").trim() || models[0]?.id || "";
+    if (!defaultModel) throw new Error("Chat Completions Provider must select a default model");
+    if (models.length && !models.some((item) => item.id === defaultModel)) {
+      throw new Error(`Default model is not present in the Provider model list: ${defaultModel}`);
     }
-    let selectedPort = previous.port;
-    if (!previous.providers.length) {
-      selectedPort = 0;
-      for (let candidate = DEFAULT_PORT; candidate < DEFAULT_PORT + 20; candidate += 1) {
-        if (await canListen(host, candidate)) {
-          selectedPort = candidate;
-          break;
-        }
-      }
-      if (!selectedPort) throw new Error(`本地端口 ${DEFAULT_PORT}-${DEFAULT_PORT + 19} 均被占用，无法启动协议代理`);
-    }
-    const next = {
-      ...previous,
+    const used = new Set(previous.providers.map((item) => item.port));
+    const selectedPort = await firstAvailablePort(host, externalPortStart, used);
+    const managed = {
+      id: provider.id,
+      name: provider.name,
+      upstreamBaseUrl: provider.baseUrl,
+      envKey: provider.envKey,
+      defaultModel,
+      wireApi: "chat",
       port: selectedPort,
-      providers: [...previous.providers, {
-        id: provider.id,
-        name: provider.name,
-        upstreamBaseUrl: provider.baseUrl,
-        envKey: provider.envKey,
-        defaultModel,
-        wireApi: "chat",
-      }],
+      models: models.length ? models : [{ id: defaultModel, ownedBy: "" }],
     };
+    const next = { ...previous, providers: [...previous.providers, managed] };
     return {
       codexProvider: {
         ...provider,
@@ -308,26 +556,20 @@ function createProtocolProxyService(options) {
     const providerId = String(id || "").trim();
     const previous = readRegistry(options.dataRoot);
     if (!previous.providers.some((provider) => provider.id === providerId)) return null;
-    const next = {
-      ...previous,
-      providers: previous.providers.filter((provider) => provider.id !== providerId),
-    };
-    const runtimePaths = paths();
-    async function applyRegistry(registry) {
-      atomicWriteJson(registryPath(options.dataRoot), registry);
-      atomicWriteJson(runtimePaths.providers, providersFileValue(registry));
-      await restart();
-    }
+    const next = { ...previous, providers: previous.providers.filter((provider) => provider.id !== providerId) };
     return {
       async commit() {
-        try { await applyRegistry(next); }
+        atomicWriteJson(registryPath(options.dataRoot), next);
+        try { await restart(); }
         catch (error) {
-          await applyRegistry(previous).catch(() => {});
+          atomicWriteJson(registryPath(options.dataRoot), previous);
+          await restart().catch(() => {});
           throw error;
         }
       },
       async rollback() {
-        await applyRegistry(previous);
+        atomicWriteJson(registryPath(options.dataRoot), previous);
+        await restart();
       },
     };
   }
@@ -342,22 +584,34 @@ function createProtocolProxyService(options) {
         return proxy ? {
           ...provider,
           baseUrl: proxy.upstreamBaseUrl,
-          localBaseUrl: `http://${host}:${registry.port}/v1`,
-          wireApi: "chat → responses",
+          localBaseUrl: `http://${host}:${proxy.port}/v1`,
+          wireApi: "chat -> responses",
           managedProxy: true,
           defaultModel: proxy.defaultModel,
+          modelCount: proxy.models.length,
         } : provider;
       }),
     };
   }
 
-  return { decorateCatalog, prepareProvider, prepareProviderRemoval, restart, snapshot, start, stop };
+  return {
+    decorateCatalog,
+    prepareProvider,
+    prepareProviderRemoval,
+    restart,
+    restartProvider,
+    snapshot,
+    start,
+    stop,
+  };
 }
 
 module.exports = {
   DEFAULT_PORT,
   PROXY_VERSION,
   createProtocolProxyService,
+  normalizeModels,
+  parseUpstreamModels,
   providersFileValue,
   readRegistry,
 };

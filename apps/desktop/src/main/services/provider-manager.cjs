@@ -247,8 +247,12 @@ async function probeProvider(raw, options = {}) {
 async function addGlobalProvider(raw, options) {
   const provider = normalizeDefinition(raw);
   const key = secretFrom(raw);
+  let discoveredModels = [];
+  let defaultModel = String(raw?.model || "").trim();
   if (provider.wireApi === "chat") {
-    await probeProvider(raw, options);
+    discoveredModels = (await listProviderModels(raw, options)).models;
+    defaultModel ||= discoveredModels[0]?.id || "";
+    await probeProvider({ ...raw, model: defaultModel }, options);
   }
   const configPath = configPathFor(options.codexHome);
   const { text, config } = readConfig(configPath);
@@ -257,7 +261,7 @@ async function addGlobalProvider(raw, options) {
   const setUserEnv = options.setUserEnvironmentVariable || setUserEnvironmentVariable;
   const writeConfig = options.writeTextAtomic || writeTextAtomic;
   const proxyTransaction = provider.wireApi === "chat"
-    ? await options.prepareProtocolProxyProvider?.(provider, raw.model)
+    ? await options.prepareProtocolProxyProvider?.(provider, defaultModel, discoveredModels)
     : null;
   if (provider.wireApi === "chat" && !proxyTransaction) throw new Error("客户端托管协议代理不可用");
   const codexProvider = proxyTransaction?.codexProvider || provider;
@@ -290,21 +294,22 @@ async function replaceGlobalProviderKey(raw, options) {
   const catalog = options.decorateProviderCatalog?.(rawCatalog) || rawCatalog;
   const provider = catalog.providers.find((item) => item.id === id);
   if (!provider) throw new Error(`找不到 Provider：${id}`);
-  const definition = { ...provider, apiKey: key, model: raw.model };
-  const models = await listProviderModels(definition, options);
-  const probe = await probeProvider(definition, options);
   const readUserEnv = options.readUserEnvironmentVariable || readUserEnvironmentVariable;
   const setUserEnv = options.setUserEnvironmentVariable || setUserEnvironmentVariable;
   const previous = await readUserEnv(provider.envKey);
   await setUserEnv(provider.envKey, key);
   try {
-    if (provider.managedProxy) await options.restartProtocolProxy?.();
+    if (provider.managedProxy) await options.restartProtocolProxy?.(provider.id);
   } catch (error) {
     await setUserEnv(provider.envKey, previous || null).catch(() => {});
-    await options.restartProtocolProxy?.().catch(() => {});
+    await options.restartProtocolProxy?.(provider.id).catch(() => {});
     throw error;
   }
-  return { provider: { ...provider, credentialAvailable: true }, modelCount: models.models.length, probe };
+  return {
+    provider: { ...provider, credentialAvailable: true },
+    validation: "not-requested",
+    requiresBotRestart: !provider.managedProxy,
+  };
 }
 
 function uniqueManagedHomes(dataRoot) {
