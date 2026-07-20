@@ -1,6 +1,6 @@
 {
   "name": "codex-feishu-bridge-desktop",
-  "version": "0.7.5",
+  "version": "0.7.6",
   "private": true,
   "description": "Windows and macOS desktop client for Codex Feishu Bridge",
   "main": "src/main/index.cjs",

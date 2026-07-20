@@ -1644,3 +1644,12 @@ Permanent fix:
 - GitHub Actions run `29733567573` passed its clean Windows build in 4m02s and its atomic publish job in 20s. Public latest Release `v0.7.5` is neither draft nor prerelease and contains exactly five Windows files with no macOS asset.
 - The installer was downloaded again from the public Release and all three checksummed assets matched `checksums-windows.txt`. The current Windows client upgraded in place to file version `0.7.5.0`; its uninstall entry reports `0.7.5`.
 - Drawing Bots 1, 2, and 3 restarted with new PIDs and remained online for more than 60 seconds with zero active runs. A final SSH audit left the Mac unchanged and confirmed all six ordinary/writing Bots online with zero active runs.
+
+## 2026-07-20 - 0.7.6 cross-Bot session deletion consistency
+
+- Reproduced session resurrection as a cross-Home ownership problem: deleting a desktop mirror did not remove the writing-Home source, and independent Bot `sessions.json` bindings could remain visible or mirror the source back.
+- Added dynamic Codex Home and Bot-state discovery, cross-instance `/list all` binding aggregation, persistent deletion tombstones, cross-Home physical cleanup and verification, and active-run checks across registered Bot state directories.
+- Added a final per-item active check inside batch deletion so a task that starts after confirmation preflight is skipped rather than interrupted.
+- Added focused range regression coverage proving `2-9` selects exactly eight sessions and excludes item `1`.
+- Windows script deployment passed the complete root check with 61 tests. The default Bridge and `codex-assistant-1` restarted with live replacement PIDs; the one-time safe restart helper removed itself afterward.
+- Prepared desktop version `0.7.6`. Windows packaging, public Release verification, installed-client recovery, and physical-Mac SSH deployment evidence follow below.

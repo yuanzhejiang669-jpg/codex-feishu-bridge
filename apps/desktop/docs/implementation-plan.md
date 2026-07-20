@@ -510,3 +510,13 @@ These risks are addressed with protocol versioning, active-run guards, transacti
 - Maintain the physical Apple Silicon Mac directly through Tailscale and SSH. Transfer reviewed changes from the trusted Windows device, then build, install, and verify locally without requiring GitHub connectivity on the Mac.
 - Do not publish unsigned or locally overlaid macOS artifacts in the stable Windows channel. A future public Mac distribution requires a separate, explicitly approved signing and notarization project.
 - Preserve the same shared supervisor contract for ordinary and writing Bots while retaining platform-specific launchers: PowerShell on Windows and direct detached process groups on macOS.
+
+## 2026-07-20 - Cross-Bot session deletion consistency
+
+- Discover all registered Codex Homes and Bot state directories from the current runtime, instance configuration, and persisted launch configurations.
+- Make `/list all` include bindings owned by other registered Bridge instances while retaining one stable entry per Codex thread.
+- Delete a confirmed thread from every discovered Home's SQLite state, rollout storage, sidebar index, global state, desktop mirror, and Bridge binding.
+- Write deletion tombstones to every discovered Home before physical cleanup so reconciliation and mirroring cannot restore a deleted thread.
+- Refuse deletion when any registered Bot is actively using the thread, and repeat that check immediately before each batch item is removed.
+- Lock batch selection to preview-time thread IDs. `/delete 2-9` followed by `/confirm delete 2-9` must remove exactly eight sessions without including item `1`.
+- Deliver the same engine through Windows script deployment, Windows desktop `0.7.6`, GitHub source/Windows Release, and the SSH-maintained physical Apple Silicon Mac. The powered-off old Windows device remains excluded.

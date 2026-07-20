@@ -80,7 +80,15 @@ import {
   normalizeTimestamp,
   normalizeTokenUsage,
 } from "./src/sessions/normalize.mjs";
+import {
+  compressIndexes,
+  parseDeleteSelectionSpec,
+} from "./src/sessions/delete-selection.mjs";
 import { createSessionStore } from "./src/sessions/store.mjs";
+import {
+  discoverCodexHomeRegistry,
+  loadRegisteredBridgeBindings,
+} from "./src/sessions/codex-home-registry.mjs";
 import {
   findDeepKey,
   parseJsonLoose,
@@ -185,6 +193,7 @@ const desktopCodexStateDbPath = CONFIG.desktopCodexHome ? path.join(CONFIG.deskt
 const desktopCodexSessionIndexPath = CONFIG.desktopCodexHome ? path.join(CONFIG.desktopCodexHome, "session_index.jsonl") : "";
 const desktopCodexGlobalStatePath = CONFIG.desktopCodexHome ? path.join(CONFIG.desktopCodexHome, ".codex-global-state.json") : "";
 const desktopCodexSidebarLockPath = CONFIG.desktopCodexHome ? path.join(CONFIG.desktopCodexHome, ".codex-feishu-sidebar-sync.lock") : "";
+const deletedThreadsFileName = ".codex-feishu-deleted-threads.json";
 const shouldMirrorDesktopCodexHome = Boolean(CONFIG.desktopCodexHome)
   && !sameResolvedPath(CONFIG.desktopCodexHome, CONFIG.codexHome);
 fs.mkdirSync(CONFIG.logDir, { recursive: true });
@@ -808,7 +817,7 @@ async function syncChatSessionsWithCodex(chatId, options = {}) {
   );
   chatState.sessions = normalized.filter((session) => {
     const threadId = String(session.codexThreadId || "").trim();
-    if (threadId) return true;
+    if (threadId) return !isCodexThreadDeletedForBridge(threadId);
     return keepEmptyCurrent && shouldKeepEmptyCurrentSession(session, chatState);
   });
 
@@ -1311,6 +1320,22 @@ async function mergedSessionEntries(chatId) {
     });
   }
 
+  const registry = registeredCodexHomeRegistry();
+  for (const binding of loadRegisteredBridgeBindings(registry.stateDirs)) {
+    if (sameResolvedPath(binding.stateDir, CONFIG.stateDir)) continue;
+    const session = normalizeSessionData(binding.session);
+    mergeThreadInventoryEntry(entryMap, {
+      ...session,
+      codexThreadId: binding.threadId,
+      _codexOnly: false,
+      _sourceChatId: binding.chatId,
+      _rank: 3,
+      _isCurrent: false,
+      _sources: ["Bridge 跨实例绑定"],
+      _location: binding.sessionsPath,
+    });
+  }
+
   if (Array.isArray(codexThreads)) {
     const allThreadIds = codexThreads.map((row) => String(row?.id || "").trim()).filter(Boolean);
     for (const row of codexThreads) {
@@ -1471,7 +1496,12 @@ async function mergedSessionEntries(chatId) {
     }
   }
 
+  const deletedThreadIds = loadDeletedThreadIds(CONFIG.codexHome);
+  if (CONFIG.desktopCodexHome) {
+    for (const id of loadDeletedThreadIds(CONFIG.desktopCodexHome)) deletedThreadIds.add(id);
+  }
   return sortThreadListEntries([...entryMap.values()])
+    .filter((entry) => !deletedThreadIds.has(String(entry.codexThreadId || "").trim()))
     .slice(0, boundedListLimit());
 }
 
@@ -3684,6 +3714,88 @@ async function withCodexSidebarLock(fn, codexHome = CONFIG.codexHome, lockPath =
   throw new Error(`timed out waiting for Codex sidebar sync lock: ${lockPath}`);
 }
 
+function registeredCodexHomeRegistry() {
+  return discoverCodexHomeRegistry({
+    currentCodexHome: CONFIG.codexHome,
+    desktopCodexHome: CONFIG.desktopCodexHome,
+    stateDir: CONFIG.stateDir,
+    engineRoot: ROOT,
+    defaultDataRoot: DEFAULT_DATA_ROOT,
+  });
+}
+
+function codexHomeResourcePaths(codexHome) {
+  const home = path.resolve(codexHome);
+  return {
+    codexHome: home,
+    stateDbPath: path.join(home, "state_5.sqlite"),
+    sessionIndexPath: path.join(home, "session_index.jsonl"),
+    globalStatePath: path.join(home, ".codex-global-state.json"),
+    sidebarLockPath: path.join(home, ".codex-feishu-sidebar-sync.lock"),
+    deletedThreadsPath: path.join(home, deletedThreadsFileName),
+  };
+}
+
+function loadDeletedThreadIds(codexHome = CONFIG.codexHome) {
+  const filePath = path.join(codexHome, deletedThreadsFileName);
+  const parsed = readJsonFile(filePath, null);
+  const entries = parsed?.threads && typeof parsed.threads === "object" ? parsed.threads : {};
+  return new Set(Object.keys(entries).filter(Boolean));
+}
+
+function isCodexThreadDeleted(threadId, codexHome = CONFIG.codexHome) {
+  const id = String(threadId || "").trim();
+  return Boolean(id && loadDeletedThreadIds(codexHome).has(id));
+}
+
+function isCodexThreadDeletedForBridge(threadId) {
+  return isCodexThreadDeleted(threadId, CONFIG.codexHome)
+    || Boolean(CONFIG.desktopCodexHome && isCodexThreadDeleted(threadId, CONFIG.desktopCodexHome));
+}
+
+function writeCodexThreadTombstone(threadId, codexHome) {
+  const id = String(threadId || "").trim();
+  if (!id) return false;
+  const filePath = path.join(codexHome, deletedThreadsFileName);
+  const parsed = readJsonFile(filePath, {});
+  const state = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  if (!state.threads || typeof state.threads !== "object" || Array.isArray(state.threads)) state.threads = {};
+  if (state.threads[id]) return false;
+  state.version = 1;
+  state.threads[id] = {
+    deletedAt: new Date().toISOString(),
+    deletedByInstance: process.env.CODEX_FEISHU_INSTANCE_NAME || "default",
+  };
+  writeJsonFileAtomicSync(filePath, state, { space: 2 });
+  return true;
+}
+
+async function markCodexThreadDeletedAcrossHomes(threadId, homes) {
+  const markedHomes = [];
+  for (const codexHome of homes) {
+    const paths = codexHomeResourcePaths(codexHome);
+    let lastError = null;
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      try {
+        await withCodexSidebarLock(
+          async () => {
+            if (writeCodexThreadTombstone(threadId, paths.codexHome)) markedHomes.push(paths.codexHome);
+          },
+          paths.codexHome,
+          paths.sidebarLockPath,
+        );
+        lastError = null;
+        break;
+      } catch (error) {
+        lastError = error;
+        if (attempt < 3) await delay(attempt * 250);
+      }
+    }
+    if (lastError) throw lastError;
+  }
+  return markedHomes;
+}
+
 function readCodexSessionIndexTitle(threadId, sessionIndexPath = codexSessionIndexPath) {
   const id = String(threadId || "").trim();
   if (!id || !fs.existsSync(sessionIndexPath)) return "";
@@ -3868,16 +3980,6 @@ function removeCodexGlobalStateThread(threadId, globalStatePath = codexGlobalSta
   return true;
 }
 
-async function removeCodexSidebarIndexesForThread(threadId) {
-  const id = String(threadId || "").trim();
-  if (!id) return { sessionIndexChanged: false, globalStateChanged: false };
-
-  return await withCodexSidebarLock(async () => ({
-    sessionIndexChanged: removeCodexSessionIndexEntry(id),
-    globalStateChanged: removeCodexGlobalStateThread(id),
-  }));
-}
-
 async function mirrorCodexThreadRecordToDesktopHome(record) {
   if (!shouldMirrorDesktopCodexHome) return false;
   if (!record?.id || !fs.existsSync(desktopCodexStateDbPath)) return false;
@@ -3943,6 +4045,9 @@ function mirrorCodexRolloutToDesktopHome(record) {
 async function mirrorCodexDesktopSidebarIndexed(record, reason = "app-server") {
   if (!shouldMirrorDesktopCodexHome) return false;
   if (!record?.id) return false;
+  if (isCodexThreadDeletedForBridge(record.id)) {
+    return false;
+  }
   if (!fs.existsSync(desktopCodexStateDbPath)) {
     log("WARN", "desktop Codex home mirror skipped; target state database not found", {
       threadId: record.id,
@@ -3992,6 +4097,9 @@ async function mirrorCodexDesktopSidebarIndexed(record, reason = "app-server") {
 async function ensureCodexDesktopSidebarIndexed(threadId, reason = "app-server") {
   const id = String(threadId || "").trim();
   if (!id || !fs.existsSync(codexStateDbPath)) return false;
+  if (isCodexThreadDeletedForBridge(id)) {
+    return false;
+  }
 
   const record = await loadCodexThreadRecord(id);
   if (!record) return false;
@@ -4032,6 +4140,7 @@ async function ensureCodexDesktopSidebarIndexed(threadId, reason = "app-server")
 async function ensureAppServerThreadVisible(threadId, reason = "app-server") {
   const id = String(threadId || "").trim();
   if (!id || !fs.existsSync(codexStateDbPath)) return false;
+  if (isCodexThreadDeletedForBridge(id)) return false;
 
   const record = await loadCodexThreadRecord(id);
   if (!record) return false;
@@ -4126,14 +4235,20 @@ async function listVisibleCodexThreadRecordsForBridge() {
     ].join(" "),
   );
 
+  const deletedThreadIds = loadDeletedThreadIds(CONFIG.codexHome);
+  if (CONFIG.desktopCodexHome) {
+    for (const id of loadDeletedThreadIds(CONFIG.desktopCodexHome)) deletedThreadIds.add(id);
+  }
   return rows.filter((record) =>
     codexThreadBelongsToThisBridge(record)
     && Number(record.archived || 0) === 0
     && codexThreadHasVisibleText(record)
+    && !deletedThreadIds.has(String(record.id || "").trim())
   );
 }
 
 async function reconcileCodexDesktopSidebarIndexes(reason = "startup") {
+  removeDeletedThreadsFromBridgeSessions();
   if (!fs.existsSync(codexStateDbPath)) return false;
   if (sidebarReconcileInFlight) {
     sidebarReconcileQueuedReason = reason;
@@ -4264,151 +4379,138 @@ async function deleteCodexThreadRowsFromDb(threadId, dbPath = codexStateDbPath) 
   );
 }
 
-function resolveMirroredRolloutPath(record, sourceRolloutPath, targetCodexHome) {
-  const sourcePath = replaceWindowsLongPathPrefix(sourceRolloutPath || record?.rollout_path || "");
-  if (!sourcePath || !path.isAbsolute(sourcePath)) return "";
-
-  const sourceSessionsRoot = path.join(CONFIG.codexHome, "sessions");
-  const sourceRootResolved = fs.existsSync(sourceSessionsRoot)
-    ? fs.realpathSync.native(sourceSessionsRoot)
-    : path.resolve(sourceSessionsRoot);
-  const sourceResolved = fs.existsSync(sourcePath) ? fs.realpathSync.native(sourcePath) : path.resolve(sourcePath);
-  const relative = path.relative(sourceRootResolved, sourceResolved);
-  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) return "";
-  return path.join(targetCodexHome, "sessions", relative);
-}
-
-async function removeDesktopMirrorForThread(threadId, sourceRecord, sourceRolloutPath = "") {
+async function deleteCodexThreadFromHome(threadId, codexHome) {
   const id = String(threadId || "").trim();
+  const paths = codexHomeResourcePaths(codexHome);
   const result = {
-    enabled: shouldMirrorDesktopCodexHome,
+    codexHome: paths.codexHome,
+    title: "",
     dbChanged: false,
     rolloutDeleted: false,
-    rolloutMissing: false,
-    rolloutPath: "",
+    rolloutPaths: [],
     sessionIndexChanged: false,
     globalStateChanged: false,
-    error: "",
   };
-  if (!id || !shouldMirrorDesktopCodexHome) return result;
 
-  try {
-    await withCodexSidebarLock(async () => {
-      if (fs.existsSync(desktopCodexStateDbPath)) {
-        const before = await loadCodexThreadRecordFromDb(id, desktopCodexStateDbPath);
-        if (before) {
-          await deleteCodexThreadRowsFromDb(id, desktopCodexStateDbPath);
-          const after = await loadCodexThreadRecordFromDb(id, desktopCodexStateDbPath);
-          if (after) throw new Error(`Desktop mirror thread delete did not remove row: ${id}`);
-          result.dbChanged = true;
-        }
+  await withCodexSidebarLock(async () => {
+    let record = null;
+    if (fs.existsSync(paths.stateDbPath)) {
+      record = await loadCodexThreadRecordFromDb(id, paths.stateDbPath);
+      if (record) {
+        result.title = record.title || "";
+        await deleteCodexThreadRowsFromDb(id, paths.stateDbPath);
+        const afterDelete = await loadCodexThreadRecordFromDb(id, paths.stateDbPath);
+        if (afterDelete) throw new Error(`Thread delete did not remove local row from ${paths.stateDbPath}: ${id}`);
+        result.dbChanged = true;
       }
-
-      result.sessionIndexChanged = removeCodexSessionIndexEntry(id, desktopCodexSessionIndexPath);
-      result.globalStateChanged = removeCodexGlobalStateThread(id, desktopCodexGlobalStatePath);
-    }, CONFIG.desktopCodexHome, desktopCodexSidebarLockPath);
-
-    const mirrorCandidates = Array.from(new Set([
-      resolveMirroredRolloutPath(sourceRecord, sourceRolloutPath, CONFIG.desktopCodexHome),
-      ...findRolloutFilesForThread(id, CONFIG.desktopCodexHome),
-    ].filter(Boolean)));
-    if (mirrorCandidates.length) {
-      let missingCount = 0;
-      for (const mirrorPath of mirrorCandidates) {
-        result.rolloutPath = result.rolloutPath || mirrorPath;
-        const safePath = resolveSafeCodexRolloutPath(mirrorPath, id, CONFIG.desktopCodexHome);
-        if (fs.existsSync(safePath)) {
-          fs.rmSync(safePath, { force: true });
-          result.rolloutDeleted = true;
-        } else {
-          missingCount += 1;
-        }
-      }
-      result.rolloutMissing = !result.rolloutDeleted && missingCount > 0;
     }
-  } catch (error) {
-    result.error = String(error.message || error);
-    log("ERROR", "desktop Codex mirror cleanup failed after db delete", {
-      threadId: id,
-      desktopCodexHome: CONFIG.desktopCodexHome,
-      error: result.error,
-    });
-  }
+
+    const rolloutCandidates = Array.from(new Set([
+      record?.rollout_path || "",
+      ...findRolloutFilesForThread(id, paths.codexHome),
+    ].filter(Boolean)));
+    for (const candidate of rolloutCandidates) {
+      const safePath = resolveSafeCodexRolloutPath(candidate, id, paths.codexHome);
+      if (!fs.existsSync(safePath)) continue;
+      fs.rmSync(safePath, { force: true });
+      if (fs.existsSync(safePath)) throw new Error(`Rollout still exists after delete: ${safePath}`);
+      result.rolloutDeleted = true;
+      result.rolloutPaths.push(safePath);
+    }
+
+    result.sessionIndexChanged = removeCodexSessionIndexEntry(id, paths.sessionIndexPath);
+    result.globalStateChanged = removeCodexGlobalStateThread(id, paths.globalStatePath);
+  }, paths.codexHome, paths.sidebarLockPath);
 
   return result;
+}
+
+async function deleteCodexThreadFromHomeWithRetry(threadId, codexHome) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      return await deleteCodexThreadFromHome(threadId, codexHome);
+    } catch (error) {
+      lastError = error;
+      if (attempt < 3) await delay(attempt * 250);
+    }
+  }
+  throw lastError;
+}
+
+async function inspectCodexThreadResidue(threadId, codexHome) {
+  const id = String(threadId || "").trim();
+  const paths = codexHomeResourcePaths(codexHome);
+  const dbRecord = fs.existsSync(paths.stateDbPath)
+    ? await loadCodexThreadRecordFromDb(id, paths.stateDbPath)
+    : null;
+  const rolloutPaths = findRolloutFilesForThread(id, paths.codexHome);
+  return {
+    codexHome: paths.codexHome,
+    db: Boolean(dbRecord),
+    rolloutPaths,
+    sessionIndex: hasCodexSessionIndexEntry(id, paths.sessionIndexPath),
+    globalState: loadGlobalStateThreadEntries(paths.globalStatePath).some((entry) => entry.id === id),
+  };
+}
+
+function codexThreadResidueExists(residue) {
+  return Boolean(
+    residue?.db
+    || residue?.rolloutPaths?.length
+    || residue?.sessionIndex
+    || residue?.globalState
+  );
 }
 
 async function deleteCodexLocalThread(threadId) {
   const id = String(threadId || "").trim();
   if (!id) throw new Error("thread id is required");
-  let record = fs.existsSync(codexStateDbPath) ? await loadCodexThreadRecord(id) : null;
-  const dbChanged = Boolean(record);
-  if (record) {
-    await deleteCodexThreadRowsFromDb(id, codexStateDbPath);
-    const afterDelete = await loadCodexThreadRecord(id);
-    if (afterDelete) throw new Error(`Thread delete did not remove local row: ${id}`);
-  } else {
-    const rolloutPath = findRolloutFilesForThread(id, CONFIG.codexHome)[0] || "";
-    record = {
-      id,
-      title: readCodexSessionIndexTitle(id) || "",
-      rollout_path: rolloutPath,
-    };
-  }
 
-  let rolloutDeleted = false;
-  let rolloutMissing = false;
-  let rolloutError = "";
-  let rolloutPath = "";
-  let sidebarIndexChanged = false;
-  let globalStateChanged = false;
-  let sidebarIndexError = "";
-  let desktopMirror = { enabled: false };
-  const rolloutCandidates = Array.from(new Set([
-    record.rollout_path || "",
-    ...findRolloutFilesForThread(id, CONFIG.codexHome),
-  ].filter(Boolean)));
-  if (rolloutCandidates.length) {
-    let missingCount = 0;
+  const registry = registeredCodexHomeRegistry();
+  const homes = registry.homes
+    .map((item) => item.codexHome)
+    .filter((codexHome) => fs.existsSync(codexHome) || sameResolvedPath(codexHome, CONFIG.codexHome));
+  await markCodexThreadDeletedAcrossHomes(id, homes);
+
+  const homeResults = [];
+  const failures = [];
+  for (const codexHome of homes) {
     try {
-      for (const candidate of rolloutCandidates) {
-        const safePath = resolveSafeCodexRolloutPath(candidate, id);
-        rolloutPath = rolloutPath || safePath;
-        if (fs.existsSync(safePath)) {
-          fs.rmSync(safePath, { force: true });
-          rolloutDeleted = true;
-        } else {
-          missingCount += 1;
-        }
-      }
-      rolloutMissing = !rolloutDeleted && missingCount > 0;
+      homeResults.push(await deleteCodexThreadFromHomeWithRetry(id, codexHome));
     } catch (error) {
-      rolloutError = String(error.message || error);
-      log("ERROR", "codex rollout delete failed during thread cleanup", { threadId: id, rolloutPath: record.rollout_path, error: rolloutError });
+      failures.push({ codexHome, error: String(error?.message || error) });
     }
   }
-  try {
-    const sidebarResult = await removeCodexSidebarIndexesForThread(id);
-    sidebarIndexChanged = Boolean(sidebarResult.sessionIndexChanged);
-    globalStateChanged = Boolean(sidebarResult.globalStateChanged);
-  } catch (error) {
-    sidebarIndexError = String(error.message || error);
-    log("ERROR", "codex sidebar index cleanup failed after db delete", { threadId: id, error: sidebarIndexError });
-  }
-  desktopMirror = await removeDesktopMirrorForThread(id, record, rolloutPath || record.rollout_path || "");
 
+  const residues = [];
+  for (const codexHome of homes) {
+    try {
+      const residue = await inspectCodexThreadResidue(id, codexHome);
+      if (codexThreadResidueExists(residue)) residues.push(residue);
+    } catch (error) {
+      failures.push({ codexHome, error: `verification failed: ${String(error?.message || error)}` });
+    }
+  }
+  if (failures.length || residues.length) {
+    throw new Error(`Cross-home thread delete incomplete: ${safeJson({ threadId: id, failures, residues })}`);
+  }
+
+  const firstWithTitle = homeResults.find((item) => item.title);
   return {
     threadId: id,
-    title: record.title || "",
-    dbChanged,
-    rolloutPath: rolloutPath || record.rollout_path || "",
-    rolloutDeleted,
-    rolloutMissing,
-    rolloutError,
-    sidebarIndexChanged,
-    globalStateChanged,
-    sidebarIndexError,
-    desktopMirror,
+    title: firstWithTitle?.title || "",
+    dbChanged: homeResults.some((item) => item.dbChanged),
+    rolloutPath: homeResults.flatMap((item) => item.rolloutPaths)[0] || "",
+    rolloutDeleted: homeResults.some((item) => item.rolloutDeleted),
+    rolloutMissing: false,
+    rolloutError: "",
+    sidebarIndexChanged: homeResults.some((item) => item.sessionIndexChanged),
+    globalStateChanged: homeResults.some((item) => item.globalStateChanged),
+    sidebarIndexError: "",
+    desktopMirror: { enabled: Boolean(CONFIG.desktopCodexHome) },
+    codexHomesChecked: homes,
+    homeResults,
   };
 }
 
@@ -6641,6 +6743,34 @@ function activeJobUsesThread(threadId) {
   return false;
 }
 
+function persistedActiveRunUsesThread(threadId) {
+  const id = String(threadId || "").trim();
+  if (!id) return false;
+  for (const stateDir of registeredCodexHomeRegistry().stateDirs) {
+    const active = readJsonFile(path.join(stateDir, "active-runs.json"));
+    const runs = active?.runs && typeof active.runs === "object" ? Object.values(active.runs).filter(Boolean) : [];
+    if (!runs.length) continue;
+    const persistedSessions = readJsonFile(path.join(stateDir, "sessions.json"));
+    for (const run of runs) {
+      const bridgePid = Number(run?.bridgePid || 0);
+      if (bridgePid > 0 && !isProcessAlivePid(bridgePid)) continue;
+      const sessionId = String(run?.sessionId || "").trim();
+      if (!sessionId) continue;
+      for (const chatState of Object.values(persistedSessions?.chats || {})) {
+        const session = Array.isArray(chatState?.sessions)
+          ? chatState.sessions.find((item) => String(item?.id || "").trim() === sessionId)
+          : null;
+        if (String(session?.codexThreadId || "").trim() === id) return true;
+      }
+    }
+  }
+  return false;
+}
+
+function threadIsActiveAnywhere(threadId) {
+  return activeJobUsesThread(threadId) || persistedActiveRunUsesThread(threadId);
+}
+
 function removeThreadFromBridgeSessions(threadId) {
   const id = String(threadId || "").trim();
   let removed = 0;
@@ -6656,6 +6786,17 @@ function removeThreadFromBridgeSessions(threadId) {
     if (before !== chatState.sessions.length) changed = true;
   }
   if (changed) saveSessions();
+  return removed;
+}
+
+function removeDeletedThreadsFromBridgeSessions() {
+  const deletedThreadIds = loadDeletedThreadIds(CONFIG.codexHome);
+  if (CONFIG.desktopCodexHome) {
+    for (const id of loadDeletedThreadIds(CONFIG.desktopCodexHome)) deletedThreadIds.add(id);
+  }
+  if (!deletedThreadIds.size) return 0;
+  let removed = 0;
+  for (const threadId of deletedThreadIds) removed += removeThreadFromBridgeSessions(threadId);
   return removed;
 }
 
@@ -6682,81 +6823,6 @@ function deletePreviewMarkdown({ entry, record, index, expiresAt }) {
   ].join("\n");
 }
 
-function parseDeleteSelectionSpec(value) {
-  const text = String(value || "").trim();
-  const tokens = text.split(/[\s,，、]+/).filter(Boolean);
-  if (!tokens.length) return { error: "empty" };
-
-  const indexes = [];
-  const invalid = [];
-  const nonNumeric = [];
-  let hasRange = false;
-  for (const token of tokens) {
-    const rangeMatch = token.match(/^(\d+)\s*[-~～]\s*(\d+)$/);
-    if (rangeMatch) {
-      hasRange = true;
-      const start = Number(rangeMatch[1]);
-      const end = Number(rangeMatch[2]);
-      if (!Number.isInteger(start) || !Number.isInteger(end) || start < 1 || end < 1 || start > end) {
-        invalid.push(token);
-        continue;
-      }
-      for (let index = start; index <= end; index += 1) indexes.push(index);
-      continue;
-    }
-
-    if (/^\d+$/.test(token)) {
-      const index = Number(token);
-      if (Number.isInteger(index) && index >= 1) {
-        indexes.push(index);
-      } else {
-        invalid.push(token);
-      }
-      continue;
-    }
-
-    nonNumeric.push(token);
-  }
-
-  if (invalid.length) return { error: `无效序号或区间：${invalid.join("、")}` };
-  if (nonNumeric.length) {
-    if (tokens.length === 1 && !hasRange && indexes.length === 0) return { target: nonNumeric[0] };
-    return { error: `批量删除只支持序号和区间，无法混用 ID：${nonNumeric.join("、")}` };
-  }
-
-  const unique = [];
-  const seenIndexes = new Set();
-  for (const index of indexes) {
-    if (seenIndexes.has(index)) continue;
-    seenIndexes.add(index);
-    unique.push(index);
-  }
-  return { indexes: unique, isBatch: unique.length > 1 || hasRange || tokens.length > 1 };
-}
-
-function compressIndexes(indexes) {
-  const sorted = [...new Set(indexes)].sort((a, b) => a - b);
-  const parts = [];
-  let start = null;
-  let prev = null;
-  for (const index of sorted) {
-    if (start === null) {
-      start = index;
-      prev = index;
-      continue;
-    }
-    if (index === prev + 1) {
-      prev = index;
-      continue;
-    }
-    parts.push(start === prev ? String(start) : `${start}-${prev}`);
-    start = index;
-    prev = index;
-  }
-  if (start !== null) parts.push(start === prev ? String(start) : `${start}-${prev}`);
-  return parts.join(" ");
-}
-
 async function resolveDeleteItemsByIndexes(chatId, indexes) {
   const list = await listChatSessionsSynced(chatId);
   const items = [];
@@ -6777,7 +6843,7 @@ async function resolveDeleteItemsByIndexes(chatId, indexes) {
       errors.push(`序号 ${index} 不可删除：${entry._deleteBlockReason || "来源信息不足"}`);
       continue;
     }
-    if (activeJobUsesThread(threadId)) {
+    if (threadIsActiveAnywhere(threadId)) {
       errors.push(`序号 ${index} 正在运行中。`);
       continue;
     }
@@ -6922,7 +6988,7 @@ async function handleDeleteCommand(chatId, target, messageId) {
     await sendText(chatId, `这个条目不可删除：${entry._deleteBlockReason || "来源信息不足"}`, "delete-blocked", messageId);
     return;
   }
-  if (activeJobUsesThread(threadId)) {
+  if (threadIsActiveAnywhere(threadId)) {
     await sendText(chatId, "这个会话正在运行中，先 /stop 或等待任务结束后再删除。", "delete-busy", messageId);
     return;
   }
@@ -6986,7 +7052,7 @@ async function handleConfirmCommand(chatId, rest, messageId) {
 
   const busy = [];
   for (const item of items) {
-    if (activeJobUsesThread(item.threadId)) busy.push(item.index);
+    if (threadIsActiveAnywhere(item.threadId)) busy.push(item.index);
   }
   if (busy.length) {
     await sendText(chatId, `这些会话正在运行中，先 /stop 或等待任务结束后再删除：${busy.join("、")}`, "confirm-busy", messageId);
@@ -6998,6 +7064,9 @@ async function handleConfirmCommand(chatId, rest, messageId) {
   let bridgeRemovedTotal = 0;
   for (const item of items) {
     try {
+      if (threadIsActiveAnywhere(item.threadId)) {
+        throw new Error(`会话已开始运行，已跳过删除：${item.threadId}`);
+      }
       const result = await deleteCodexLocalThread(item.threadId);
       const bridgeRemoved = removeThreadFromBridgeSessions(item.threadId);
       bridgeRemovedTotal += bridgeRemoved;
