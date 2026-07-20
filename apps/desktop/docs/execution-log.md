@@ -1641,3 +1641,6 @@ Permanent fix:
 - Prepared desktop version `0.7.5` and changed the tag workflow to publish only the five verified Windows release files after a clean Windows build.
 - Workflow YAML parsing and the new Windows-only release regression test passed. The complete desktop suite passed 171 tests with zero failures and three expected platform skips; the root Bridge suite passed 57/57.
 - Local Windows packaging staged engine commit `b89494c26884206b68e793b029d7b3da9af941b5`, passed the protocol-proxy smoke, built the x64 NSIS installer and blockmap, generated update metadata/checksums, and verified every packaged version as `0.7.5`.
+- GitHub Actions run `29733567573` passed its clean Windows build in 4m02s and its atomic publish job in 20s. Public latest Release `v0.7.5` is neither draft nor prerelease and contains exactly five Windows files with no macOS asset.
+- The installer was downloaded again from the public Release and all three checksummed assets matched `checksums-windows.txt`. The current Windows client upgraded in place to file version `0.7.5.0`; its uninstall entry reports `0.7.5`.
+- Drawing Bots 1, 2, and 3 restarted with new PIDs and remained online for more than 60 seconds with zero active runs. A final SSH audit left the Mac unchanged and confirmed all six ordinary/writing Bots online with zero active runs.
