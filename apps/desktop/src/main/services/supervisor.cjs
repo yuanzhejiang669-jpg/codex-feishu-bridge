@@ -2,7 +2,7 @@ const fs = require("node:fs");
 const crypto = require("node:crypto");
 const os = require("node:os");
 const path = require("node:path");
-const { execFile, execFileSync } = require("node:child_process");
+const { execFileSync, spawn } = require("node:child_process");
 const { activeRunCount, isProcessAlive, readJson } = require("./bridge-discovery.cjs");
 const { readManagedBots } = require("./bot-setup.cjs");
 const { inspectProviderCatalog } = require("./provider-manager.cjs");
@@ -45,19 +45,51 @@ function inspectManagedBots(dataRoot, localAppData) {
 
 function runPowerShell(scriptPath, args, options) {
   return new Promise((resolve, reject) => {
-    execFile("powershell.exe", ["-NoProfile", "-File", scriptPath, ...args], {
+    const maxBuffer = 2 * 1024 * 1024;
+    const spawnProcess = options.spawnProcess || spawn;
+    const child = spawnProcess("powershell.exe", ["-NoProfile", "-File", scriptPath, ...args], {
       windowsHide: true,
-      timeout: options.timeoutMs || 60_000,
-      encoding: "utf8",
-      maxBuffer: 2 * 1024 * 1024,
       env: options.env,
-    }, (error, stdout, stderr) => {
-      if (error) {
-        reject(new Error(String(stderr || stdout || error.message).trim()));
+    });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+      if (error) reject(error);
+      else resolve({ stdout, stderr });
+    };
+    const append = (current, chunk) => {
+      const next = current + chunk.toString("utf8");
+      if (Buffer.byteLength(next, "utf8") > maxBuffer) {
+        child.kill();
+        finish(new Error("PowerShell output exceeded 2 MiB"));
+        return current;
+      }
+      return next;
+    };
+
+    child.stdout?.on("data", (chunk) => { stdout = append(stdout, chunk); });
+    child.stderr?.on("data", (chunk) => { stderr = append(stderr, chunk); });
+    child.once("error", (error) => finish(error));
+    child.once("exit", (code, signal) => {
+      if (code === 0) {
+        finish();
         return;
       }
-      resolve({ stdout, stderr });
+      const detail = String(stderr || stdout || `PowerShell exited with ${signal || `code ${code}`}`).trim();
+      finish(new Error(detail));
     });
+
+    const timer = setTimeout(() => {
+      child.kill();
+      finish(new Error(`PowerShell timed out after ${options.timeoutMs || 60_000}ms`));
+    }, options.timeoutMs || 60_000);
   });
 }
 

@@ -2,6 +2,8 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { EventEmitter } = require("node:events");
+const { PassThrough } = require("node:stream");
 const test = require("node:test");
 const {
   inspectManagedBots,
@@ -11,6 +13,7 @@ const {
   managedBotStopArguments,
   managedRuntimeRoot,
   processEnvironment,
+  runPowerShell,
   restartOnlineManagedBots,
   restartSelectedManagedBots,
   waitForMacosProviderEnvironment,
@@ -20,6 +23,25 @@ const {
   stopManagedBot,
   stopManagedBotAndDisableAutoStart,
 } = require("../src/main/services/supervisor.cjs");
+
+test("finishes a successful PowerShell command when its process exits without waiting for inherited pipes", async () => {
+  const child = new EventEmitter();
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  child.kill = () => {};
+  const resultPromise = runPowerShell("fixture.ps1", [], {
+    timeoutMs: 1_000,
+    spawnProcess: () => child,
+  });
+
+  child.stdout.write("started");
+  child.emit("exit", 0, null);
+
+  const result = await resultPromise;
+  assert.equal(result.stdout, "started");
+  assert.equal(child.stdout.destroyed, true);
+  assert.equal(child.stderr.destroyed, true);
+});
 
 test("passes only an explicitly recorded reasoning request to the launcher", () => {
   const base = { name: "assistant-1", profile: "assistant-1", workspace: "C:\\workspace" };
