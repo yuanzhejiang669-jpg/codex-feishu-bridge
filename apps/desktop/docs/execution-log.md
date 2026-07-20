@@ -1652,4 +1652,12 @@ Permanent fix:
 - Added a final per-item active check inside batch deletion so a task that starts after confirmation preflight is skipped rather than interrupted.
 - Added focused range regression coverage proving `2-9` selects exactly eight sessions and excludes item `1`.
 - Windows script deployment passed the complete root check with 61 tests. The default Bridge and `codex-assistant-1` restarted with live replacement PIDs; the one-time safe restart helper removed itself afterward.
-- Prepared desktop version `0.7.6`. Windows packaging, public Release verification, installed-client recovery, and physical-Mac SSH deployment evidence follow below.
+- Prepared desktop version `0.7.6`. Local Windows packaging staged engine commit `93d443b6ef77ca770f7e46835a4b53372dd3245d`, generated and verified the NSIS installer, blockmap, update metadata, and checksums.
+- GitHub Actions run `29746036856` passed the clean Windows build and atomic publish jobs. Public latest Release `v0.7.6` is neither draft nor prerelease and contains exactly five Windows files with no macOS asset.
+- Downloaded the public Release again and verified the installer (`507400b6adc7d3387a35daa09044be7700c5c40f3a9178ff6601a92c67872d6a`), blockmap, and `latest.yml` against `checksums-windows.txt`.
+- Upgraded the installed Windows client in place to file version `0.7.6.0`; the uninstall registry reports `0.7.6`. Drawing Bots 1, 2, and 3 restarted with PIDs `71444`, `68592`, and `33740`, then remained online and idle for the required 60-second stability window.
+- Transferred the reviewed source to the physical Apple Silicon Mac through a local Git bundle over Tailscale SSH. The two unrelated untracked Browser Control `.crx/.pem` files remained untouched.
+- The first Mac test run exposed test-environment leakage from real Application Support into a temporary registry fixture; rerunning with an isolated test `APPDATA` passed all 61 Bridge tests. The complete physical-Mac desktop suite passed 172 tests with zero failures and two expected platform skips.
+- Installed the Mac `0.7.6` overlay transactionally from its native arm64 application base, preserving Mac-native unpacked dependencies and replacing only tested desktop source plus engine commit `93d443b6ef77ca770f7e46835a4b53372dd3245d`. The temporary rollback was removed after success.
+- All six Mac ordinary/writing Bots restarted with replacement PIDs `66988`, `67282`, `67700`, `67116`, `67468`, and `67957`. Final audit found all six alive, idle, launched from the installed `0.7.6` engine, and carrying an event-consumer/WebSocket-ready log marker.
+- The powered-off old Windows device remains the user's explicit synchronization exception and was not contacted.
