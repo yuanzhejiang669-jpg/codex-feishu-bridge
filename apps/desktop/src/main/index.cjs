@@ -227,6 +227,7 @@ function migrationOptions() {
   return {
     dataRoot: managedDataRoot(),
     sourceCodexHome: path.join(app.getPath("home"), ".codex"),
+    sharedSkillsRoot: path.join(app.getPath("documents"), "Codex", "skill-sources", "shared"),
   };
 }
 

@@ -874,10 +874,15 @@ function migrationStatusText(items) {
   const blocked = items.filter((item) => item.status === "blocked-sensitive").map((item) => item.name);
   const existing = items.filter((item) => item.status === "exists").map((item) => item.name);
   const missing = items.filter((item) => item.status === "missing").map((item) => item.name);
+  const aligned = items.filter((item) => item.status === "aligned").map((item) => item.name);
+  const conflicts = items.filter((item) => ["shared-conflict", "target-conflict", "broken-source-link", "broken-shared-link", "broken-target-link", "blocked-system"].includes(item.status))
+    .map((item) => `${item.name} (${item.status})`);
   return [
     blocked.length ? `含敏感字段，未自动复制：${blocked.join("、")}` : "",
     existing.length ? `目标已存在：${existing.join("、")}` : "",
     missing.length ? `源项目不存在：${missing.join("、")}` : "",
+    aligned.length ? `已链接：${aligned.join("、")}` : "",
+    conflicts.length ? `Skill 链接被阻止：${conflicts.join("、")}` : "",
   ].filter(Boolean).join("；");
 }
 

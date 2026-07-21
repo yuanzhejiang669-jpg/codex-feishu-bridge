@@ -497,6 +497,10 @@ test("workspace factory and runtime keep distinct Codex homes isolated", () => {
   assert.match(bridgeSource, /DESKTOP_CODEX_HOME_PATH[\s\S]*sameResolvedPath/);
   assert.doesNotMatch(factorySource, /--desktop-codex-home|-DesktopCodexHome/);
   assert.match(factorySource, /desktopCodexHome:\s*""/);
+  assert.match(panelSource, /planSharedSkill/);
+  assert.match(panelSource, /action:\s*"link-dir"/);
+  assert.match(panelSource, /skill\.name === "\.system"/);
+  assert.doesNotMatch(panelSource, /await cp\(source, target, \{ recursive: true/);
 });
 
 function delay(ms) {

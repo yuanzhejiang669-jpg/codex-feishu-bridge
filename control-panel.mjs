@@ -1,4 +1,5 @@
 import { execFile, spawn } from "node:child_process";
+import crypto from "node:crypto";
 import { createRequire } from "node:module";
 import { createServer } from "node:http";
 import { existsSync, readFileSync } from "node:fs";
@@ -6,9 +7,14 @@ import {
   cp,
   rm,
   mkdir,
+  lstat,
   readdir,
   readFile,
+  readlink,
+  realpath,
+  rename,
   stat,
+  symlink,
   unlink,
   writeFile,
 } from "node:fs/promises";
@@ -791,6 +797,68 @@ function skillRootDescriptors() {
   ];
 }
 
+function sharedSkillsRootPath() {
+  return path.join(os.homedir(), "Documents", "Codex", "skill-sources", "shared");
+}
+
+function sameFilesystemPath(left, right) {
+  const normalize = (value) => path.resolve(String(value || ""));
+  return process.platform === "win32"
+    ? normalize(left).toLowerCase() === normalize(right).toLowerCase()
+    : normalize(left) === normalize(right);
+}
+
+async function pathEntryInfo(targetPath) {
+  try {
+    const entry = await lstat(targetPath);
+    if (!entry.isSymbolicLink()) return { exists: true, linked: false, broken: false, realPath: targetPath };
+    try { return { exists: true, linked: true, broken: false, realPath: await realpath(targetPath) }; }
+    catch { return { exists: true, linked: true, broken: true, realPath: "" }; }
+  } catch (error) {
+    if (error?.code === "ENOENT") return { exists: false, linked: false, broken: false, realPath: "" };
+    throw error;
+  }
+}
+
+async function directoryDigest(root) {
+  const rows = [];
+  async function walk(current, relativeRoot = "") {
+    const entries = (await readdir(current, { withFileTypes: true })).sort((left, right) => left.name.localeCompare(right.name));
+    for (const entry of entries) {
+      const absolute = path.join(current, entry.name);
+      const relative = path.join(relativeRoot, entry.name).split(path.sep).join("/");
+      if (entry.isDirectory()) await walk(absolute, relative);
+      else if (entry.isFile()) rows.push(`${relative}\0${crypto.createHash("sha256").update(await readFile(absolute)).digest("hex")}`);
+      else if (entry.isSymbolicLink()) rows.push(`${relative}\0link:${await readlink(absolute).catch(() => "")}`);
+    }
+  }
+  await walk(root);
+  return crypto.createHash("sha256").update(rows.join("\n")).digest("hex");
+}
+
+async function planSharedSkill(sourcePath, targetPath, skillName) {
+  if (skillName === ".system") return { status: "blocked-system" };
+  const sourceEntry = await pathEntryInfo(sourcePath);
+  if (!sourceEntry.exists || sourceEntry.broken) return { status: sourceEntry.broken ? "broken-source-link" : "missing" };
+  const sourceRealPath = sourceEntry.linked ? sourceEntry.realPath : sourcePath;
+  const sharedPath = sourceEntry.linked ? sourceRealPath : path.join(sharedSkillsRootPath(), skillName);
+  const sharedEntry = await pathEntryInfo(sharedPath);
+  if (sharedEntry.broken) return { status: "broken-shared-link", sharedPath };
+  if (sharedEntry.exists && !sameFilesystemPath(sharedPath, sourcePath)
+      && await directoryDigest(sourceRealPath) !== await directoryDigest(sharedEntry.realPath || sharedPath)) {
+    return { status: "shared-conflict", sharedPath };
+  }
+  const targetEntry = await pathEntryInfo(targetPath);
+  if (targetEntry.broken) return { status: "broken-target-link", sharedPath };
+  if (targetEntry.linked) {
+    return { status: sameFilesystemPath(targetEntry.realPath, sharedEntry.realPath || sharedPath) ? "aligned" : "target-conflict", sharedPath };
+  }
+  if (targetEntry.exists && await directoryDigest(targetPath) !== await directoryDigest(sourceRealPath)) {
+    return { status: "target-conflict", sharedPath };
+  }
+  return { status: "ready", sharedPath, replaceExisting: targetEntry.exists, sourceLinked: sourceEntry.linked };
+}
+
 async function listSkillDirectories(root, options = {}) {
   if (!(await directoryExists(root))) return [];
   const recursive = Boolean(options.recursive);
@@ -798,9 +866,10 @@ async function listSkillDirectories(root, options = {}) {
     const rows = await readdir(root, { withFileTypes: true });
     const result = [];
     for (const item of rows) {
-      if (!item.isDirectory()) continue;
+      if (!item.isDirectory() && !item.isSymbolicLink()) continue;
       if (!options.includeHidden && item.name.startsWith(".")) continue;
       const sourcePath = path.join(root, item.name);
+      try { if (!(await stat(sourcePath)).isDirectory()) continue; } catch { continue; }
       if (options.requireSkillMd !== false && !(await pathExists(path.join(sourcePath, "SKILL.md")))) continue;
       result.push({
         name: item.name,
@@ -998,6 +1067,7 @@ async function prepareFactoryLocalSpace(payload) {
   const sourceSkillsById = new Map(sources.skills.map((item) => [item.id, item]));
   const sourceMcpIds = new Set(sources.mcpServers);
   const operations = [];
+  const skillPlans = [];
 
   const codexHomeRoot = path.resolve(factory.codexHomeRoot);
   const codexHome = path.resolve(factory.codexHome);
@@ -1027,6 +1097,20 @@ async function prepareFactoryLocalSpace(payload) {
     }
   }
 
+  for (const skillId of selectedSkills) {
+    const skill = sourceSkillsById.get(skillId);
+    if (!skill) throw new Error(`Skill source not found: ${skillId}`);
+    if (skill.name === ".system" || String(skill.relativePath || "").split(/[\\/]/).includes(".system")) {
+      throw new Error(`System Skill cannot be shared: ${skillId}`);
+    }
+    const target = path.join(codexHome, skill.targetSubdir || "skills", skill.relativePath || skill.name || skillId);
+    const plan = await planSharedSkill(skill.sourcePath, target, skill.name);
+    if (!new Set(["ready", "aligned"]).has(plan.status)) {
+      throw new Error(`Cannot link Skill ${skill.name}: ${plan.status}`);
+    }
+    skillPlans.push({ skillId, skill, target, ...plan });
+  }
+
   await mkdir(codexHome, { recursive: true });
   operations.push({ action: "mkdir", path: codexHome });
   for (const dirName of ["sessions", "skills", "tmp"]) {
@@ -1051,17 +1135,69 @@ async function prepareFactoryLocalSpace(payload) {
   }
 
   const copiedSkills = [];
-  for (const skillId of selectedSkills) {
-    const skill = sourceSkillsById.get(skillId);
-    if (!skill) {
-      operations.push({ action: "skip", path: skillId, reason: "skill not found in source" });
-      continue;
+  const linkedSkills = [];
+  const transactionRoot = path.join(codexHome, `.cfb-skill-links-${crypto.randomUUID()}`);
+  const sourceBackups = path.join(transactionRoot, "source-backups");
+  const targetBackups = path.join(transactionRoot, "target-backups");
+  const skillChanges = [];
+  await mkdir(sourceBackups, { recursive: true });
+  await mkdir(targetBackups, { recursive: true });
+  try {
+    for (const plan of skillPlans) {
+      if (plan.status === "aligned") {
+        linkedSkills.push(plan.skillId);
+        operations.push({ action: "already-linked", source: plan.sharedPath, path: plan.target });
+        continue;
+      }
+      const source = plan.skill.sourcePath;
+      const change = {
+        source,
+        target: plan.target,
+        sharedPath: plan.sharedPath,
+        sourceBackup: "",
+        targetBackup: "",
+        canonicalCreated: false,
+        sourceLinked: false,
+        targetLinked: false,
+      };
+      skillChanges.push(change);
+      await mkdir(path.dirname(plan.sharedPath), { recursive: true });
+      const currentSource = await pathEntryInfo(source);
+      if (!currentSource.linked) {
+        const sharedEntry = await pathEntryInfo(plan.sharedPath);
+        if (!sharedEntry.exists) {
+          await rename(source, plan.sharedPath);
+          change.canonicalCreated = true;
+        } else {
+          change.sourceBackup = path.join(sourceBackups, plan.skill.name);
+          await rename(source, change.sourceBackup);
+        }
+        await symlink(plan.sharedPath, source, process.platform === "win32" ? "junction" : "dir");
+        change.sourceLinked = true;
+      }
+      const targetEntry = await pathEntryInfo(plan.target);
+      if (targetEntry.exists) {
+        change.targetBackup = path.join(targetBackups, plan.skill.name);
+        await rename(plan.target, change.targetBackup);
+      }
+      await mkdir(path.dirname(plan.target), { recursive: true });
+      await symlink(plan.sharedPath, plan.target, process.platform === "win32" ? "junction" : "dir");
+      change.targetLinked = true;
+      copiedSkills.push(plan.skillId);
+      linkedSkills.push(plan.skillId);
+      operations.push({ action: "link-dir", source: plan.sharedPath, path: plan.target });
     }
-    const source = skill.sourcePath;
-    const target = path.join(codexHome, skill.targetSubdir || "skills", skill.relativePath || skill.name || skillId);
-    await cp(source, target, { recursive: true, force: true });
-    copiedSkills.push(skillId);
-    operations.push({ action: "copy-dir", source, path: target });
+    await rm(transactionRoot, { recursive: true, force: true });
+  } catch (error) {
+    for (const change of [...skillChanges].reverse()) {
+      if (change.targetLinked) await rm(change.target, { recursive: true, force: true });
+      if (change.targetBackup && (await pathEntryInfo(change.targetBackup)).exists) await rename(change.targetBackup, change.target);
+      if (change.sourceLinked) await rm(change.source, { recursive: true, force: true });
+      if (change.canonicalCreated && (await pathEntryInfo(change.sharedPath)).exists) await rename(change.sharedPath, change.source);
+      else if (change.sourceBackup && (await pathEntryInfo(change.sourceBackup)).exists) await rename(change.sourceBackup, change.source);
+    }
+    await rm(transactionRoot, { recursive: true, force: true });
+    throw error;
   }
 
   for (const instance of preview.instances) {
@@ -1114,6 +1250,7 @@ async function prepareFactoryLocalSpace(payload) {
     },
     selectedSkills,
     copiedSkills,
+    linkedSkills,
     selectedMcpServers: selectedMcpServers.filter((id) => sourceMcpIds.has(id)),
     bridgeInstancesAppendPreview: preview.bridgeInstancesAppendPreview,
     instances: preview.instances.map((item) => ({
@@ -1985,7 +2122,7 @@ function buildFactoryPreview(payload) {
     localPrepare: {
       confirmText: "初始化本地空间",
       copiesByDefault: ["safe config.toml", "AGENTS.md"],
-      note: "本地初始化只创建 workspace/Codex Home/manifest，并复制勾选的 skills/MCP 配置；不会创建飞书 APP 或启动 Bot。",
+      note: "Local initialization creates workspace/Codex Home/manifest, links selected shared Skills, and writes selected MCP configuration. It does not create Feishu apps or start Bots.",
     },
     bridgeInstancesAppendPreview: instanceBlocks,
     instances,

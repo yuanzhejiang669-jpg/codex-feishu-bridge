@@ -35,7 +35,7 @@ function fixture() {
     codexHome: targetCodexHome,
     codexHomeMode: "isolated",
   }), "utf8");
-  return { root, dataRoot, sourceCodexHome, targetCodexHome };
+  return { root, dataRoot, sourceCodexHome, targetCodexHome, sharedSkillsRoot: path.join(root, "shared-skills") };
 }
 
 test("detects nested inline secrets", () => {
@@ -57,7 +57,7 @@ test("previews and applies only ready MCP and Skills", () => {
       codexHomeMode: "isolated",
     }));
     const selection = { mcpServers: ["safe", "secret"], skills: ["safe-skill"] };
-    const options = { dataRoot: value.dataRoot, sourceCodexHome: value.sourceCodexHome };
+    const options = { dataRoot: value.dataRoot, sourceCodexHome: value.sourceCodexHome, sharedSkillsRoot: value.sharedSkillsRoot };
     const preview = previewCapabilityMigration("assistant-1", selection, options);
     assert.equal(preview.summary.ready, 2);
     assert.deepEqual(preview.affectedBots, ["assistant-1", "assistant-2"]);
@@ -67,9 +67,88 @@ test("previews and applies only ready MCP and Skills", () => {
     const result = applyCapabilityMigration("assistant-1", selection, options);
     assert.equal(result.applied, 2);
     assert.equal(fs.existsSync(path.join(value.targetCodexHome, "skills", "safe-skill", "SKILL.md")), true);
+    assert.equal(fs.lstatSync(path.join(value.sourceCodexHome, "skills", "safe-skill")).isSymbolicLink(), true);
+    assert.equal(fs.lstatSync(path.join(value.targetCodexHome, "skills", "safe-skill")).isSymbolicLink(), true);
+    assert.equal(fs.realpathSync(path.join(value.sourceCodexHome, "skills", "safe-skill")), fs.realpathSync(path.join(value.sharedSkillsRoot, "safe-skill")));
     const target = TOML.parse(fs.readFileSync(path.join(value.targetCodexHome, "config.toml"), "utf8"));
     assert.equal(target.mcp_servers.safe.command, "safe.exe");
     assert.equal(Object.hasOwn(target.mcp_servers, "secret"), false);
+  } finally {
+    fs.rmSync(value.root, { recursive: true, force: true });
+  }
+});
+
+test("converts an identical target Skill into the same shared link", () => {
+  const value = fixture();
+  try {
+    const target = path.join(value.targetCodexHome, "skills", "safe-skill");
+    fs.mkdirSync(target, { recursive: true });
+    fs.writeFileSync(path.join(target, "SKILL.md"), "# Safe skill\n", "utf8");
+    const options = { dataRoot: value.dataRoot, sourceCodexHome: value.sourceCodexHome, sharedSkillsRoot: value.sharedSkillsRoot };
+    const preview = previewCapabilityMigration("assistant-1", { skills: ["safe-skill"] }, options);
+    assert.equal(preview.skills[0].status, "ready");
+    assert.equal(preview.skills[0].replaceExisting, true);
+    applyCapabilityMigration("assistant-1", { skills: ["safe-skill"] }, options);
+    assert.equal(fs.lstatSync(target).isSymbolicLink(), true);
+    assert.equal(fs.realpathSync(target), fs.realpathSync(path.join(value.sharedSkillsRoot, "safe-skill")));
+  } finally {
+    fs.rmSync(value.root, { recursive: true, force: true });
+  }
+});
+
+test("blocks a different target Skill without overwriting it", () => {
+  const value = fixture();
+  try {
+    const target = path.join(value.targetCodexHome, "skills", "safe-skill");
+    fs.mkdirSync(target, { recursive: true });
+    fs.writeFileSync(path.join(target, "SKILL.md"), "# Different skill\n", "utf8");
+    const options = { dataRoot: value.dataRoot, sourceCodexHome: value.sourceCodexHome, sharedSkillsRoot: value.sharedSkillsRoot };
+    const preview = previewCapabilityMigration("assistant-1", { skills: ["safe-skill"] }, options);
+    assert.equal(preview.skills[0].status, "target-conflict");
+    assert.equal(applyCapabilityMigration("assistant-1", { skills: ["safe-skill"] }, options).applied, 0);
+    assert.equal(fs.readFileSync(path.join(target, "SKILL.md"), "utf8"), "# Different skill\n");
+  } finally {
+    fs.rmSync(value.root, { recursive: true, force: true });
+  }
+});
+
+test("reports an already aligned shared Skill", () => {
+  const value = fixture();
+  try {
+    const shared = path.join(value.sharedSkillsRoot, "safe-skill");
+    const source = path.join(value.sourceCodexHome, "skills", "safe-skill");
+    const target = path.join(value.targetCodexHome, "skills", "safe-skill");
+    fs.mkdirSync(value.sharedSkillsRoot, { recursive: true });
+    fs.renameSync(source, shared);
+    fs.symlinkSync(shared, source, "junction");
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.symlinkSync(shared, target, "junction");
+    const options = { dataRoot: value.dataRoot, sourceCodexHome: value.sourceCodexHome, sharedSkillsRoot: value.sharedSkillsRoot };
+    const preview = previewCapabilityMigration("assistant-1", { skills: ["safe-skill"] }, options);
+    assert.equal(preview.skills[0].status, "aligned");
+    assert.equal(preview.summary.ready, 0);
+  } finally {
+    fs.rmSync(value.root, { recursive: true, force: true });
+  }
+});
+
+test("rolls back source and target directories when migration commit fails", () => {
+  const value = fixture();
+  try {
+    const target = path.join(value.targetCodexHome, "skills", "safe-skill");
+    fs.mkdirSync(target, { recursive: true });
+    fs.writeFileSync(path.join(target, "SKILL.md"), "# Safe skill\n", "utf8");
+    assert.throws(() => applyCapabilityMigration("assistant-1", { skills: ["safe-skill"] }, {
+      dataRoot: value.dataRoot,
+      sourceCodexHome: value.sourceCodexHome,
+      sharedSkillsRoot: value.sharedSkillsRoot,
+      beforeCommit: () => { throw new Error("injected failure"); },
+    }), /injected failure/);
+    const source = path.join(value.sourceCodexHome, "skills", "safe-skill");
+    assert.equal(fs.lstatSync(source).isSymbolicLink(), false);
+    assert.equal(fs.lstatSync(target).isSymbolicLink(), false);
+    assert.equal(fs.readFileSync(path.join(source, "SKILL.md"), "utf8"), "# Safe skill\n");
+    assert.equal(fs.existsSync(path.join(value.sharedSkillsRoot, "safe-skill")), false);
   } finally {
     fs.rmSync(value.root, { recursive: true, force: true });
   }
