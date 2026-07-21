@@ -35,5 +35,7 @@ test("installed-upgrade verification scales its recovery window with managed Bot
   assert.match(script, /\$notRestartedCount\s*=/);
   assert.match(script, /Where-Object \{ -not \$_\.restarted \}/);
   assert.match(script, /\$offlineCount -eq 0 -and \$notRestartedCount -eq 0/);
+  assert.match(script, /\$stableSignature\s*=\s*\$null/);
+  assert.doesNotMatch(script, /\$stableSignature\s*=\s*''/);
   assert.doesNotMatch(script, /AddMinutes\(5\)/);
 });

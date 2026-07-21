@@ -112,7 +112,7 @@ if (-not $desktopMain) { throw 'Upgraded desktop client did not start' }
 $recoveryTimeoutSeconds = [Math]::Max(300, ($before.Count * 120) + 90)
 $recoveryDeadline = (Get-Date).AddSeconds($recoveryTimeoutSeconds)
 $stableSince = $null
-$stableSignature = ''
+$stableSignature = $null
 do {
     $botRows = foreach ($name in $before.Keys | Sort-Object) {
         $pidPath = Join-Path (Join-Path (Join-Path $runtimeRoot $name) 'state') 'bridge.pid'
@@ -143,7 +143,7 @@ do {
         if (((Get-Date) - $stableSince).TotalSeconds -ge 60) { break }
     } else {
         $stableSince = $null
-        $stableSignature = ''
+        $stableSignature = $null
     }
     Start-Sleep -Seconds 2
 } while ((Get-Date) -lt $recoveryDeadline)
