@@ -529,3 +529,11 @@ These risks are addressed with protocol versioning, active-run guards, transacti
 - Continue checking active runs across every registered Bot before deletion, including Bots in other Homes, so isolation does not weaken task protection.
 - Disable cross-Home `desktopCodexHome` mirroring at runtime and make the workspace factory emit no mirror target for future spaces.
 - Ship and validate Windows desktop `0.7.7` first. Update the physical Mac through Tailscale and SSH only after user acceptance; do not contact the powered-off old Windows device.
+
+## 2026-07-26 - Native in-flight instruction steering
+
+- Add `/steer <supplement>` as an explicit out-of-band Bridge command backed only by the app-server `turn/steer` method.
+- Append the supplement to the exact currently active turn and its owning session; never enqueue it as a later user task, start a replacement turn, or silently fall back when the active turn has already ended.
+- Serialize rapid steering requests per active job and revalidate the job, thread, and turn immediately before each request so late or concurrent commands cannot target a replacement task.
+- Keep ordinary message queuing, `/stop`, `/compact`, Provider switching, attachments, and session handling unchanged.
+- Deliver the reviewed engine as Windows desktop `0.8.1`, the stable Windows GitHub Release, and the old Windows client-managed deployment. The SSH-maintained physical Mac is outside this change.

@@ -1593,6 +1593,14 @@ Scope accepted:
 
 Execution and verification evidence will be appended here as each implementation and physical-device check completes.
 
+## 2026-07-26 - 0.8.1 native `/steer` implementation
+
+- Added the out-of-band `/steer <补充内容>` command for regular and goal-mode app-server turns.
+- The command calls native `turn/steer` only, revalidates the exact active job immediately before dispatch, serializes rapid supplements per job, and records successful content in the owning session.
+- It explicitly refuses missing, ended, exec-mode, or otherwise non-steerable tasks and never falls back to `turn/start` or the ordinary queue.
+- Added architecture-boundary coverage for routing, serialization, active-job revalidation, help text, and the prohibition on replacement turns.
+- Root `npm run check` passed all 67 tests; `git diff --check` passed. Desktop packaging, installed-client verification, GitHub Release verification, and old-device rollout evidence will be appended after those stages complete.
+
 Implemented:
 
 - Added a platform-dispatched macOS backend using System Events, AppleScript, `screencapture`, `pbcopy`, and `pbpaste`. Windows retains its existing `pywin32` and UI Automation implementation.

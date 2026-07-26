@@ -148,6 +148,7 @@ http://127.0.0.1:8320/
 /switch 3
 /new
 /rename 新标题
+/steer 补充当前任务遗漏的要求
 /delete 2
 /delete 2 4-6
 /confirm delete 1
@@ -155,6 +156,8 @@ http://127.0.0.1:8320/
 ```
 
 `/list` 会合并当前 Bot 绑定、同一 Codex Home 的其他 Bot 绑定、Codex DB、rollout 文件、`session_index.jsonl` 和 `.codex-global-state.json`，并标注来源；不会列出其他 Codex Home 的会话。`/delete` 只生成待删除快照，`/confirm delete` 才真正按 threadId 清理当前 Home 和同 Home Bridge 绑定，避免列表顺序变化造成误删或跨空间删除。
+
+`/steer <补充内容>` 会把新要求追加到当前正在运行的 Codex turn，不进入普通消息队列，也不会创建新任务。当前没有可追加的原生 app-server turn 时，命令会明确拒绝且不执行降级操作。
 
 ## 文档
 

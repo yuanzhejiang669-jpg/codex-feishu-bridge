@@ -503,6 +503,21 @@ test("workspace factory and runtime keep distinct Codex homes isolated", () => {
   assert.doesNotMatch(panelSource, /await cp\(source, target, \{ recursive: true/);
 });
 
+test("explicit steer stays out of the ordinary queue and never starts a replacement turn", () => {
+  const bridgeSource = fs.readFileSync(new URL("../codex-feishu-bridge.mjs", import.meta.url), "utf8");
+  const handlerStart = bridgeSource.indexOf("async function handleSteerCommand(");
+  const handlerEnd = bridgeSource.indexOf("async function handleCompactCommand(", handlerStart);
+  const handlerSource = bridgeSource.slice(handlerStart, handlerEnd);
+
+  assert.ok(handlerStart >= 0 && handlerEnd > handlerStart);
+  assert.match(bridgeSource, /case "\/steer":[\s\S]*handleSteerCommand/);
+  assert.match(handlerSource, /"turn\/steer"/);
+  assert.doesNotMatch(handlerSource, /"turn\/start"/);
+  assert.match(handlerSource, /activeCodexJobs\.get\(chatId\) !== job/);
+  assert.match(handlerSource, /job\.steerInFlight/);
+  assert.match(bridgeSource, /`\/steer <补充内容>`/);
+});
+
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }

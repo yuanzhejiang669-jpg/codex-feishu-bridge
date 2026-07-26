@@ -5365,6 +5365,7 @@ async function runGoalLoop(run, goalPatch) {
     threadId: "",
     turnId: "",
     mode: "app-server-goal",
+    steerInFlight: null,
   };
   activeCodexJobs.set(chatId, activeJob);
 
@@ -5764,6 +5765,7 @@ async function runCodexAppServer(event, session, state = null, onState = null, o
     threadId: "",
     turnId: "",
     mode: "app-server",
+    steerInFlight: null,
   };
   activeCodexJobs.set(chatId, activeJob);
 
@@ -6598,6 +6600,9 @@ async function handleCommand(event, command) {
       return;
     case "/compact":
       await handleCompactCommand(chatId, messageId);
+      return;
+    case "/steer":
+      await handleSteerCommand(event, command.rest, messageId);
       return;
     case "/stop":
       await stopCurrentJob(chatId, messageId, { clearMode: stopClearMode(command.rest) });
@@ -7905,6 +7910,96 @@ async function stopCurrentJob(chatId, messageId, { clearMode = "" } = {}) {
   await sendText(chatId, `已停止当前 Codex 任务。${clearMode ? `已清理等待队列 ${cleared} 条。` : ""}`, "stop", messageId);
 }
 
+async function handleSteerCommand(event, rest, messageId) {
+  const chatId = event.chat_id;
+  const userContent = String(rest || "").trim();
+  if (!userContent && !event.attachments?.length) {
+    await sendText(chatId, "用法：/steer <要追加到当前任务的补充指令>", "steer-usage", messageId);
+    return;
+  }
+
+  const job = activeCodexJobs.get(chatId);
+  if (!job) {
+    await sendText(chatId, "当前没有正在运行的 Codex 任务，未追加任何内容。", "steer-no-job", messageId);
+    return;
+  }
+  if (
+    !job.client
+    || !job.threadId
+    || !job.turnId
+    || !["app-server", "app-server-goal"].includes(job.mode)
+  ) {
+    await sendText(
+      chatId,
+      "当前任务尚未进入可追加指令的原生 Codex turn，未追加任何内容。请稍后重试。",
+      "steer-not-ready",
+      messageId,
+    );
+    return;
+  }
+
+  const previous = job.steerInFlight || Promise.resolve();
+  const current = previous.catch(() => {}).then(async () => {
+    if (
+      activeCodexJobs.get(chatId) !== job
+      || !job.client
+      || job.client.closed
+      || !job.threadId
+      || !job.turnId
+    ) {
+      throw new Error("当前 Codex turn 已结束，未追加任何内容");
+    }
+    const result = await job.client.request(
+      "turn/steer",
+      appServerSteerParams(job.threadId, job.turnId, event, userContent),
+      60_000,
+    );
+    job.turnId = result?.turnId || job.turnId;
+
+    const session = sessions.chats[chatId]?.sessions?.find((item) => item.id === job.sessionId);
+    if (session) {
+      appendHistory(
+        session,
+        "user",
+        userContent || `${event.attachments?.length || 0} attachment(s)`,
+      );
+    }
+
+    const run = activeGoalRuns.get(chatId);
+    if (job.mode === "app-server-goal" && run?.client === job.client) {
+      run.currentTurnId = job.turnId;
+      run.state.goalSteerCount += 1;
+      run.state.footer = "thinking";
+      await run.updateCard?.();
+    }
+  });
+  job.steerInFlight = current;
+
+  try {
+    await current;
+    await sendText(
+      chatId,
+      "已将补充指令追加到当前正在运行的 Codex 任务，不会创建新任务。",
+      "steer-done",
+      messageId,
+    );
+  } catch (error) {
+    const detail = isActiveTurnRaceError(error)
+      ? "当前 Codex turn 已经结束或正在切换，未追加任何内容。"
+      : `追加指令失败，未创建新任务：${String(error.message || error).slice(0, 500)}`;
+    log("WARN", "explicit turn steer failed", {
+      chatId,
+      messageId,
+      threadId: job.threadId,
+      turnId: job.turnId,
+      error: String(error.message || error).slice(0, 1000),
+    });
+    await sendText(chatId, detail, "steer-error", messageId);
+  } finally {
+    if (job.steerInFlight === current) job.steerInFlight = null;
+  }
+}
+
 async function handleCompactCommand(chatId, messageId) {
   await syncChatSessionsWithCodex(chatId);
   const session = getSession(chatId);
@@ -7978,6 +8073,7 @@ function helpMarkdown() {
     "`/model [模型ID] [推理强度]` — 查看或切换当前会话模型；`/model list` 查询当前 provider 的 /models；`/model test <id>` 测活",
     "`/fast on|off|status` — 切换或查看 Codex Fast 速度模式",
     "`/compact` — 触发当前原生 thread 的上下文压缩",
+    "`/steer <补充内容>` — 将补充指令追加到当前正在运行的 Codex turn；不会创建新任务",
     "`/sessions` — 列出飞书会话和 Codex 侧边栏可见会话",
     "`/switch <序号或ID>` — 切换到已有 Codex 会话",
     "`/rename 新标题` / `/rename <序号> 新标题` — 修改当前会话或 /list 指定会话标题",
