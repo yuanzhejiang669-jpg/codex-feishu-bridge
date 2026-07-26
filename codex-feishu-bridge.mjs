@@ -48,6 +48,7 @@ import {
   createServiceTierPolicy,
 } from "./src/config/service-tier.mjs";
 import { AppServerClient } from "./src/codex/app-server-client.mjs";
+import { createAppServerPool } from "./src/codex/app-server-pool.mjs";
 import { createAppServerProtocol } from "./src/codex/app-server-protocol.mjs";
 import {
   codexRuntimeVersionLines,
@@ -56,6 +57,7 @@ import {
 import { createCodexProviderConfig } from "./src/providers/codex-config.mjs";
 import { createActiveRunStore } from "./src/runtime/active-runs.mjs";
 import { createEventDispatcher } from "./src/runtime/event-dispatcher.mjs";
+import { createEventReplayGuard } from "./src/runtime/event-replay-guard.mjs";
 import { createProcessRunner, isProcessAlive as isProcessAlivePid } from "./src/runtime/process-runner.mjs";
 import { createRecalledMessageStore } from "./src/runtime/recalled-messages.mjs";
 import { createRunWatchdog as createBaseRunWatchdog } from "./src/runtime/run-watchdog.mjs";
@@ -138,6 +140,8 @@ const CONFIG = {
   codexReasoning: process.env.CODEX_FEISHU_REASONING || "",
   codexTimeoutMs: parseDurationMs(process.env.CODEX_FEISHU_CODEX_TIMEOUT_MS, 0),
   codexIdleTimeoutMs: parseDurationMs(process.env.CODEX_FEISHU_CODEX_IDLE_TIMEOUT_MS, 60 * 60_000),
+  appServerIdleTtlMs: parseDurationMs(process.env.CODEX_FEISHU_APP_SERVER_IDLE_TTL_MS, 15 * 60_000),
+  appServerPoolSize: Number(process.env.CODEX_FEISHU_APP_SERVER_POOL_SIZE || process.env.CODEX_FEISHU_MAX_CONCURRENT || "1"),
   disableMcp: (process.env.CODEX_FEISHU_DISABLE_MCP || "0") !== "0",
   maxConcurrent: Number(process.env.CODEX_FEISHU_MAX_CONCURRENT || "1"),
   maxReplyChars: Number(process.env.CODEX_FEISHU_MAX_REPLY_CHARS || "6000"),
@@ -162,6 +166,7 @@ const CONFIG = {
   maxPendingAttachments: Number(process.env.CODEX_FEISHU_MAX_PENDING_ATTACHMENTS || "12"),
   maxFileAttachmentBytes: Number(process.env.CODEX_FEISHU_MAX_FILE_ATTACHMENT_BYTES || `${50 * 1024 * 1024}`),
   recalledMessageTtlMs: parseDurationMs(process.env.CODEX_FEISHU_RECALLED_MESSAGE_TTL_MS, 24 * 60 * 60_000),
+  eventReplayGraceMs: parseDurationMs(process.env.CODEX_FEISHU_EVENT_REPLAY_GRACE_MS, 2 * 60_000),
   deleteConfirmTtlMs: Number(process.env.CODEX_FEISHU_DELETE_CONFIRM_TTL_MS || `${5 * 60_000}`),
   streamRecoveryEnabled: (process.env.CODEX_FEISHU_STREAM_RECOVERY || "1") !== "0",
   streamRecoveryMaxAttempts: Number(process.env.CODEX_FEISHU_STREAM_RECOVERY_MAX_ATTEMPTS || "1"),
@@ -420,6 +425,10 @@ const stats = {
   recovered: 0,
   failuresByKind: {},
 };
+const eventReplayGuard = createEventReplayGuard({
+  startedAt: stats.startedAt,
+  graceMs: CONFIG.eventReplayGraceMs,
+});
 const eventDispatcher = createEventDispatcher({
   maxConcurrent: CONFIG.maxConcurrent,
   chatIdOf,
@@ -454,6 +463,15 @@ const {
   steerParams: appServerSteerParams,
   turnParams: appServerTurnParams,
 } = appServerProtocol;
+const appServerPool = createAppServerPool({
+  createClient: (options) => startAppServerClient(options),
+  maxSize: CONFIG.appServerPoolSize,
+  idleTtlMs: CONFIG.appServerIdleTtlMs,
+  log,
+});
+shutdownCallbacks.add(() => {
+  void appServerPool.closeAll("bridge-shutdown");
+});
 
 function cleanOverride(value) {
   const text = String(value || "").trim();
@@ -5754,7 +5772,10 @@ async function runCodexAppServer(event, session, state = null, onState = null, o
   const recoveryAttempt = Number(options.recoveryAttempt || 0);
   const userContent = userTextFromContent(event.content);
   const liveState = state || createRunState(session, event, userContent);
-  const client = startAppServerClient({ cwd: CONFIG.workspace });
+  const poolWaitStartedAt = Date.now();
+  const lease = await appServerPool.acquire({ cwd: CONFIG.workspace });
+  const poolWaitMs = Date.now() - poolWaitStartedAt;
+  const client = lease.client;
   const activeJob = {
     pid: client.child.pid,
     client,
@@ -5778,6 +5799,7 @@ async function runCodexAppServer(event, session, state = null, onState = null, o
     setTimeout(() => terminateProcessTree(client.child?.pid, true), 5000).unref?.();
   });
   let serviceTierPlan = null;
+  let discardClient = false;
 
   try {
     const settings = assertReasoningSupported(effectiveSessionSettings(session));
@@ -5796,12 +5818,24 @@ async function runCodexAppServer(event, session, state = null, onState = null, o
       serviceTierAutoFallback: Boolean(serviceTierPlan.autoFallback),
       timeoutMs: CONFIG.codexTimeoutMs,
       idleTimeoutMs: CONFIG.codexIdleTimeoutMs,
+      appServerWarm: lease.initializedBeforeAcquire,
+      appServerPoolWaitMs: poolWaitMs,
+      appServerPool: appServerPool.stats(),
       disableMcp: CONFIG.disableMcp,
     });
 
-    const initializeStartedAt = Date.now();
-    const initialized = await initializeAppServerClient(client);
+    const initialization = await lease.ensureInitialized(initializeAppServerClient);
+    const initialized = initialization.result;
     const initializedAt = Date.now();
+    const initializeStartedAt = initializedAt - initialization.durationMs;
+    const drainedNotifications = client.drainNotifications();
+    if (drainedNotifications) {
+      log("INFO", "drained stale app-server notifications before turn", {
+        messageId,
+        sessionId: session.id,
+        count: drainedNotifications,
+      });
+    }
     watchdog.touch();
     markRunPhase(liveState, "initializing", { connection: "connected" });
     liveState.meta.model = initialized.userAgent || liveState.meta.model;
@@ -5824,6 +5858,8 @@ async function runCodexAppServer(event, session, state = null, onState = null, o
       threadId,
       turnId,
       initializeMs: initializedAt - initializeStartedAt,
+      appServerWarm: initialization.warm,
+      appServerPoolWaitMs: poolWaitMs,
       threadMs: threadReadyAt - initializedAt,
       turnStartMs: turnStartedAt - threadReadyAt,
       preTurnMs: turnStartedAt - startedAt,
@@ -5850,6 +5886,18 @@ async function runCodexAppServer(event, session, state = null, onState = null, o
         continue;
       }
       watchdog.touch();
+      if (!appServerNotificationMatchesRun(message, threadId, turnId)) {
+        log("INFO", "ignored app-server notification for another run", {
+          messageId,
+          sessionId: session.id,
+          method: message.method || "",
+          expectedThreadId: threadId,
+          expectedTurnId: turnId,
+          actualThreadId: appServerNotificationThreadId(message),
+          actualTurnId: appServerNotificationTurnId(message),
+        });
+        continue;
+      }
       if (reduceAppServerEvent(liveState, message)) await flushState();
       if (message.method === "turn/completed" && (!turnId || message.params?.turn?.id === turnId)) {
         completed = true;
@@ -5907,6 +5955,7 @@ async function runCodexAppServer(event, session, state = null, onState = null, o
       threadId,
     };
   } catch (error) {
+    discardClient = true;
     if (stoppedJobs.has(messageId) || stoppedJobs.has(activeJob.rootMessageId)) {
       markRunInterrupted(liveState);
     } else {
@@ -5930,7 +5979,7 @@ async function runCodexAppServer(event, session, state = null, onState = null, o
           kind: failure.kind,
           detail: failure.detail.slice(0, 1000),
         });
-        await client.stop();
+        await lease.release({ discard: true, reason: "service-tier-fallback" });
         return await runCodexAppServer(event, session, liveState, onState, {
           ...options,
           disableServiceTier: true,
@@ -5948,6 +5997,7 @@ async function runCodexAppServer(event, session, state = null, onState = null, o
           kind: failure.kind,
           detail: failure.detail.slice(0, 1000),
         });
+        await lease.release({ discard: true, reason: "stream-recovery" });
         const recoveryEvent = recoveryEventFromFailure(event, liveState, failure, recoveryAttempt + 1);
         return await runCodexAppServer(recoveryEvent, session, liveState, onState, {
           recoveryAttempt: recoveryAttempt + 1,
@@ -5964,8 +6014,38 @@ async function runCodexAppServer(event, session, state = null, onState = null, o
     watchdog.clear();
     const job = activeCodexJobs.get(chatId);
     if (job?.pid === client.child?.pid) activeCodexJobs.delete(chatId);
-    await client.stop();
+    await lease.release({
+      discard: discardClient || client.closed,
+      reason: discardClient ? "turn-failed" : "turn-completed",
+    });
   }
+}
+
+function appServerNotificationThreadId(message) {
+  return String(
+    message?.params?.threadId
+      || message?.params?.thread?.id
+      || message?.params?.turn?.threadId
+      || message?.params?.item?.threadId
+      || "",
+  );
+}
+
+function appServerNotificationTurnId(message) {
+  return String(
+    message?.params?.turnId
+      || message?.params?.turn?.id
+      || message?.params?.item?.turnId
+      || "",
+  );
+}
+
+function appServerNotificationMatchesRun(message, threadId, turnId) {
+  const actualThreadId = appServerNotificationThreadId(message);
+  const actualTurnId = appServerNotificationTurnId(message);
+  if (actualThreadId && threadId && actualThreadId !== threadId) return false;
+  if (actualTurnId && turnId && actualTurnId !== turnId) return false;
+  return true;
 }
 
 async function runCodex(event, session, state = null, onState = null) {
@@ -6417,50 +6497,19 @@ async function handleEvent(rawEvent, dispatchControl = {}) {
   }
   const cardState = createRunState(session, event, userContent);
   let card = null;
-  let activeRunRecorded = false;
-  if (CONFIG.useCards) {
-    try {
-      card = await ManagedCard.open(
-        chatId,
-        CONFIG.replyToMessage || CONFIG.useThreadReply ? messageId : "",
-        renderRunCard(cardState),
-        messageId,
-      );
-      log("INFO", "card opened", { messageId, cardId: card.cardId, cardMessageId: card.messageId });
-      recordActiveRun({
-        chatId,
-        messageId,
-        sessionId: session.id,
-        cardId: card.cardId,
-        cardMessageId: card.messageId,
-        startedAt: cardState.startedAt,
-      });
-      activeRunRecorded = true;
-    } catch (error) {
-      log("WARN", "card open failed; falling back to markdown", {
-        messageId,
-        error: String(error.message || error).slice(0, 1200),
-      });
-    }
-  }
-
-  if (false && !card) {
-    await sendMarkdown(
-      chatId,
-      [
-        "**Codex 正在处理**",
-        "",
-        `会话：${session.title} (${session.id})`,
-        `工作区：${CONFIG.workspace}`,
-        `设置：${settingsSummary(session)}`,
-      ].join("\n"),
-      "ack",
-      messageId,
-    );
-  }
-
+  const activeRunRecorded = true;
+  recordActiveRun({
+    chatId,
+    messageId,
+    sessionId: session.id,
+    cardId: "",
+    cardMessageId: "",
+    startedAt: cardState.startedAt,
+  });
   let finalCardFlushOk = true;
+  let latestCardState = cardState;
   const updateCard = async (state) => {
+    latestCardState = state;
     if (!card) return;
     if (activeRunRecorded && state.terminal === "running") touchActiveRun(messageId);
     const rendered = renderRunCard(state);
@@ -6473,8 +6522,46 @@ async function handleEvent(rawEvent, dispatchControl = {}) {
     }
   };
 
+  const cardOpenPromise = (async () => {
+    if (!CONFIG.useCards) return null;
+    const cardOpenStartedAt = Date.now();
+    try {
+      card = await ManagedCard.open(
+        chatId,
+        CONFIG.replyToMessage || CONFIG.useThreadReply ? messageId : "",
+        renderRunCard(cardState),
+        messageId,
+      );
+      log("INFO", "card opened", {
+        messageId,
+        cardId: card.cardId,
+        cardMessageId: card.messageId,
+        cardOpenMs: Date.now() - cardOpenStartedAt,
+        parallelWithCodex: true,
+      });
+      recordActiveRun({
+        chatId,
+        messageId,
+        sessionId: session.id,
+        cardId: card.cardId,
+        cardMessageId: card.messageId,
+        startedAt: cardState.startedAt,
+      });
+      await updateCard(latestCardState);
+      return card;
+    } catch (error) {
+      log("WARN", "card open failed; falling back to markdown", {
+        messageId,
+        cardOpenMs: Date.now() - cardOpenStartedAt,
+        error: String(error.message || error).slice(0, 1200),
+      });
+      return null;
+    }
+  })();
+
   try {
-    const result = await runCodex(event, session, card ? cardState : null, updateCard);
+    const result = await runCodex(event, session, cardState, updateCard);
+    await cardOpenPromise;
     appendHistory(session, "user", userContent || `${event.attachments?.length || 0} attachment(s)`);
     appendHistory(session, "assistant", result.text);
     stats.answered += 1;
@@ -6490,19 +6577,19 @@ async function handleEvent(rawEvent, dispatchControl = {}) {
   } catch (error) {
     if (stoppedJobs.has(messageId)) {
       stoppedJobs.delete(messageId);
-      if (card) {
-        markRunInterrupted(cardState);
-        await updateCard(cardState);
-      }
+      markRunInterrupted(cardState);
+      await updateCard(cardState);
+      await cardOpenPromise;
       log("INFO", "codex job stopped by user", { messageId, chatId });
       return;
     }
     stats.failed += 1;
     const failure = classifyCodexFailure(error);
     recordFailureStats(failure);
+    markRunError(cardState, error);
+    await updateCard(cardState);
+    await cardOpenPromise;
     if (card) {
-      markRunError(cardState, error);
-      await updateCard(cardState);
       if (!finalCardFlushOk) {
         await sendMarkdown(
           chatId,
@@ -6539,6 +6626,7 @@ async function handleEvent(rawEvent, dispatchControl = {}) {
     }
     throw error;
   } finally {
+    await cardOpenPromise;
     if (activeRunRecorded) clearActiveRun(messageId);
   }
 }
@@ -8442,6 +8530,8 @@ function startConsumer() {
     reasoning: codexReasoningLabel,
     codexTimeoutMs: CONFIG.codexTimeoutMs,
     codexIdleTimeoutMs: CONFIG.codexIdleTimeoutMs,
+    appServerIdleTtlMs: CONFIG.appServerIdleTtlMs,
+    appServerPoolSize: CONFIG.appServerPoolSize,
     listLimit: CONFIG.listLimit,
     disableMcp: CONFIG.disableMcp,
     maxConcurrent: CONFIG.maxConcurrent,
@@ -8453,6 +8543,7 @@ function startConsumer() {
     larkDataFileThreshold: CONFIG.larkDataFileThreshold,
     replyToMessage: CONFIG.replyToMessage,
     replyInThread: CONFIG.useThreadReply,
+    eventReplayGraceMs: CONFIG.eventReplayGraceMs,
     sidebarReconcileIntervalMs: CONFIG.sidebarReconcileIntervalMs,
   });
 
@@ -8534,7 +8625,23 @@ function startEventConsumer(eventKey) {
     const trimmed = line.trim();
     if (!trimmed) return;
     try {
-      eventDispatcher.enqueue(JSON.parse(trimmed));
+      const event = JSON.parse(trimmed);
+      const replay = eventReplayGuard.inspect(event);
+      if (replay.stale && !isRecallEvent(event)) {
+        const messageId = messageIdOf(event);
+        const dedupeId = eventIdOf(event) || messageId;
+        if (dedupeId) rememberEvent(dedupeId, messageId);
+        log("INFO", "stale startup replay ignored", {
+          eventKey,
+          eventId: eventIdOf(event),
+          messageId,
+          eventTimestampMs: replay.timestampMs,
+          cutoffMs: replay.cutoffMs,
+          ageMs: replay.ageMs,
+        });
+        return;
+      }
+      eventDispatcher.enqueue(event);
     } catch (error) {
       log("WARN", "failed to parse event line", { line: trimmed.slice(0, 1000), error: String(error) });
     }

@@ -49,6 +49,10 @@ Provider 添加、测试、环境变量替换、同步到空间 Codex Home 和�
 
 每个 Bot 都是独立进程，但共用本仓库里的同一套 Bridge 代码。改 Bridge 源码后，已运行的 Bot 需要重启对应进程才会加载新代码。
 
+普通对话会让飞书卡片创建和 Codex 启动并行进行。初始化后的 app-server 使用独占租约保留一段空闲时间，后续热会话跳过重复进程启动和 `initialize`；同一个 stdio 客户端不会同时交给两个任务。默认热保留 15 分钟、池大小跟随消息并发数，也可以通过 `.env.example` 中的性能环境变量调整或恢复为每次冷启动。
+
+Bridge 启动时还会建立事件时间水位线。超过重启宽限窗口的积压旧消息会被持久化标记并跳过，避免客户端升级或 Bot 重启后突然回复历史内容。
+
 ## 环境要求
 
 - Windows 10/11
@@ -167,6 +171,8 @@ http://127.0.0.1:8320/
 - [工作空间工厂](docs/workspace-factory.md)
 - [配置与安全边界](docs/configuration-and-security.md)
 - [故障排查](docs/troubleshooting.md)
+- [极致响应改造规划](docs/bridge-performance-plan.md)
+- [极致响应执行记录](docs/bridge-performance-execution.md)
 
 ## 不会提交的内容
 

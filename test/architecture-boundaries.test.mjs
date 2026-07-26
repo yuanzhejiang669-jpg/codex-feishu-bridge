@@ -11,9 +11,15 @@ import {
   DEFAULT_MAX_STDERR_BYTES,
   appServerRequestResult,
 } from "../src/codex/app-server-client.mjs";
+import { createAppServerPool } from "../src/codex/app-server-pool.mjs";
 import { createAppServerProtocol } from "../src/codex/app-server-protocol.mjs";
 import { createEventDispatcher } from "../src/runtime/event-dispatcher.mjs";
 import { createEventQueue } from "../src/runtime/event-queue.mjs";
+import {
+  createEventReplayGuard,
+  eventTimestampMs,
+  normalizeEventTimestamp,
+} from "../src/runtime/event-replay-guard.mjs";
 import { createRunWatchdog } from "../src/runtime/run-watchdog.mjs";
 import { createSingleInstanceLock } from "../src/runtime/single-instance-lock.mjs";
 
@@ -77,6 +83,17 @@ test("app-server keeps only a bounded stderr tail for long-running turns", () =>
   assert.equal(client.stderrText(), "x".repeat(1024));
 });
 
+test("app-server can discard stale buffered notifications before a pooled turn", () => {
+  const client = new AppServerClient({
+    tool: { command: "codex", argsPrefix: [] },
+    workspace: "C:\\work",
+  });
+  client.notifications.push({ method: "turn/completed" }, { method: "thread/status/changed" });
+  assert.equal(client.drainNotifications(), 2);
+  assert.deepEqual(client.notifications, []);
+  assert.equal(client.drainNotifications(), 0);
+});
+
 test("app-server normal close cancels forced process-tree termination", async () => {
   let forcedPid = 0;
   const child = new EventEmitter();
@@ -102,6 +119,134 @@ test("app-server normal close cancels forced process-tree termination", async ()
   await delay(25);
   assert.equal(client.closed, true);
   assert.equal(forcedPid, 0);
+});
+
+test("app-server pool reuses one initialized client and evicts it after idle TTL", async () => {
+  let processId = 900;
+  let initializeCount = 0;
+  const stopped = [];
+  const timers = [];
+  const pool = createAppServerPool({
+    maxSize: 1,
+    idleTtlMs: 1000,
+    createClient: () => ({
+      child: { pid: processId += 1 },
+      closed: false,
+      async stop() {
+        this.closed = true;
+        stopped.push(this.child.pid);
+      },
+    }),
+    setTimer: (callback, timeoutMs) => {
+      const timer = { callback, timeoutMs, unref() {} };
+      timers.push(timer);
+      return timer;
+    },
+    clearTimer: (timer) => {
+      const index = timers.indexOf(timer);
+      if (index >= 0) timers.splice(index, 1);
+    },
+  });
+
+  const first = await pool.acquire();
+  const firstPid = first.client.child.pid;
+  const cold = await first.ensureInitialized(async () => {
+    initializeCount += 1;
+    return { userAgent: "test" };
+  });
+  assert.equal(cold.warm, false);
+  await first.release();
+
+  const second = await pool.acquire();
+  assert.equal(second.client.child.pid, firstPid);
+  const warm = await second.ensureInitialized(async () => {
+    initializeCount += 1;
+    return {};
+  });
+  assert.equal(warm.warm, true);
+  assert.equal(initializeCount, 1);
+  await second.release();
+
+  assert.equal(timers.length, 1);
+  await timers[0].callback();
+  await waitFor(() => stopped.length === 1);
+  assert.deepEqual(stopped, [firstPid]);
+  assert.equal(pool.stats().size, 0);
+});
+
+test("app-server pool never leases one client to two jobs concurrently", async () => {
+  let processId = 1000;
+  const pool = createAppServerPool({
+    maxSize: 1,
+    idleTtlMs: 1000,
+    createClient: () => ({
+      child: { pid: processId += 1 },
+      closed: false,
+      async stop() {
+        this.closed = true;
+      },
+    }),
+  });
+
+  const first = await pool.acquire();
+  let secondResolved = false;
+  const secondPromise = pool.acquire().then((lease) => {
+    secondResolved = true;
+    return lease;
+  });
+  await delay(10);
+  assert.equal(secondResolved, false);
+  assert.equal(pool.stats().waiting, 1);
+
+  await first.release();
+  const second = await secondPromise;
+  assert.equal(second.client.child.pid, first.client.child.pid);
+  await second.release({ discard: true });
+  await pool.closeAll();
+});
+
+test("app-server pool discards failed clients and cold-starts a replacement", async () => {
+  let processId = 1100;
+  const pool = createAppServerPool({
+    maxSize: 1,
+    idleTtlMs: 1000,
+    createClient: () => ({
+      child: { pid: processId += 1 },
+      closed: false,
+      async stop() {
+        this.closed = true;
+      },
+    }),
+  });
+
+  const first = await pool.acquire();
+  const firstPid = first.client.child.pid;
+  await first.release({ discard: true, reason: "test-failure" });
+  const second = await pool.acquire();
+  assert.notEqual(second.client.child.pid, firstPid);
+  await second.release({ discard: true });
+  await pool.closeAll();
+});
+
+test("event replay guard recognizes Feishu seconds, milliseconds, and ISO timestamps", () => {
+  const expected = Date.UTC(2026, 6, 27, 1, 2, 3);
+  assert.equal(normalizeEventTimestamp(expected), expected);
+  assert.equal(normalizeEventTimestamp(Math.floor(expected / 1000)), Math.floor(expected / 1000) * 1000);
+  assert.equal(normalizeEventTimestamp(new Date(expected).toISOString()), expected);
+  assert.equal(eventTimestampMs({ event: { message: { create_time: String(Math.floor(expected / 1000)) } } }), Math.floor(expected / 1000) * 1000);
+});
+
+test("event replay guard skips only events older than the startup grace window", () => {
+  const startedAt = 2_000_000;
+  const guard = createEventReplayGuard({
+    startedAt,
+    graceMs: 120_000,
+    timestampOf: (event) => event.timestampMs || 0,
+  });
+  assert.equal(guard.shouldSkip({ timestampMs: startedAt - 120_001 }), true);
+  assert.equal(guard.shouldSkip({ timestampMs: startedAt - 120_000 }), false);
+  assert.equal(guard.shouldSkip({ timestampMs: startedAt + 1_000 }), false);
+  assert.equal(guard.shouldSkip({}), false);
 });
 
 test("app-server protocol preserves thread and turn request contracts", () => {
@@ -516,6 +661,29 @@ test("explicit steer stays out of the ordinary queue and never starts a replacem
   assert.match(handlerSource, /activeCodexJobs\.get\(chatId\) !== job/);
   assert.match(handlerSource, /job\.steerInFlight/);
   assert.match(bridgeSource, /`\/steer <补充内容>`/);
+});
+
+test("ordinary messages start Codex without awaiting CardKit and use the warm app-server pool", () => {
+  const bridgeSource = fs.readFileSync(new URL("../codex-feishu-bridge.mjs", import.meta.url), "utf8");
+  const handlerStart = bridgeSource.indexOf("async function handleEvent(");
+  const handlerEnd = bridgeSource.indexOf("function cleanupClearedDownloads(", handlerStart);
+  const handlerSource = bridgeSource.slice(handlerStart, handlerEnd);
+  const activeRunIndex = handlerSource.indexOf("recordActiveRun({", handlerSource.indexOf("const cardState ="));
+  const cardPromiseIndex = handlerSource.indexOf("const cardOpenPromise =");
+  const runCodexIndex = handlerSource.indexOf("const result = await runCodex(");
+  const awaitCardIndex = handlerSource.indexOf("await cardOpenPromise;", runCodexIndex);
+  const runStart = bridgeSource.indexOf("async function runCodexAppServer(");
+  const runEnd = bridgeSource.indexOf("async function runCodex(", runStart);
+  const runSource = bridgeSource.slice(runStart, runEnd);
+
+  assert.ok(activeRunIndex >= 0);
+  assert.ok(cardPromiseIndex > activeRunIndex);
+  assert.ok(runCodexIndex > cardPromiseIndex);
+  assert.ok(awaitCardIndex > runCodexIndex);
+  assert.match(runSource, /appServerPool\.acquire/);
+  assert.match(runSource, /lease\.ensureInitialized/);
+  assert.match(runSource, /lease\.release/);
+  assert.doesNotMatch(runSource, /finally\s*\{[\s\S]*await client\.stop\(\)/);
 });
 
 function delay(ms) {

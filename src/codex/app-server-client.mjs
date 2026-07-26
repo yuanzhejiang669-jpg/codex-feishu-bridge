@@ -178,6 +178,12 @@ export class AppServerClient {
     });
   }
 
+  drainNotifications() {
+    const drained = this.notifications.length;
+    this.notifications.length = 0;
+    return drained;
+  }
+
   async stop() {
     if (!this.child || this.closed) return;
     try {
