@@ -48,6 +48,13 @@ h1 { font-size: 22px; font-weight: 650; }
 .removal-impact .bad { color: #a53b32; }
 .removal-dialog > form > .checkbox-field { display: flex; align-items: flex-start; gap: 9px; margin-top: 11px; color: #303a44; font-size: 12px; line-height: 1.5; }
 .removal-dialog > form > .checkbox-field input { width: 17px; height: 17px; margin: 1px 0 0; flex: 0 0 auto; }
+.adoption-selection-tools { justify-content: flex-end; margin-bottom: 8px; }
+.adoption-list { display: grid; gap: 6px; max-height: min(430px, 52vh); overflow-y: auto; }
+.adoption-row { display: grid; grid-template-columns: 22px minmax(140px, 1fr) 90px minmax(190px, 1.4fr); align-items: center; gap: 10px; min-height: 48px; border: 1px solid #e0e5e9; border-radius: 4px; padding: 7px 9px; font-size: 11px; }
+.adoption-row input { width: 17px; height: 17px; margin: 0; }
+.adoption-row strong, .adoption-row small { display: block; overflow-wrap: anywhere; }
+.adoption-row small { margin-top: 3px; color: #687480; }
+.adoption-row .adoption-blocker { color: #9a3030; }
 
 .loading-band, .error-band { margin-top: 18px; border-radius: 5px; padding: 12px 14px; font-size: 13px; }
 .loading-band { border: 1px solid #cbd5df; background: #fff; color: #53606d; }

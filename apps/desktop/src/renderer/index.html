@@ -81,6 +81,7 @@
           <button id="clear-all-bots-button" class="link-button" type="button">取消全选</button>
           <button id="safe-restart-bots-button" class="secondary-button" type="button" disabled>安全重启所选 Bot</button>
           <button id="force-restart-bots-button" class="danger-button" type="button" disabled>强制重启所选 Bot</button>
+          <button id="adopt-legacy-bots-button" class="secondary-button" type="button">接管现有 Bot</button>
           <button id="create-bot-button" class="primary-button" type="button">+ 新建 Bot</button>
         </div>
         <section class="content-section">
@@ -351,6 +352,26 @@
         <button id="cancel-registration-button" class="secondary-button hidden" type="button">取消扫码</button>
         <button id="create-with-credentials-button" class="secondary-button" type="button">使用已有应用创建</button>
         <button id="create-with-qr-button" class="primary-button" type="button">扫码自动创建</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="legacy-adoption-dialog" class="bot-dialog removal-dialog">
+    <form id="legacy-adoption-form" method="dialog">
+      <div class="dialog-heading">
+        <div><h2>接管现有脚本 Bot</h2><span>保留原工作区、Codex Home、MCP、Skills、飞书凭据和会话</span></div>
+        <button id="close-legacy-adoption-dialog" class="icon-button" type="button" aria-label="关闭" title="关闭">×</button>
+      </div>
+      <div id="legacy-adoption-error" class="error-band hidden" role="alert"></div>
+      <p id="legacy-adoption-summary" class="readiness-summary"></p>
+      <div class="selection-tools adoption-selection-tools">
+        <button id="select-all-adoptable-bots" class="link-button" type="button">选择全部可接管</button>
+        <button id="clear-adoptable-bots" class="link-button" type="button">取消全选</button>
+      </div>
+      <div id="legacy-adoption-list" class="adoption-list"></div>
+      <label class="checkbox-field"><input id="legacy-adoption-confirm" type="checkbox" required><span>我确认客户端将禁用所选 Bot 的旧 Watchdog，并接管其启停、自启和异常恢复</span></label>
+      <div class="dialog-actions">
+        <button id="cancel-legacy-adoption" class="secondary-button" type="button">取消</button>
+        <button id="apply-legacy-adoption" class="primary-button" type="submit" disabled>接管所选 Bot</button>
       </div>
     </form>
   </dialog>

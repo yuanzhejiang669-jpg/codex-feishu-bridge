@@ -34,6 +34,7 @@ const elements = {
   clearAllBots: document.querySelector("#clear-all-bots-button"),
   safeRestartBots: document.querySelector("#safe-restart-bots-button"),
   forceRestartBots: document.querySelector("#force-restart-bots-button"),
+  adoptLegacyBots: document.querySelector("#adopt-legacy-bots-button"),
   botRestartStatus: document.querySelector("#bot-restart-status"),
   botDialog: document.querySelector("#bot-dialog"),
   botForm: document.querySelector("#bot-form"),
@@ -153,6 +154,17 @@ const elements = {
   closeProviderRemovalDialog: document.querySelector("#close-provider-removal-dialog"),
   cancelProviderRemoval: document.querySelector("#cancel-provider-removal"),
   applyProviderRemoval: document.querySelector("#apply-provider-removal"),
+  legacyAdoptionDialog: document.querySelector("#legacy-adoption-dialog"),
+  legacyAdoptionForm: document.querySelector("#legacy-adoption-form"),
+  legacyAdoptionError: document.querySelector("#legacy-adoption-error"),
+  legacyAdoptionSummary: document.querySelector("#legacy-adoption-summary"),
+  legacyAdoptionList: document.querySelector("#legacy-adoption-list"),
+  legacyAdoptionConfirm: document.querySelector("#legacy-adoption-confirm"),
+  closeLegacyAdoptionDialog: document.querySelector("#close-legacy-adoption-dialog"),
+  cancelLegacyAdoption: document.querySelector("#cancel-legacy-adoption"),
+  selectAllAdoptableBots: document.querySelector("#select-all-adoptable-bots"),
+  clearAdoptableBots: document.querySelector("#clear-adoptable-bots"),
+  applyLegacyAdoption: document.querySelector("#apply-legacy-adoption"),
 };
 
 let state = null;
@@ -330,6 +342,46 @@ function renderBots(bridge, setup = {}) {
     ? spaces.map((space, index) => `<tr><td><strong>${escapeHtml(space.spaceName)}</strong><small>${space.bots.length} 个 Bot</small></td><td>${escapeHtml(space.bots.map((bot) => bot.workspace).join("；"))}</td><td title="${escapeHtml(space.codexHome)}">${escapeHtml(space.codexHome)}</td><td><button class="link-button danger-link managed-space-remove" data-space-index="${index}" type="button">删除空间</button></td></tr>`).join("")
       + otherWorkspaces.map((instance) => `<tr><td>${escapeHtml(instance.name)}</td><td title="${escapeHtml(instance.workspace)}">${escapeHtml(instance.workspace)}</td><td title="${escapeHtml(instance.codexHome)}">${escapeHtml(instance.codexHome)}</td><td><span class="section-meta">只读</span></td></tr>`).join("")
     : '<tr><td colspan="4" class="empty-row">未发现工作空间</td></tr>';
+}
+
+function selectedLegacyAdoptionNames() {
+  return [...elements.legacyAdoptionList.querySelectorAll(".legacy-adoption-selection:checked")]
+    .map((input) => input.dataset.botName);
+}
+
+function updateLegacyAdoptionSubmitState() {
+  elements.applyLegacyAdoption.disabled = !elements.legacyAdoptionConfirm.checked
+    || selectedLegacyAdoptionNames().length === 0;
+}
+
+function renderLegacyAdoptionPreview(items) {
+  const ready = items.filter((item) => item.ready);
+  const queueable = items.filter((item) => item.queueable);
+  const blocked = items.filter((item) => !item.ready && !item.queueable);
+  elements.legacyAdoptionSummary.textContent = `${ready.length} 个可以立即接管 · ${queueable.length} 个将在任务结束后自动接管 · ${blocked.length} 个存在阻塞。`;
+  elements.legacyAdoptionList.innerHTML = items.length ? items.map((item) => `
+    <label class="adoption-row">
+      <input class="legacy-adoption-selection" data-bot-name="${escapeHtml(item.name)}" type="checkbox" ${item.ready || item.queueable ? "checked" : "disabled"}>
+      <span><strong>${escapeHtml(item.label || item.name)}</strong><small>${escapeHtml(item.name)}</small></span>
+      <span class="${badgeClass(item.ready ? "good" : "warn")}">${item.ready ? "可接管" : item.queueable ? "等待空闲" : "阻塞"}</span>
+      <span class="${item.ready || item.queueable ? "" : "adoption-blocker"}">${escapeHtml(item.ready ? "将禁用旧 Watchdog 并由客户端启动" : item.queueable ? "当前任务不受影响，结束后自动接管" : item.blockers.join("；"))}</span>
+    </label>`).join("") : '<div class="empty-row">没有可接管的现有脚本 Bot</div>';
+  elements.legacyAdoptionConfirm.checked = false;
+  updateLegacyAdoptionSubmitState();
+}
+
+async function openLegacyAdoptionDialog() {
+  elements.legacyAdoptionError.classList.add("hidden");
+  elements.legacyAdoptionSummary.textContent = "正在检查现有 Bot、活动任务、Lark Profile 和旧 Watchdog…";
+  elements.legacyAdoptionList.innerHTML = "";
+  elements.legacyAdoptionDialog.showModal();
+  try {
+    renderLegacyAdoptionPreview(await window.bridgeDesktop.previewLegacyAdoption({ names: [] }));
+  } catch (error) {
+    elements.legacyAdoptionError.textContent = error.message || String(error);
+    elements.legacyAdoptionError.classList.remove("hidden");
+    elements.applyLegacyAdoption.disabled = true;
+  }
 }
 
 function renderBotReadiness(result) {
@@ -1418,6 +1470,42 @@ elements.createBot.addEventListener("click", () => {
   document.querySelector("#bot-label").value = `Codex助手${suggested.match(/\d+$/)?.[0] || ""}`.trim();
   elements.botDialog.showModal();
   document.querySelector("#bot-name").focus();
+});
+
+elements.adoptLegacyBots.addEventListener("click", openLegacyAdoptionDialog);
+elements.closeLegacyAdoptionDialog.addEventListener("click", () => elements.legacyAdoptionDialog.close());
+elements.cancelLegacyAdoption.addEventListener("click", () => elements.legacyAdoptionDialog.close());
+elements.legacyAdoptionList.addEventListener("change", updateLegacyAdoptionSubmitState);
+elements.legacyAdoptionConfirm.addEventListener("change", updateLegacyAdoptionSubmitState);
+elements.selectAllAdoptableBots.addEventListener("click", () => {
+  elements.legacyAdoptionList.querySelectorAll(".legacy-adoption-selection:not(:disabled)").forEach((input) => { input.checked = true; });
+  updateLegacyAdoptionSubmitState();
+});
+elements.clearAdoptableBots.addEventListener("click", () => {
+  elements.legacyAdoptionList.querySelectorAll(".legacy-adoption-selection").forEach((input) => { input.checked = false; });
+  updateLegacyAdoptionSubmitState();
+});
+elements.legacyAdoptionForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const names = selectedLegacyAdoptionNames();
+  if (!elements.legacyAdoptionConfirm.checked || !names.length) return;
+  elements.applyLegacyAdoption.disabled = true;
+  elements.legacyAdoptionError.classList.add("hidden");
+  elements.legacyAdoptionSummary.textContent = `正在逐个接管 ${names.length} 个 Bot，请勿退出客户端…`;
+  try {
+    const result = await window.bridgeDesktop.applyLegacyAdoption({ names });
+    elements.legacyAdoptionDialog.close();
+    const parts = [`已接管 ${result.adopted.length}/${result.selectedCount} 个 Bot`];
+    if (result.queued.length) parts.push(`${result.queued.length} 个已排队等待任务结束`);
+    if (result.skipped.length) parts.push(`${result.skipped.length} 个因状态变化被安全跳过`);
+    if (result.failed.length) parts.push(`${result.failed.length} 个失败并已回滚`);
+    elements.botRestartStatus.textContent = parts.join(" · ");
+    await refresh();
+  } catch (error) {
+    elements.legacyAdoptionError.textContent = error.message || String(error);
+    elements.legacyAdoptionError.classList.remove("hidden");
+    updateLegacyAdoptionSubmitState();
+  }
 });
 
 elements.selectAllBots.addEventListener("click", () => {

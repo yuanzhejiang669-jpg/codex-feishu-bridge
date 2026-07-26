@@ -394,6 +394,8 @@ const {
 let shuttingDown = false;
 let sidebarReconcileInFlight = false;
 let sidebarReconcileQueuedReason = "";
+let sidebarReconcileTimer = null;
+let sidebarReconcilePendingReason = "";
 const sessionStore = createSessionStore({
   sessionsPath,
   createSessionData,
@@ -4223,6 +4225,24 @@ async function verifyAppServerThreadRegistration(threadId) {
   });
 }
 
+function scheduleAppServerThreadMaintenance(threadId, reason, delayMs = 0) {
+  const id = String(threadId || "").trim();
+  if (!id) return;
+  const timer = setTimeout(async () => {
+    try {
+      await verifyAppServerThreadRegistration(id);
+      await ensureAppServerThreadVisible(id, reason);
+    } catch (error) {
+      log("WARN", "deferred codex app-server thread maintenance failed", {
+        threadId: id,
+        reason,
+        error: String(error?.stack || error),
+      });
+    }
+  }, Math.max(0, Number(delayMs || 0)));
+  timer.unref?.();
+}
+
 async function listVisibleCodexThreadRecordsForBridge() {
   if (!fs.existsSync(codexStateDbPath)) return [];
 
@@ -4292,13 +4312,33 @@ async function reconcileCodexDesktopSidebarIndexes(reason = "startup") {
     const queuedReason = sidebarReconcileQueuedReason;
     sidebarReconcileQueuedReason = "";
     if (queuedReason) {
-      setTimeout(() => {
-        reconcileCodexDesktopSidebarIndexes(`${queuedReason}/queued`).catch((error) => {
-          log("WARN", "queued codex desktop sidebar reconcile failed", { error: String(error?.stack || error) });
-        });
-      }, 250).unref?.();
+      scheduleSidebarReconcile(`${queuedReason}/queued`, 1000);
     }
   }
+}
+
+function scheduleSidebarReconcile(reason, delayMs = 500) {
+  sidebarReconcilePendingReason = String(reason || "scheduled");
+  if (sidebarReconcileTimer) clearTimeout(sidebarReconcileTimer);
+  const delay = activeCodexJobs.size > 0
+    ? Math.max(5000, Number(delayMs || 0))
+    : Math.max(0, Number(delayMs || 0));
+  sidebarReconcileTimer = setTimeout(() => {
+    sidebarReconcileTimer = null;
+    const pendingReason = sidebarReconcilePendingReason || "scheduled";
+    sidebarReconcilePendingReason = "";
+    if (activeCodexJobs.size > 0) {
+      scheduleSidebarReconcile(`${pendingReason}/active-deferred`, 5000);
+      return;
+    }
+    reconcileCodexDesktopSidebarIndexes(pendingReason).catch((error) => {
+      log("WARN", "scheduled codex desktop sidebar reconcile failed", {
+        reason: pendingReason,
+        error: String(error?.stack || error),
+      });
+    });
+  }, delay);
+  sidebarReconcileTimer.unref?.();
 }
 
 async function codexTableSet(dbPath = codexStateDbPath) {
@@ -5677,8 +5717,6 @@ async function startOrResumeAppServerThread(client, session, options = {}) {
     const previousThreadId = session.codexThreadId;
     try {
       const resumed = await client.request("thread/resume", appServerResumeParams(session, options), 60_000);
-      await verifyAppServerThreadRegistration(resumed.thread.id);
-      await ensureAppServerThreadVisible(resumed.thread.id, "thread/resume");
       return resumed.thread.id;
     } catch (error) {
       const failure = classifyCodexFailure(error);
@@ -5705,8 +5743,6 @@ async function startOrResumeAppServerThread(client, session, options = {}) {
   session.codexThreadId = started.thread.id;
   session.updatedAt = Date.now();
   saveSessions();
-  await verifyAppServerThreadRegistration(started.thread.id);
-  await ensureAppServerThreadVisible(started.thread.id, "thread/start");
   return started.thread.id;
 }
 
@@ -5761,24 +5797,38 @@ async function runCodexAppServer(event, session, state = null, onState = null, o
       disableMcp: CONFIG.disableMcp,
     });
 
+    const initializeStartedAt = Date.now();
     const initialized = await initializeAppServerClient(client);
+    const initializedAt = Date.now();
     watchdog.touch();
     markRunPhase(liveState, "initializing", { connection: "connected" });
     liveState.meta.model = initialized.userAgent || liveState.meta.model;
 
     const threadId = await startOrResumeAppServerThread(client, session, options);
+    const threadReadyAt = Date.now();
     watchdog.touch();
     liveState.threadId = threadId;
     activeJob.threadId = threadId;
-    if (state) {
-      await flushState();
-    }
 
     const turn = await client.request("turn/start", appServerTurnParams(threadId, event, userContent, session, options), 60_000);
+    const turnStartedAt = Date.now();
     watchdog.touch();
     markModelEvent(liveState, "model_thinking");
     const turnId = turn?.turn?.id || "";
     activeJob.turnId = turnId;
+    log("INFO", "codex app-server turn accepted", {
+      messageId,
+      sessionId: session.id,
+      threadId,
+      turnId,
+      initializeMs: initializedAt - initializeStartedAt,
+      threadMs: threadReadyAt - initializedAt,
+      turnStartMs: turnStartedAt - threadReadyAt,
+      preTurnMs: turnStartedAt - startedAt,
+    });
+    if (state) {
+      await flushState();
+    }
 
     let completed = false;
     let lastWaitingUpdateAt = Date.now();
@@ -5843,7 +5893,7 @@ async function runCodexAppServer(event, session, state = null, onState = null, o
     }
     ensureRunDone(liveState, finalText);
     liveState.meta.durationMs = durationMs;
-    await ensureAppServerThreadVisible(threadId, "turn/completed");
+    scheduleAppServerThreadMaintenance(threadId, "turn/completed");
     if (state) {
       await flushState();
     }
@@ -8327,9 +8377,7 @@ function startConsumer() {
 }
 
 function startSidebarReconciler() {
-  reconcileCodexDesktopSidebarIndexes("startup").catch((error) => {
-    log("WARN", "startup codex desktop sidebar reconcile failed", { error: String(error?.stack || error) });
-  });
+  scheduleSidebarReconcile("startup", 0);
 
   const intervalMs = Math.max(
     MIN_SIDEBAR_RECONCILE_INTERVAL_MS,
@@ -8337,9 +8385,7 @@ function startSidebarReconciler() {
   );
   if (intervalMs > 0) {
     const timer = setInterval(() => {
-      reconcileCodexDesktopSidebarIndexes("interval").catch((error) => {
-        log("WARN", "interval codex desktop sidebar reconcile failed", { error: String(error?.stack || error) });
-      });
+      scheduleSidebarReconcile("interval", 1000);
     }, intervalMs);
     timer.unref?.();
     shutdownCallbacks.add(() => clearInterval(timer));
@@ -8355,15 +8401,7 @@ function watchCodexGlobalStateForSidebarReconcile(globalStatePath, label) {
   if (!globalStatePath || !fs.existsSync(path.dirname(globalStatePath))) return;
   try {
     const watcher = fs.watch(globalStatePath, { persistent: false }, () => {
-      setTimeout(() => {
-        reconcileCodexDesktopSidebarIndexes(`global-state/${label}`).catch((error) => {
-          log("WARN", "global-state codex desktop sidebar reconcile failed", {
-            label,
-            globalStatePath,
-            error: String(error?.stack || error),
-          });
-        });
-      }, 500).unref?.();
+      scheduleSidebarReconcile(`global-state/${label}`, 500);
     });
     shutdownCallbacks.add(() => watcher.close());
   } catch (error) {

@@ -171,6 +171,7 @@ function createWorkspaceFactoryQueue(raw, options) {
         model: preview.factory.model,
         model_provider: preview.factory.providerId,
         model_reasoning_effort: preview.factory.reasoningPlan.effectiveEffort,
+        service_tier: "standard",
         model_providers: { [preview.factory.providerId]: provider.definition },
       }).trim()}\n`);
     }

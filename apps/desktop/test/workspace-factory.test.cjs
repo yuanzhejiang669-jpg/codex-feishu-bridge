@@ -70,6 +70,7 @@ test("creates a secret-free persistent queue and selected Provider config", () =
     assert.equal(queueText.includes("secret"), false);
     const configText = fs.readFileSync(path.join(state.factory.codexHome, "config.toml"), "utf8");
     assert.match(configText, /model_provider = "company"/);
+    assert.match(configText, /service_tier = "standard"/);
     assert.match(configText, /env_key = "COMPANY_API_KEY"/);
     assert.equal(configText.includes("secret"), false);
   } finally { fs.rmSync(value.root, { recursive: true, force: true }); }

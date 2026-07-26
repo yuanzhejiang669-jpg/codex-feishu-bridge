@@ -94,10 +94,26 @@ def _get_screen_info() -> dict[str, Any]:
     if IS_MACOS:
         return _macos.screen_info()
     win32api, win32con, _win32gui, _win32ui, _clip, windll = _import_win32()
-    hdc = windll.user32.GetDC(0)
-    primary_physical_width = windll.gdi32.GetDeviceCaps(hdc, 118)
-    primary_physical_height = windll.gdi32.GetDeviceCaps(hdc, 117)
-    windll.user32.ReleaseDC(0, hdc)
+    from ctypes import c_int, c_void_p
+
+    get_dc = windll.user32.GetDC
+    get_dc.argtypes = [c_void_p]
+    get_dc.restype = c_void_p
+    release_dc = windll.user32.ReleaseDC
+    release_dc.argtypes = [c_void_p, c_void_p]
+    release_dc.restype = c_int
+    get_device_caps = windll.gdi32.GetDeviceCaps
+    get_device_caps.argtypes = [c_void_p, c_int]
+    get_device_caps.restype = c_int
+
+    hdc = get_dc(None)
+    if not hdc:
+        raise RuntimeError('GetDC failed for the primary display')
+    try:
+        primary_physical_width = get_device_caps(hdc, 118)
+        primary_physical_height = get_device_caps(hdc, 117)
+    finally:
+        release_dc(None, hdc)
     primary_width = win32api.GetSystemMetrics(win32con.SM_CXSCREEN)
     primary_height = win32api.GetSystemMetrics(win32con.SM_CYSCREEN)
     virtual_left = win32api.GetSystemMetrics(getattr(win32con, 'SM_XVIRTUALSCREEN', 76))

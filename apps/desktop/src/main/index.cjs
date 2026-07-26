@@ -12,6 +12,7 @@ const { registerBotWithQr } = require("./services/feishu-registration.cjs");
 const { authorizeLarkUser } = require("./services/lark-user-auth.cjs");
 const {
   inspectManagedBots,
+  runPowerShell,
   waitForMacosProviderEnvironment,
   restartSelectedManagedBots,
   setManagedBotAutoStart,
@@ -19,6 +20,11 @@ const {
   stopManagedBot,
   stopManagedBotAndDisableAutoStart,
 } = require("./services/supervisor.cjs");
+const {
+  applyLegacyAdoption,
+  previewLegacyAdoption,
+  processPendingLegacyAdoptions,
+} = require("./services/legacy-adoption.cjs");
 const { checkBotReadiness } = require("./services/bot-readiness.cjs");
 const { permissionImportJson, publicPermissionPolicy } = require("./services/permission-policy.cjs");
 const { createRecoverySupervisor } = require("./services/recovery-supervisor.cjs");
@@ -88,6 +94,8 @@ if (!app.isPackaged || smokeTest || capturePath) {
 const singleInstance = capturePath ? true : app.requestSingleInstanceLock();
 let mainWindow = null;
 let currentState = null;
+let legacyAdoptionInFlight = false;
+let legacyAdoptionTimer = null;
 let cancelRegistration = null;
 let userAuthorizationInProgress = "";
 let startupError = "";
@@ -286,6 +294,40 @@ function removalOptions() {
       profileHome: path.join(managedDataRoot(), "profile-home"),
     }),
   };
+}
+
+function legacyAdoptionOptions() {
+  const legacyLocalAppData = process.env.LOCALAPPDATA || app.getPath("appData");
+  return {
+    dataRoot: managedDataRoot(),
+    runtimeLocalAppData: runtimeLocalAppData(),
+    legacyLocalAppData,
+    sourceProfileHome: app.getPath("home"),
+    targetProfileHome: path.join(managedDataRoot(), "profile-home"),
+    defaultCodexHome: path.join(app.getPath("home"), ".codex"),
+    stopLegacy: (name) => runPowerShell(
+      path.join(currentState?.engine?.engineRoot || "", "stop-codex-feishu-bridge.ps1"),
+      name === "default" ? [] : ["-Name", name],
+      { env: { ...process.env, LOCALAPPDATA: legacyLocalAppData }, timeoutMs: 30_000 },
+    ),
+    startManaged: (name) => startManagedBot(name, supervisorOptions()),
+    stopManaged: (name) => stopManagedBot(name, { ...supervisorOptions(), force: true }),
+  };
+}
+
+async function processPendingLegacyAdoptionQueue() {
+  if (legacyAdoptionInFlight || !currentState?.engine?.available) return;
+  legacyAdoptionInFlight = true;
+  recoverySupervisor?.stop();
+  try {
+    const result = await processPendingLegacyAdoptions(legacyAdoptionOptions());
+    if (result.adopted.length || result.failed.length) await loadState();
+  } catch (error) {
+    console.warn("Pending legacy Bot adoption failed", error);
+  } finally {
+    recoverySupervisor?.start();
+    legacyAdoptionInFlight = false;
+  }
 }
 
 function readinessOptions() {
@@ -586,6 +628,9 @@ if (!singleInstance) {
           await loadState();
           await startManagedBot(name, supervisorOptions());
         }).finally(() => recoverySupervisor?.start());
+        legacyAdoptionTimer = setInterval(() => { void processPendingLegacyAdoptionQueue(); }, 15_000);
+        legacyAdoptionTimer.unref?.();
+        void processPendingLegacyAdoptionQueue();
       }
       updaterService.start();
     }
@@ -612,6 +657,26 @@ if (!singleInstance) {
       const result = await createManagedBot(input?.bot, input?.credentials, setupOptions());
       await loadState();
       return result;
+    });
+    ipcMain.handle("desktop:preview-legacy-adoption", (_event, input) => (
+      previewLegacyAdoption(Array.isArray(input?.names) ? input.names : [], legacyAdoptionOptions())
+    ));
+    ipcMain.handle("desktop:apply-legacy-adoption", async (_event, input) => {
+      assertStartupReady();
+      if (legacyAdoptionInFlight) throw new Error("现有 Bot 接管正在进行，请等待当前操作完成");
+      legacyAdoptionInFlight = true;
+      recoverySupervisor?.stop();
+      try {
+        const result = await applyLegacyAdoption(
+          Array.isArray(input?.names) ? input.names : [],
+          legacyAdoptionOptions(),
+        );
+        await loadState();
+        return result;
+      } finally {
+        recoverySupervisor?.start();
+        legacyAdoptionInFlight = false;
+      }
     });
     ipcMain.handle("desktop:register-bot-qr", async (event, input) => {
       assertStartupReady();
@@ -870,6 +935,7 @@ if (!singleInstance) {
 
   app.on("before-quit", (event) => {
     isQuitting = true;
+    if (legacyAdoptionTimer) clearInterval(legacyAdoptionTimer);
     recoverySupervisor?.stop();
     updaterService?.stop();
     const proxyStatus = protocolProxyService?.snapshot().status;

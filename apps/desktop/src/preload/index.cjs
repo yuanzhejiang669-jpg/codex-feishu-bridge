@@ -8,6 +8,8 @@ contextBridge.exposeInMainWorld("bridgeDesktop", Object.freeze({
   copyPath: (value) => ipcRenderer.invoke("desktop:copy-path", value),
   previewBot: (value) => ipcRenderer.invoke("desktop:preview-bot", value),
   createBot: (value) => ipcRenderer.invoke("desktop:create-bot", value),
+  previewLegacyAdoption: (value) => ipcRenderer.invoke("desktop:preview-legacy-adoption", value),
+  applyLegacyAdoption: (value) => ipcRenderer.invoke("desktop:apply-legacy-adoption", value),
   registerBotWithQr: (value) => ipcRenderer.invoke("desktop:register-bot-qr", value),
   previewWorkspaceFactory: (value) => ipcRenderer.invoke("desktop:preview-workspace-factory", value),
   createWorkspaceFactoryQueue: (value) => ipcRenderer.invoke("desktop:create-workspace-factory-queue", value),

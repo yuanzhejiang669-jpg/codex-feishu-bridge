@@ -92,6 +92,25 @@ test("sidebar record comparison detects only material column changes", () => {
   assert.equal(recordsMatchColumns(current, { ...current, nullable: undefined }, columns), true);
 });
 
+test("app-server starts the model turn before deferred sidebar maintenance", () => {
+  const script = fs.readFileSync(new URL("../codex-feishu-bridge.mjs", import.meta.url), "utf8");
+  const threadFunction = script.slice(
+    script.indexOf("async function startOrResumeAppServerThread"),
+    script.indexOf("async function runCodexAppServer"),
+  );
+  const runFunction = script.slice(
+    script.indexOf("async function runCodexAppServer"),
+    script.indexOf("async function runCodexExec"),
+  );
+
+  assert.doesNotMatch(threadFunction, /await ensureAppServerThreadVisible/);
+  assert.doesNotMatch(threadFunction, /await verifyAppServerThreadRegistration/);
+  assert.match(runFunction, /client\.request\("turn\/start"/);
+  assert.match(runFunction, /scheduleAppServerThreadMaintenance\(threadId, "turn\/completed"\)/);
+  assert.doesNotMatch(runFunction, /await ensureAppServerThreadVisible\(threadId, "turn\/completed"\)/);
+  assert.match(script, /activeCodexJobs\.size > 0[\s\S]*active-deferred/);
+});
+
 test("control panel trusts a live owned Bridge PID after the start wrapper times out", () => {
   const confirmed = bridgeStartIsConfirmed({
     pid: 4321,
