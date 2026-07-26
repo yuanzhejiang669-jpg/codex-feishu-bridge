@@ -1,6 +1,6 @@
 # Codex Feishu Bridge 极致响应改造执行记录
 
-状态：执行中
+状态：阶段一已发布；本机空闲后升级任务已安排
 目标版本：Desktop `0.8.2`
 开始时间：2026-07-27
 
@@ -71,3 +71,49 @@
 
 - 运行真实 app-server smoke test。
 - 升级 Desktop 版本并完成 Desktop 全套测试与 Windows 打包。
+
+## v2：Windows 构建与 GitHub 发布
+
+完成事项：
+
+- Desktop 版本从 `0.8.1` 升级到 `0.8.2`。
+- Windows x64 NSIS 安装包、blockmap、`latest.yml` 和 SHA-256 清单构建完成。
+- 打包 Engine 的源码提交：`1d7a157ddd39c43790bf3d9103f0837991cc41d5`。
+- 源码已推送到 `origin/main`。
+- 稳定标签与 Release：`v0.8.2`。
+- GitHub Actions `Release Windows Desktop Client` 构建成功。
+- 最终 GitHub Release 资产重新下载并逐项校验：
+  - 安装包大小：`169750343` bytes。
+  - 安装包 SHA-256：`0c26fd3e4a618db07466f01747f04ad13e1966907143c50a7f7fed0c5721a7c2`。
+  - blockmap SHA-256：`f3d61eb875ac434da571f3c5123359aaaa49ba60427b0a7cf6cca767145dbfb8`。
+  - `latest.yml` SHA-256：`8a072854ffc9632ca8bce699d61f615d399e5df7f62d18062c83ffbcf3c57dee`。
+
+说明：
+
+- 标签触发的 GitHub Actions 会重新构建并替换最初手工上传的本机资产，因此设备安装基准已切换为 Actions 生成的最终 Release，而不是本机首次构建文件。
+
+## v3：设备同步
+
+旧 Windows 设备：
+
+- 仓库从 `fd38b4989f9166aa7772eec61f82388809b348cf` 快进到 `1d7a157ddd39c43790bf3d9103f0837991cc41d5`。
+- 保留既有未提交文件 `tools/codex-browser-control-mcp/scripts/restart-extension-bridge.ps1`，未覆盖、未提交。
+- 根项目 74 项检查通过。
+- 真实热池 smoke 通过：冷初始化约 `770ms`，热初始化 `0ms`。
+- 最终 GitHub Release 安装包哈希校验通过并安装为 `0.8.2.0`。
+- 已安装 Engine `sourceCommit` 为 `1d7a157ddd39c43790bf3d9103f0837991cc41d5`。
+- Bot 恢复通过计划任务启动，避免临时 SSH 会话结束时回收子进程。
+- 最终稳定复查：
+  - Desktop `0.8.2.0`。
+  - Engine 与仓库均为 `1d7a157ddd39c43790bf3d9103f0837991cc41d5`。
+  - 17/17 Bot 在线，active run 为 0。
+  - 临时计划任务和远端安装包已删除。
+  - 删除临时任务后继续稳定观察 60 秒，Desktop 与全部 Bot 仍在线。
+- 旧设备既有未提交浏览器桥接脚本修改在升级后仍保持不变。
+
+当前 Windows 设备：
+
+- 当前会话 Bot 仍有 1 个 active run，因此没有被中断。
+- 已创建一次性延迟升级任务；它会等待全部 Bot 空闲，校验最终 GitHub Release 哈希，再执行安装、版本检查和全部托管 Bot 恢复验证。
+- 延迟任务结果将写入 `%LOCALAPPDATA%\CodexFeishuBridgeDesktop\pending-upgrades\complete-v0.8.2-result.json`。
+- 延迟任务由计划任务 `CodexFeishuBridgeDesktopPostUpgrade082` 承载，当前已启动并确认正在等待本次会话 active run 清零。
