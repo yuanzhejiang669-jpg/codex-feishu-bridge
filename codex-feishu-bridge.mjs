@@ -3198,6 +3198,12 @@ function relAttachmentPath(messageId, fileKey, index, fileName = "") {
   );
 }
 
+function downloadedAttachmentPath(payload, relOutput) {
+  const reported = String(payload?.data?.saved_path || "").trim();
+  if (!reported) return path.join(CONFIG.workspace, relOutput);
+  return path.isAbsolute(reported) ? reported : path.join(CONFIG.workspace, reported);
+}
+
 async function downloadImageAttachments(event) {
   const messageId = event.message_id || event.id;
   const keys = imageKeysFromContent(event.content);
@@ -3232,7 +3238,15 @@ async function downloadImageAttachments(event) {
     }
 
     const payload = parseJsonLoose(result.stdout);
-    const savedPath = payload?.data?.saved_path || path.join(CONFIG.workspace, relOutput);
+    const savedPath = downloadedAttachmentPath(payload, relOutput);
+    if (!fs.existsSync(savedPath)) {
+      log("WARN", "image download reported success without a saved file", {
+        messageId,
+        fileKey,
+        savedPath,
+      });
+      continue;
+    }
     attachments.push({
       type: "image",
       fileKey,
@@ -3288,7 +3302,16 @@ async function downloadFileAttachments(event) {
     }
 
     const payload = parseJsonLoose(result.stdout);
-    const savedPath = payload?.data?.saved_path || path.join(CONFIG.workspace, relOutput);
+    const savedPath = downloadedAttachmentPath(payload, relOutput);
+    if (!fs.existsSync(savedPath)) {
+      log("WARN", "file download reported success without a saved file", {
+        messageId,
+        fileKey: entry.fileKey,
+        fileName: entry.fileName,
+        savedPath,
+      });
+      continue;
+    }
     let sizeBytes = Number(payload?.data?.size_bytes || 0);
     if (!sizeBytes) {
       try {
@@ -3347,6 +3370,35 @@ function formatAttachmentCounts(attachments) {
   if (counts.image) parts.push(`${counts.image} 张图片`);
   if (counts.file) parts.push(`${counts.file} 个文件`);
   return parts.join("和") || "附件";
+}
+
+async function prepareCommandAttachments(event, command) {
+  if (command?.name !== "/steer") return event;
+
+  const requested = {
+    image: imageKeysFromContent(event.content).length,
+    file: fileEntriesFromContent(event.content).length,
+  };
+  if (!requested.image && !requested.file) return event;
+
+  const downloadedAttachments = [
+    ...(await downloadImageAttachments(event)),
+    ...(await downloadFileAttachments(event)),
+  ];
+  const downloaded = attachmentCounts(downloadedAttachments);
+  event.attachments = [
+    ...(Array.isArray(event.attachments) ? event.attachments : []),
+    ...downloadedAttachments,
+  ];
+  event.attachmentDownload = {
+    requested,
+    downloaded,
+    failed: {
+      image: Math.max(0, requested.image - downloaded.image),
+      file: Math.max(0, requested.file - downloaded.file),
+    },
+  };
+  return event;
 }
 
 function formatBytes(bytes) {
@@ -6369,6 +6421,7 @@ async function handleOutOfBandCommand(rawEvent, command) {
     commandText: String(command.text || "").slice(0, 200),
     contentPreview: userTextFromContent(event.content).slice(0, 200),
   });
+  await prepareCommandAttachments(event, command);
   await handleCommand(event, command);
 }
 
@@ -6422,6 +6475,7 @@ async function handleEvent(rawEvent, dispatchControl = {}) {
       contentPreview: userContent.slice(0, 120),
     });
     stats.commands += 1;
+    await prepareCommandAttachments(event, command);
     await handleCommand(event, command);
     return;
   }
@@ -8001,13 +8055,39 @@ async function stopCurrentJob(chatId, messageId, { clearMode = "" } = {}) {
 async function handleSteerCommand(event, rest, messageId) {
   const chatId = event.chat_id;
   const userContent = String(rest || "").trim();
-  if (!userContent && !event.attachments?.length) {
+  const directAttachments = Array.isArray(event.attachments) ? event.attachments : [];
+  const downloadFailures = Number(event.attachmentDownload?.failed?.image || 0)
+    + Number(event.attachmentDownload?.failed?.file || 0);
+  if (downloadFailures) {
+    if (directAttachments.length) addPendingAttachments(chatId, directAttachments);
+    const failedParts = [];
+    if (event.attachmentDownload.failed.image) {
+      failedParts.push(`${event.attachmentDownload.failed.image} 张图片`);
+    }
+    if (event.attachmentDownload.failed.file) {
+      failedParts.push(`${event.attachmentDownload.failed.file} 个文件`);
+    }
+    await sendText(
+      chatId,
+      `附件下载不完整（${failedParts.join("、")}失败），本次补充指令没有追加。`
+        + (directAttachments.length
+          ? ` 已成功下载的${formatAttachmentCounts(directAttachments)}已暂存，重试 /steer 时会自动带上。`
+          : " 请重新发送附件后再试。"),
+      "steer-attachment-download-failed",
+      messageId,
+    );
+    return;
+  }
+
+  const pendingAttachments = cleanupPendingAttachments(chatId);
+  if (!userContent && !directAttachments.length && !pendingAttachments.length) {
     await sendText(chatId, "用法：/steer <要追加到当前任务的补充指令>", "steer-usage", messageId);
     return;
   }
 
   const job = activeCodexJobs.get(chatId);
   if (!job) {
+    if (directAttachments.length) addPendingAttachments(chatId, directAttachments);
     await sendText(chatId, "当前没有正在运行的 Codex 任务，未追加任何内容。", "steer-no-job", messageId);
     return;
   }
@@ -8017,15 +8097,22 @@ async function handleSteerCommand(event, rest, messageId) {
     || !job.turnId
     || !["app-server", "app-server-goal"].includes(job.mode)
   ) {
+    if (directAttachments.length) addPendingAttachments(chatId, directAttachments);
     await sendText(
       chatId,
-      "当前任务尚未进入可追加指令的原生 Codex turn，未追加任何内容。请稍后重试。",
+      "当前任务尚未进入可追加指令的原生 Codex turn，未追加任何内容。请稍后重试。"
+        + (directAttachments.length ? " 已下载附件会为下次 /steer 暂存。" : ""),
       "steer-not-ready",
       messageId,
     );
     return;
   }
 
+  const steerAttachments = [
+    ...takePendingAttachments(chatId),
+    ...directAttachments,
+  ];
+  event.attachments = steerAttachments;
   const previous = job.steerInFlight || Promise.resolve();
   const current = previous.catch(() => {}).then(async () => {
     if (
@@ -8067,11 +8154,13 @@ async function handleSteerCommand(event, rest, messageId) {
     await current;
     await sendText(
       chatId,
-      "已将补充指令追加到当前正在运行的 Codex 任务，不会创建新任务。",
+      `已将补充指令${steerAttachments.length ? `（含${formatAttachmentCounts(steerAttachments)}）` : ""}`
+        + "追加到当前正在运行的 Codex 任务，不会创建新任务。",
       "steer-done",
       messageId,
     );
   } catch (error) {
+    if (steerAttachments.length) addPendingAttachments(chatId, steerAttachments);
     const detail = isActiveTurnRaceError(error)
       ? "当前 Codex turn 已经结束或正在切换，未追加任何内容。"
       : `追加指令失败，未创建新任务：${String(error.message || error).slice(0, 500)}`;
@@ -8082,7 +8171,12 @@ async function handleSteerCommand(event, rest, messageId) {
       turnId: job.turnId,
       error: String(error.message || error).slice(0, 1000),
     });
-    await sendText(chatId, detail, "steer-error", messageId);
+    await sendText(
+      chatId,
+      detail + (steerAttachments.length ? " 附件已暂存，可在下一次 /steer 中重试。" : ""),
+      "steer-error",
+      messageId,
+    );
   } finally {
     if (job.steerInFlight === current) job.steerInFlight = null;
   }

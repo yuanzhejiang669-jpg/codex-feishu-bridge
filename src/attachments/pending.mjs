@@ -4,11 +4,24 @@ export function createPendingAttachmentStore({
 } = {}) {
   const pendingAttachmentsByChat = new Map();
 
+  function attachmentIdentity(item) {
+    return [
+      String(item?.type || ""),
+      String(item?.messageId || ""),
+      String(item?.fileKey || ""),
+      String(item?.path || ""),
+    ].join("\u0000");
+  }
+
   function add(chatId, attachments) {
     if (!chatId || !attachments.length) return;
     cleanup(chatId);
     const current = pendingAttachmentsByChat.get(chatId) || [];
-    const next = [...current, ...attachments].slice(-maxPendingAttachments);
+    const byIdentity = new Map();
+    for (const item of [...current, ...attachments]) {
+      byIdentity.set(attachmentIdentity(item), item);
+    }
+    const next = [...byIdentity.values()].slice(-maxPendingAttachments);
     pendingAttachmentsByChat.set(chatId, next);
   }
 

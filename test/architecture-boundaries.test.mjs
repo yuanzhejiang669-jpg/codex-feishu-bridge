@@ -13,6 +13,7 @@ import {
 } from "../src/codex/app-server-client.mjs";
 import { createAppServerPool } from "../src/codex/app-server-pool.mjs";
 import { createAppServerProtocol } from "../src/codex/app-server-protocol.mjs";
+import { createPendingAttachmentStore } from "../src/attachments/pending.mjs";
 import { createEventDispatcher } from "../src/runtime/event-dispatcher.mjs";
 import { createEventQueue } from "../src/runtime/event-queue.mjs";
 import {
@@ -660,7 +661,38 @@ test("explicit steer stays out of the ordinary queue and never starts a replacem
   assert.doesNotMatch(handlerSource, /"turn\/start"/);
   assert.match(handlerSource, /activeCodexJobs\.get\(chatId\) !== job/);
   assert.match(handlerSource, /job\.steerInFlight/);
+  assert.match(handlerSource, /takePendingAttachments\(chatId\)/);
+  assert.match(handlerSource, /addPendingAttachments\(chatId, steerAttachments\)/);
+  assert.match(bridgeSource, /async function prepareCommandAttachments\(/);
+  assert.match(bridgeSource, /handleOutOfBandCommand[\s\S]*prepareCommandAttachments\(event, command\)[\s\S]*handleCommand\(event, command\)/);
+  assert.match(bridgeSource, /if \(command\)[\s\S]*prepareCommandAttachments\(event, command\)[\s\S]*handleCommand\(event, command\)/);
+  assert.match(bridgeSource, /command\?\.name !== "\/steer"/);
+  assert.match(bridgeSource, /downloadImageAttachments\(event\)/);
+  assert.match(bridgeSource, /downloadFileAttachments\(event\)/);
+  assert.match(bridgeSource, /image download reported success without a saved file/);
+  assert.match(bridgeSource, /file download reported success without a saved file/);
+  assert.match(handlerSource, /downloadFailures/);
   assert.match(bridgeSource, /`\/steer <补充内容>`/);
+});
+
+test("pending attachments are deduplicated when a failed steer is retried", () => {
+  const store = createPendingAttachmentStore({
+    maxPendingAttachments: 12,
+    pendingTtlMs: 60_000,
+  });
+  const attachment = {
+    type: "image",
+    messageId: "om_1",
+    fileKey: "img_1",
+    path: "C:\\work\\img_1.jpg",
+    receivedAt: Date.now(),
+  };
+
+  store.add("chat_1", [attachment]);
+  store.add("chat_1", [{ ...attachment, receivedAt: Date.now() + 1 }]);
+
+  assert.equal(store.cleanup("chat_1").length, 1);
+  assert.deepEqual(store.take("chat_1").map((item) => item.fileKey), ["img_1"]);
 });
 
 test("ordinary messages start Codex without awaiting CardKit and use the warm app-server pool", () => {
