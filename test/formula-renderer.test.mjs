@@ -5,7 +5,9 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  createFormulaImageService,
   isComplexLatex,
+  planDenseFormulaRendering,
   planFormulaRendering,
   scanLatexFormulas,
   simplifyInlineLatex,
@@ -57,12 +59,91 @@ test("formula parsing never rewrites fenced code or unmatched delimiters", () =>
   assert.equal(plans.map((plan) => plan.content || "").join(""), source);
 });
 
-test("oversized formula paragraphs stay as original markdown instead of producing extreme images", () => {
+test("oversized formula paragraphs remain renderable instead of leaking raw LaTeX", () => {
   const formula = "\\(p(x)=\\frac{1}{\\sqrt{2\\pi}}e^{-x^2/2}\\)";
   const source = `${"很长的正文。".repeat(250)}${formula}`;
   const plans = planFormulaRendering(source, { maxParagraphChars: 1400 });
-  assert.equal(plans.some((plan) => plan.kind === "image"), false);
-  assert.equal(plans.map((plan) => plan.content || "").join(""), source);
+  assert.equal(plans.filter((plan) => plan.kind === "image").length, 1);
+  assert.equal(plans[0].mode, "inline-paragraph");
+  assert.equal(plans[0].formulas.length, 1);
+});
+
+test("complex inline formulas beside display formulas never leak raw LaTeX", () => {
+  const source = [
+    String.raw`SNR is \(\mathrm{SNR}=P_s/P_n\).`,
+    "",
+    String.raw`\[\mathrm{SNR}_{\mathrm{dB}}=10\log_{10}\left(\frac{P_s}{P_n}\right)\]`,
+  ].join("\n");
+  const plans = planFormulaRendering(source);
+  assert.equal(plans.filter((plan) => plan.kind === "image").length, 2);
+  assert.equal(
+    plans.filter((plan) => plan.kind === "text").some((plan) => /\\(?:mathrm|frac|log)/.test(plan.content)),
+    false,
+  );
+});
+
+test("formula-dense responses are grouped into a small number of mixed images", () => {
+  const source = Array.from({ length: 14 }, (_, index) => [
+    `${index + 1}. Formula ${index + 1}`,
+    String.raw`\[\frac{P_s}{P_n}+\sum_{i=1}^{n}x_i\]`,
+  ].join("\n")).join("\n\n");
+  const plans = planDenseFormulaRendering(source, {
+    maxGroupChars: 4000,
+    maxGroupFormulas: 20,
+  });
+  assert.equal(plans.filter((plan) => plan.kind === "image").length, 1);
+  assert.equal(plans[0].mode, "mixed");
+  assert.equal(plans[0].formulas.length, 14);
+});
+
+test("very large formula sets stay bounded without dropping formulas", () => {
+  const source = Array.from({ length: 100 }, (_, index) => [
+    `${index + 1}. Formula ${index + 1}`,
+    String.raw`\[\frac{P_s}{P_n}+\sum_{i=1}^{n}x_i\]`,
+  ].join("\n")).join("\n\n");
+  const plans = planDenseFormulaRendering(source, {
+    maxGroupChars: 4000,
+    maxGroupFormulas: 20,
+  });
+  const images = plans.filter((plan) => plan.kind === "image");
+  assert.equal(images.length, 5);
+  assert.equal(images.every((plan) => plan.formulas.length <= 20), true);
+  assert.equal(images.reduce((total, plan) => total + plan.formulas.length, 0), 100);
+});
+
+test("dense planning preserves fenced code as native text", () => {
+  const source = [
+    String.raw`\[\frac{a}{b}\]`,
+    "",
+    "```js",
+    "const price = '$25';",
+    String.raw`const latex = '\\frac{a}{b}';`,
+    "```",
+    "",
+    String.raw`\[\sum_{i=1}^{n}x_i\]`,
+  ].join("\n");
+  const plans = planDenseFormulaRendering(source);
+  assert.equal(plans.filter((plan) => plan.kind === "image").length, 2);
+  const native = plans.filter((plan) => plan.kind === "text").map((plan) => plan.content).join("");
+  assert.match(native, /const price/);
+  assert.match(native, /const latex/);
+});
+
+test("renderer fallback never exposes raw LaTeX when image upload is unavailable", async () => {
+  const service = createFormulaImageService({ uploadImage: null });
+  const result = await service.enrichBlocks([{
+    kind: "text",
+    content: [
+      String.raw`SNR is \(\mathrm{SNR}=P_s/P_n\).`,
+      "",
+      String.raw`\[\frac{E_b}{N_0}=\mathrm{SNR}\frac{B}{R_b}\]`,
+    ].join("\n"),
+  }]);
+  const visibleText = result.blocks.map((block) => block.content || "").join("");
+  assert.equal(/\\(?:mathrm|frac)/.test(visibleText), false);
+  assert.match(visibleText, /暂时无法渲染/);
+  assert.equal(result.sources.length, 2);
+  assert.equal(result.stats.failed, 2);
 });
 
 test("lark client uploads images with stdin JSON and a cwd-relative file argument", async (t) => {

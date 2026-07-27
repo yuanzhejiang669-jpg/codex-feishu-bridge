@@ -1724,3 +1724,12 @@ Adversarial review for the most likely three-month regressions:
 - Added an explicit engine dependency resource, staged dependency/file parity assertions, isolated packaged-engine dependency loading, and a real packaged Node + Edge formula render gate.
 - The isolated check copies the packaged engine to the system temporary directory before importing dependencies, preventing repository-parent `node_modules` from hiding a broken installation.
 - Bumped the Windows desktop release to `0.8.5`; rollout and final installed-source consistency evidence will be recorded after the Release and two-device deployment complete.
+
+## 2026-07-28 - 0.8.6 dense-formula completeness correction
+
+- Reproduced the accepted 0.8.5 card with `planned: 14, rendered: 8, failed: 0`. The installed dependencies and browser were healthy; the remaining visible LaTeX came from the intentional `maxImages = 8` cutoff.
+- Confirmed a second planning defect: when one paragraph contained both a complex inline formula and a display formula, the display branch sent the inline range through the conservative Unicode simplifier and preserved unsupported commands such as `\mathrm`.
+- Added density-aware mixed rendering. A representative answer with ten numbered sections, ten complex inline formulas, and ten display formulas now becomes one 1200-pixel-wide KaTeX PNG instead of twenty uploads or a partially raw card.
+- Increased the emergency image ceiling to 24 while bounding dense groups to 4,000 source characters and 20 formulas. A 100-formula regression fixture produces five ordered groups and retains all 100 formulas.
+- Replaced every enabled-renderer failure path with a readable visible placeholder plus the existing collapsed source panel; raw LaTeX is no longer returned as ordinary card text.
+- Root verification currently passes 87 tests. The real local Edge smoke renders three normal/dense images, validates width and safe height, cleans temporary PNG files, and proves that an explicit one-image ceiling yields one rendered image plus one readable fallback without leaking `\frac` or `\sum`.

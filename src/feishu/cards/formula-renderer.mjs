@@ -130,6 +130,49 @@ export function planFormulaRendering(markdownText, {
   return planned;
 }
 
+export function planDenseFormulaRendering(markdownText, {
+  maxGroupChars = 4000,
+  maxGroupFormulas = 20,
+} = {}) {
+  const planned = [];
+  for (const chunk of splitProtectedMarkdown(markdownText)) {
+    if (chunk.protected) {
+      pushTextPlan(planned, chunk.content);
+      continue;
+    }
+    const units = chunk.content.split(/(\r?\n\s*\r?\n+)/).filter(Boolean);
+    let content = "";
+    let formulas = [];
+    const flush = () => {
+      if (!content) return;
+      if (formulas.length > 0) {
+        planned.push({
+          kind: "image",
+          mode: "mixed",
+          original: content,
+          content,
+          formulas,
+        });
+      } else {
+        pushTextPlan(planned, content);
+      }
+      content = "";
+      formulas = [];
+    };
+    for (const unit of units) {
+      const unitFormulas = scanLatexFormulas(unit);
+      const exceedsChars = content && content.length + unit.length > Math.max(500, Number(maxGroupChars || 4000));
+      const exceedsFormulas = formulas.length > 0
+        && formulas.length + unitFormulas.length > Math.max(1, Number(maxGroupFormulas || 20));
+      if (exceedsChars || exceedsFormulas) flush();
+      content += unit;
+      formulas.push(...unitFormulas);
+    }
+    flush();
+  }
+  return planned;
+}
+
 export function resolveFormulaBrowserExecutable(explicitPath = "") {
   const configured = String(explicitPath || "").trim();
   if (configured && fs.existsSync(configured)) return configured;
@@ -160,19 +203,22 @@ export function createFormulaImageService({
   browserExecutable = "",
   tempDir = path.join(os.tmpdir(), "codex-feishu-formulas"),
   uploadImage,
-  maxImages = 8,
+  maxImages = 24,
   maxParagraphChars = 1400,
+  denseFormulaThreshold = 6,
+  maxGroupChars = 4000,
+  maxGroupFormulas = 20,
   renderTimeoutMs = 20_000,
   log = () => {},
 } = {}) {
   const resolvedBrowser = resolveFormulaBrowserExecutable(browserExecutable);
 
   async function enrichBlocks(blocks) {
-    if (!enabled || !resolvedBrowser || typeof uploadImage !== "function") {
+    if (!enabled) {
       return {
         blocks,
         sources: [],
-        stats: { enabled: Boolean(enabled), browser: Boolean(resolvedBrowser), planned: 0, rendered: 0, failed: 0 },
+        stats: { enabled: false, browser: Boolean(resolvedBrowser), planned: 0, rendered: 0, failed: 0 },
       };
     }
 
@@ -183,12 +229,30 @@ export function createFormulaImageService({
         blockPlans.push([{ ...block }]);
         continue;
       }
-      const plans = planFormulaRendering(block.content, { maxParagraphChars });
+      const normalPlans = planFormulaRendering(block.content, { maxParagraphChars });
+      const normalImageCount = normalPlans.filter((plan) => plan.kind === "image").length;
+      const plans = normalImageCount > Math.max(1, Number(denseFormulaThreshold || 6))
+        ? planDenseFormulaRendering(block.content, { maxGroupChars, maxGroupFormulas })
+        : normalPlans;
       plannedCount += plans.filter((plan) => plan.kind === "image").length;
       blockPlans.push(plans);
     }
     if (plannedCount === 0) {
       return { blocks, sources: [], stats: { enabled: true, browser: true, planned: 0, rendered: 0, failed: 0 } };
+    }
+    if (!resolvedBrowser || typeof uploadImage !== "function") {
+      const fallback = fallbackFormulaPlans(blockPlans);
+      return {
+        blocks: fallback.blocks,
+        sources: fallback.sources,
+        stats: {
+          enabled: true,
+          browser: Boolean(resolvedBrowser),
+          planned: plannedCount,
+          rendered: 0,
+          failed: plannedCount,
+        },
+      };
     }
 
     await fs.promises.mkdir(tempDir, { recursive: true });
@@ -216,14 +280,17 @@ export function createFormulaImageService({
             continue;
           }
           if (rendered >= Math.max(1, Number(maxImages || 1))) {
-            pushOutputBlock(output, { kind: "text", content: plan.original });
+            failed += 1;
+            sources.push(...formulaSources(plan));
+            pushOutputBlock(output, { kind: "text", content: formulaFallbackText(plan) });
             continue;
           }
           const remainingMs = deadline - Date.now();
           if (remainingMs < 1_000) {
             failed += 1;
-            pushOutputBlock(output, { kind: "text", content: plan.original });
-            log("WARN", "formula rendering deadline reached; preserving remaining markdown", {
+            sources.push(...formulaSources(plan));
+            pushOutputBlock(output, { kind: "text", content: formulaFallbackText(plan) });
+            log("WARN", "formula rendering deadline reached; using readable fallback", {
               planned: plannedCount,
               rendered,
               failed,
@@ -256,8 +323,9 @@ export function createFormulaImageService({
             rendered += 1;
           } catch (error) {
             failed += 1;
-            pushOutputBlock(output, { kind: "text", content: plan.original });
-            log("WARN", "formula rendering failed; preserving original markdown", {
+            sources.push(...formulaSources(plan));
+            pushOutputBlock(output, { kind: "text", content: formulaFallbackText(plan) });
+            log("WARN", "formula rendering failed; using readable fallback", {
               mode: plan.mode,
               error: String(error?.message || error).slice(0, 1000),
             });
@@ -267,13 +335,14 @@ export function createFormulaImageService({
         }
       }
     } catch (error) {
-      log("WARN", "formula renderer unavailable; preserving original markdown", {
+      log("WARN", "formula renderer unavailable; using readable fallback", {
         browser: resolvedBrowser,
         error: String(error?.message || error).slice(0, 1000),
       });
+      const fallback = fallbackFormulaPlans(blockPlans);
       return {
-        blocks,
-        sources: [],
+        blocks: fallback.blocks,
+        sources: fallback.sources,
         stats: { enabled: true, browser: true, planned: plannedCount, rendered: 0, failed: plannedCount },
       };
     } finally {
@@ -386,7 +455,7 @@ function planParagraph(paragraph, { maxParagraphChars }) {
     let cursor = 0;
     for (const formula of formulas) {
       if (!formula.display) continue;
-      pushTextPlan(plans, simplifyFormulaRange(paragraph.slice(cursor, formula.start)));
+      plans.push(...planInlineFormulaRange(paragraph.slice(cursor, formula.start), { maxParagraphChars }));
       plans.push({
         kind: "image",
         mode: "block",
@@ -396,11 +465,11 @@ function planParagraph(paragraph, { maxParagraphChars }) {
       });
       cursor = formula.end;
     }
-    pushTextPlan(plans, simplifyFormulaRange(paragraph.slice(cursor)));
+    plans.push(...planInlineFormulaRange(paragraph.slice(cursor), { maxParagraphChars }));
     return plans;
   }
   const complex = formulas.filter((formula) => isComplexLatex(formula.latex));
-  if (complex.length > 0 && paragraph.length <= maxParagraphChars) {
+  if (complex.length > 0) {
     return [{
       kind: "image",
       mode: "inline-paragraph",
@@ -410,6 +479,23 @@ function planParagraph(paragraph, { maxParagraphChars }) {
     }];
   }
   return [{ kind: "text", content: simplifyFormulaRange(paragraph) }];
+}
+
+function planInlineFormulaRange(content, { maxParagraphChars }) {
+  if (!content) return [];
+  const formulas = scanLatexFormulas(content);
+  if (formulas.length === 0) return [{ kind: "text", content }];
+  const complex = formulas.some((formula) => isComplexLatex(formula.latex));
+  if (complex) {
+    return [{
+      kind: "image",
+      mode: content.length > maxParagraphChars ? "mixed" : "inline-paragraph",
+      original: content,
+      content,
+      formulas,
+    }];
+  }
+  return [{ kind: "text", content: simplifyFormulaRange(content) }];
 }
 
 function simplifyFormulaRange(text) {
@@ -448,7 +534,7 @@ function pushOutputBlock(output, plan) {
 function formulaCaptureHtml(plan, katex) {
   const body = plan.mode === "block"
     ? katex.renderToString(plan.formulas[0].latex, { displayMode: true, throwOnError: false, strict: "ignore" })
-    : renderParagraphHtml(plan.content, katex);
+    : renderMixedHtml(plan.content, katex);
   const css = embeddedKatexCss();
   const compact = plan.mode === "block";
   return `<!doctype html>
@@ -465,6 +551,9 @@ body{font-family:"Microsoft YaHei","PingFang SC","Segoe UI",sans-serif;color:#1f
 .block{display:flex;align-items:center;justify-content:center;min-height:150px}
 .paragraph{white-space:normal;overflow-wrap:anywhere}
 .paragraph strong{font-weight:700}
+.paragraph h1,.paragraph h2,.paragraph h3{margin:.35em 0 .25em;font-weight:700;line-height:1.35}
+.paragraph h1{font-size:1.28em}.paragraph h2{font-size:1.18em}.paragraph h3{font-size:1.1em}
+.display-formula{display:flex;align-items:center;justify-content:center;min-height:120px;margin:18px 0;padding:18px 12px;background:#f8faff;border-radius:12px;overflow:hidden}
 .katex{font-size:1.02em}
 .katex-display{margin:0}
 </style>
@@ -473,17 +562,18 @@ body{font-family:"Microsoft YaHei","PingFang SC","Segoe UI",sans-serif;color:#1f
 </html>`;
 }
 
-function renderParagraphHtml(content, katex) {
+function renderMixedHtml(content, katex) {
   const formulas = scanLatexFormulas(content);
   let html = "";
   let cursor = 0;
   for (const formula of formulas) {
     html += basicMarkdownHtml(content.slice(cursor, formula.start));
-    html += katex.renderToString(formula.latex, {
-      displayMode: false,
+    const rendered = katex.renderToString(formula.latex, {
+      displayMode: formula.display,
       throwOnError: false,
       strict: "ignore",
     });
+    html += formula.display ? `<div class="display-formula">${rendered}</div>` : rendered;
     cursor = formula.end;
   }
   html += basicMarkdownHtml(content.slice(cursor));
@@ -492,8 +582,36 @@ function renderParagraphHtml(content, katex) {
 
 function basicMarkdownHtml(text) {
   return escapeHtml(text)
+    .replace(/^###\s+(.+)$/gm, "<h3>$1</h3>")
+    .replace(/^##\s+(.+)$/gm, "<h2>$1</h2>")
+    .replace(/^#\s+(.+)$/gm, "<h1>$1</h1>")
     .replace(/\*\*([^*\r\n]+)\*\*/g, "<strong>$1</strong>")
     .replace(/\r?\n/g, "<br>");
+}
+
+function formulaSources(plan) {
+  return (plan?.formulas || []).map((item) => String(item?.latex || "").trim()).filter(Boolean);
+}
+
+function formulaFallbackText(plan) {
+  const label = plan?.mode === "block" ? "独立公式" : "含公式段落";
+  return `\n\n【${label}暂时无法渲染；LaTeX 源码已保存在下方“公式源码”中】\n\n`;
+}
+
+function fallbackFormulaPlans(blockPlans) {
+  const blocks = [];
+  const sources = [];
+  for (const plans of blockPlans) {
+    for (const plan of plans) {
+      if (plan.kind === "image") {
+        sources.push(...formulaSources(plan));
+        pushOutputBlock(blocks, { kind: "text", content: formulaFallbackText(plan) });
+      } else {
+        pushOutputBlock(blocks, plan);
+      }
+    }
+  }
+  return { blocks, sources: [...new Set(sources)] };
 }
 
 function escapeHtml(value) {

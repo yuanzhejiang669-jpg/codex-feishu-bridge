@@ -37,7 +37,7 @@ function verifyPackagedEngineDependencies({ engineRoot, nodeRuntime, runFormulaS
         windowsHide: true,
       });
       const result = JSON.parse(String(output || "").trim());
-      if (result.skipped || result.stats?.rendered !== 2 || result.stats?.failed !== 0) {
+      if (result.skipped || result.stats?.rendered !== 3 || result.stats?.failed !== 0) {
         throw new Error(`Packaged formula renderer smoke failed: ${JSON.stringify(result)}`);
       }
     }

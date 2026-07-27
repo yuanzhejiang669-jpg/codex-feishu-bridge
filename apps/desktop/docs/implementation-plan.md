@@ -554,3 +554,12 @@ These risks are addressed with protocol versioning, active-run guards, transacti
 - Treat KaTeX, its embedded fonts, Playwright, and the dependency self-check as required Release artifacts.
 - Copy the packaged engine outside the repository and load it with the bundled Node runtime so source-tree dependency fallback cannot make a broken package pass.
 - On Windows, require a real packaged-engine Edge render with two valid formula images before accepting the installer.
+
+### 0.8.6 dense-formula completeness and latency correction
+
+- Replace the fixed eight-image terminal strategy with density-aware grouping. Sparse answers keep native Feishu text plus isolated formula images; formula-heavy answers group mixed prose, inline formulas, and display formulas into bounded KaTeX images.
+- Treat a complex inline formula beside a display formula as renderable content instead of sending it through the conservative Unicode simplifier.
+- Bound each dense group by both source length and formula count, while allowing enough groups for unusually large technical answers.
+- Never expose raw LaTeX as the visible fallback when browser discovery, dependency loading, deadline, upload, or image-count checks fail. Preserve the source only in the existing collapsed source panel and show a readable placeholder in the card body.
+- Keep fenced code, inline code, prices, unmatched delimiters, ordinary prose, and simple Unicode-convertible math outside the dense rendering path.
+- Extend the real Edge smoke to cover a 14-formula dense answer, validate PNG dimensions, and test the image-limit fallback.
