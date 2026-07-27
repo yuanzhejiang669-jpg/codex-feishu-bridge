@@ -1,6 +1,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { execFileSync } = require("node:child_process");
+const { verifyPackagedEngineDependencies } = require("./verify-packaged-engine-dependencies.cjs");
 
 if (process.platform !== "darwin") throw new Error("macOS release verification must run on macOS");
 
@@ -43,6 +44,10 @@ for (const appRoot of unpackedRoots) {
   for (const required of [nodePath, larkPath, bridgePath, proxyLicense]) {
     if (!fs.existsSync(required)) throw new Error(`Packaged macOS item is missing: ${required}`);
   }
+  verifyPackagedEngineDependencies({
+    engineRoot: path.join(resources, "engine"),
+    nodeRuntime: nodePath,
+  });
   const fileOutput = String(execFileSync("/usr/bin/file", [nodePath], { encoding: "utf8" }));
   const architecture = /arm64/.test(fileOutput) ? "arm64" : /x86_64/.test(fileOutput) ? "x64" : "";
   if (!architecture) throw new Error(`Unable to identify bundled Node architecture: ${fileOutput}`);

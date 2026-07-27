@@ -14,3 +14,19 @@ test("staged desktop Bridge engine matches the repository engine", () => {
     "run npm run stage:engine after changing the Bridge engine so a later client build cannot restore stale code",
   );
 });
+
+test("staged desktop Bridge engine includes formula runtime dependencies", () => {
+  const engineRoot = path.resolve(__dirname, "..", "generated", "engine");
+  for (const relativePath of [
+    "node_modules/katex/package.json",
+    "node_modules/katex/dist/fonts/KaTeX_Main-Regular.woff2",
+    "node_modules/playwright-core/package.json",
+    "scripts/check-formula-runtime-dependencies.mjs",
+  ]) {
+    assert.equal(
+      fs.existsSync(path.join(engineRoot, relativePath)),
+      true,
+      `staged formula runtime item is missing: ${relativePath}`,
+    );
+  }
+});

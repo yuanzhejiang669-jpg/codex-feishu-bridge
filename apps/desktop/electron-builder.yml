@@ -21,6 +21,11 @@ extraResources:
     to: engine
     filter:
       - "**/*"
+      - "!node_modules/**/*"
+  - from: generated/engine/node_modules
+    to: engine/node_modules
+    filter:
+      - "**/*"
   - from: node_modules/@larksuite/cli/LICENSE
     to: licenses/lark-cli-LICENSE
   - from: resources/licenses/node-LICENSE

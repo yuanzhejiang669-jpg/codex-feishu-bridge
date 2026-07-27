@@ -1716,3 +1716,11 @@ Adversarial review for the most likely three-month regressions:
 - The first recovery wait used unavailable zsh `EPOCHSECONDS` state after the new app had already installed and launched. Corrected the wait to `date +%s`, fixed PID-zero diagnostics, and verified the live installation instead of repeating the transaction.
 - Final installed version is `0.7.7`; packaged engine commit is `4186c811b950ea22f7b965e7752057ef3a8c22c7`; installed `app.asar` SHA-256 is `f349278ef4085fc17bfab6163ebba10e08922aec043604c880de9e419ead0767`.
 - All six Bots recovered sequentially with PIDs `73403`, `73465`, `73515`, `73581`, `73627`, and `73670`. Every Bot is alive, idle, has an empty desktop mirror target, and has a connection-ready log marker. The transactional rollback bundle and all remote deployment intermediates were removed after verification.
+
+## 2026-07-27 - 0.8.5 packaged formula runtime correction
+
+- Reproduced the user-visible raw-LaTeX fallback from the installed 0.8.4 log: the installed engine had neither `katex` nor `playwright-core`, although the staged engine contained both.
+- Confirmed electron-builder omitted the staged engine's nested `node_modules`; the prior packaged-engine smoke only started the control panel and never loaded the formula renderer.
+- Added an explicit engine dependency resource, staged dependency/file parity assertions, isolated packaged-engine dependency loading, and a real packaged Node + Edge formula render gate.
+- The isolated check copies the packaged engine to the system temporary directory before importing dependencies, preventing repository-parent `node_modules` from hiding a broken installation.
+- Bumped the Windows desktop release to `0.8.5`; rollout and final installed-source consistency evidence will be recorded after the Release and two-device deployment complete.

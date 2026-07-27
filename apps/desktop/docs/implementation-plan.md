@@ -547,3 +547,10 @@ These risks are addressed with protocol versioning, active-run guards, transacti
 - Fail open to the original Markdown when parsing, rendering, browser discovery, upload, size, image-count, or deadline checks fail.
 - Bound terminal enrichment to eight images, 1,400 characters per rendered paragraph, and a shared 15-second deadline.
 - Deliver the reviewed engine as Windows desktop `0.8.4`, the stable Windows GitHub Release, and both Windows deployments. Restart only idle affected Bots and preserve all Bot, workspace, Provider, session, and client data.
+
+### 0.8.5 packaged-runtime correction
+
+- Package the staged engine production dependency tree as an explicit resource instead of relying on the generic engine copy.
+- Treat KaTeX, its embedded fonts, Playwright, and the dependency self-check as required Release artifacts.
+- Copy the packaged engine outside the repository and load it with the bundled Node runtime so source-tree dependency fallback cannot make a broken package pass.
+- On Windows, require a real packaged-engine Edge render with two valid formula images before accepting the installer.

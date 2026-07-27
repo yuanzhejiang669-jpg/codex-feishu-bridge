@@ -3,6 +3,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { execFileSync } = require("node:child_process");
 const { normalizeReleaseVersion } = require("./release-version.cjs");
+const { verifyPackagedEngineDependencies } = require("./verify-packaged-engine-dependencies.cjs");
 
 const desktopRoot = path.resolve(__dirname, "..");
 const outRoot = path.join(desktopRoot, "out");
@@ -15,6 +16,9 @@ const unpackedPath = path.join(outRoot, "win-unpacked", "Codex Feishu Bridge.exe
 const latestYmlPath = path.join(outRoot, "latest.yml");
 const proxyManifestPath = path.join(outRoot, "win-unpacked", "resources", "proxy", "node_modules", "mimo2codex", "package.json");
 const proxyLicensePath = path.join(outRoot, "win-unpacked", "resources", "proxy", "node_modules", "mimo2codex", "LICENSE");
+const packagedResources = path.join(outRoot, "win-unpacked", "resources");
+const packagedEngine = path.join(packagedResources, "engine");
+const packagedNode = path.join(packagedResources, "tools", "node.exe");
 
 function sha256(filePath) {
   return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex").toUpperCase();
@@ -45,6 +49,11 @@ if (!expectedProxyVersion || packagedProxyManifest.version !== expectedProxyVers
 if (String(packagedProxyManifest.license || "").toUpperCase() !== "MIT" || fs.statSync(proxyLicensePath).size === 0) {
   throw new Error("Packaged proxy license is missing or is not MIT");
 }
+verifyPackagedEngineDependencies({
+  engineRoot: packagedEngine,
+  nodeRuntime: packagedNode,
+  runFormulaSmoke: true,
+});
 
 const unpackedVersion = windowsProductVersion(unpackedPath);
 const installerVersion = windowsProductVersion(installerPath);
