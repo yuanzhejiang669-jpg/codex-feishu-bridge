@@ -366,8 +366,20 @@ function formulaOpenerAt(text, index) {
   if (text.startsWith("$$", index) && !isEscaped(text, index)) return { open: "$$", close: "$$", display: true };
   if (text.startsWith("\\[", index) && !isEscaped(text, index)) return { open: "\\[", close: "\\]", display: true };
   if (text.startsWith("\\(", index) && !isEscaped(text, index)) return { open: "\\(", close: "\\)", display: false };
-  if (text[index] === "$" && !isEscaped(text, index)) return { open: "$", close: "$", display: false };
+  if (text[index] === "$" && !isEscaped(text, index) && !currencyDollarAt(text, index)) {
+    return { open: "$", close: "$", display: false };
+  }
   return null;
+}
+
+function currencyDollarAt(text, index) {
+  const tail = text.slice(index + 1);
+  if (/^\d+(?:[.,]\d+)?\s*[-–—]\s*\$\d+(?:[.,]\d+)?/.test(tail)) return true;
+  const amount = tail.match(/^\d+(?:[.,]\d+)?/);
+  if (!amount) return false;
+  const following = tail[amount[0].length] || "";
+  if (following === "$") return false;
+  return !following || /[\s,.;:!?，。；：！？、]/.test(following);
 }
 
 function findFormulaClose(text, start, close) {
@@ -410,7 +422,6 @@ function validFormulaCandidate(text, start, end, latex, display) {
   if (!body.trim()) return false;
   if (!display && /[\r\n]/.test(body)) return false;
   if (!display && (/^\s|\s$/.test(body))) return false;
-  if (!display && /^\d+(?:[.,]\d+)?$/.test(body.trim())) return false;
   if (!display && /\s/.test(body) && !/[\\^_={}|<>+\-*/]/.test(body)) return false;
   const previous = text[start - 1] || "";
   const next = text[end] || "";

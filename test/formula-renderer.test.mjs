@@ -35,6 +35,23 @@ test("simple inline formulas stay native and receive conservative Unicode conver
   assert.match(plans.map((plan) => plan.content || "").join(""), /α\+β≤1/);
 });
 
+test("paired numeric inline formulas lose delimiters without rewriting prices", () => {
+  const source = "半径都是 $1$，距离都是 $2$，误差为 $-1.5$，样本数为 $1,000$，价格是 $25，区间是 $25-$30，转义价格是 \\$40，代码为 `$3$`。";
+  const formulas = scanLatexFormulas(source);
+  assert.equal(formulas.length, 4);
+  assert.deepEqual(formulas.map((formula) => formula.latex), ["1", "2", "-1.5", "1,000"]);
+
+  const visible = planFormulaRendering(source).map((plan) => plan.content || "").join("");
+  assert.match(visible, /半径都是 1，距离都是 2/);
+  assert.match(visible, /误差为 -1\.5/);
+  assert.match(visible, /样本数为 1,000/);
+  assert.match(visible, /价格是 \$25/);
+  assert.match(visible, /区间是 \$25-\$30/);
+  assert.match(visible, /转义价格是 \\\$40/);
+  assert.match(visible, /代码为 `\$3\$`/);
+  assert.doesNotMatch(visible, /\$(?:1|2|-1\.5|1,000)\$/);
+});
+
 test("a prose paragraph with complex inline formulas becomes one paragraph image", () => {
   const text = "后验分布 \\(p(\\theta\\mid D)=\\frac{p(D\\mid\\theta)p(\\theta)}{p(D)}\\) 综合先验与证据，距离为 \\(d_M=\\sqrt{x^T\\Sigma^{-1}x}\\)。";
   const plans = planFormulaRendering(text);
@@ -94,6 +111,18 @@ test("formula-dense responses are grouped into a small number of mixed images", 
   assert.equal(plans.filter((plan) => plan.kind === "image").length, 1);
   assert.equal(plans[0].mode, "mixed");
   assert.equal(plans[0].formulas.length, 14);
+});
+
+test("dense mixed rendering includes paired numeric formulas instead of drawing dollar delimiters", () => {
+  const source = [
+    "三个圆的半径都是 $1$，圆心距离都是 $2$。",
+    "",
+    String.raw`\[\frac{P_s}{P_n}+\sum_{i=1}^{n}x_i\]`,
+  ].join("\n");
+  const plans = planDenseFormulaRendering(source);
+  assert.equal(plans.length, 1);
+  assert.equal(plans[0].kind, "image");
+  assert.deepEqual(plans[0].formulas.map((formula) => formula.latex), ["1", "2", String.raw`\frac{P_s}{P_n}+\sum_{i=1}^{n}x_i`]);
 });
 
 test("very large formula sets stay bounded without dropping formulas", () => {

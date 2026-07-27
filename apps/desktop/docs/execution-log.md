@@ -1733,3 +1733,16 @@ Adversarial review for the most likely three-month regressions:
 - Increased the emergency image ceiling to 24 while bounding dense groups to 4,000 source characters and 20 formulas. A 100-formula regression fixture produces five ordered groups and retains all 100 formulas.
 - Replaced every enabled-renderer failure path with a readable visible placeholder plus the existing collapsed source panel; raw LaTeX is no longer returned as ordinary card text.
 - Root verification currently passes 87 tests. The real local Edge smoke renders three normal/dense images, validates width and safe height, cleans temporary PNG files, and proves that an explicit one-image ceiling yields one rendered image plus one readable fallback without leaking `\frac` or `\sum`.
+
+## 2026-07-28 - 0.8.7 paired numeric inline-formula correction
+
+- Reproduced the user-visible `$1$` and `$2$` delimiters with the released scanner: both produced zero formula candidates while `$d$` remained valid.
+- Removed the blanket rejection of paired numeric formula bodies and retained targeted protection for unmatched prices, code, escaped dollars, and common price ranges.
+- Added sparse and dense planning regressions plus a real Edge smoke assertion that paired numeric delimiters disappear before the final card is produced.
+- Bumped the Windows desktop patch version to `0.8.7`; full verification, adversarial review, Release publication, installed upgrade, and two-device synchronization evidence will be appended after completion.
+
+Adversarial review covered the three most likely future regressions without broadening the change:
+
+1. Unmatched prices, escaped dollars, price ranges, inline code, and fenced code remain non-formula text.
+2. A paired numeric formula inside a dense mixed response is included in the render source and completes a real Edge screenshot.
+3. Negative decimals and thousands-separated values receive the same delimiter removal as integers.

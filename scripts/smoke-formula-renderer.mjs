@@ -36,7 +36,7 @@ try {
     {
       kind: "text",
       content: [
-        "普通正文中的简单公式 $x^2+y^2=1$ 保持文字。",
+        "普通正文中的数字公式 $1$ 与简单公式 $x^2+y^2=1$ 保持文字。",
         "",
         "复杂行内公式 \\(p(\\theta\\mid D)=\\frac{p(D\\mid\\theta)p(\\theta)}{p(D)}\\) 应渲染所在段落。",
         "",
@@ -47,7 +47,7 @@ try {
     {
       kind: "text",
       content: Array.from({ length: 14 }, (_, index) => [
-        `${index + 1}. 通信公式`,
+        `${index + 1}. 通信公式${index === 0 ? "，归一化系数为 $1$" : ""}`,
         "\\[\\mathrm{SNR}_{\\mathrm{dB}}=10\\log_{10}\\left(\\frac{P_s}{P_n}\\right)\\]",
       ].join("\n")).join("\n\n"),
       streaming: false,
@@ -57,7 +57,10 @@ try {
   assert.equal(result.stats.failed, 0);
   assert.equal(uploads.length, 3);
   assert.equal(result.blocks.filter((block) => block.kind === "formula_image").length, 3);
+  assert.equal(result.sources.includes("1"), true);
   assert.match(result.blocks.find((block) => block.kind === "text")?.content || "", /x²\+y²=1/);
+  assert.match(result.blocks.find((block) => block.kind === "text")?.content || "", /数字公式 1/);
+  assert.doesNotMatch(result.blocks.find((block) => block.kind === "text")?.content || "", /\$1\$/);
   assert.equal(fs.readdirSync(tempDir).filter((name) => name.endsWith(".png")).length, 0);
 
   const cappedService = createFormulaImageService({

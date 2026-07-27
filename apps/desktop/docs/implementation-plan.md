@@ -563,3 +563,10 @@ These risks are addressed with protocol versioning, active-run guards, transacti
 - Never expose raw LaTeX as the visible fallback when browser discovery, dependency loading, deadline, upload, or image-count checks fail. Preserve the source only in the existing collapsed source panel and show a readable placeholder in the card body.
 - Keep fenced code, inline code, prices, unmatched delimiters, ordinary prose, and simple Unicode-convertible math outside the dense rendering path.
 - Extend the real Edge smoke to cover a 14-formula dense answer, validate PNG dimensions, and test the image-limit fallback.
+
+### 0.8.7 paired numeric inline-formula correction
+
+- Treat explicitly paired numeric inline formulas such as `$1$` and `$2$` as mathematics instead of applying the unmatched-currency guard to them.
+- Preserve unmatched prices, escaped dollars, inline code, fenced code, and common dollar-denominated ranges such as `$25-$30`.
+- Verify both sparse native-text conversion and dense mixed-image planning so numeric delimiters cannot leak into the final card or rendered PNG.
+- Publish the correction as the Windows desktop `0.8.7` patch and synchronize the current device, old Windows device, GitHub Release, and affected idle Bots.
