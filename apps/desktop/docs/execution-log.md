@@ -1601,6 +1601,24 @@ Execution and verification evidence will be appended here as each implementation
 - Added architecture-boundary coverage for routing, serialization, active-job revalidation, help text, and the prohibition on replacement turns.
 - Root `npm run check` passed all 67 tests; `git diff --check` passed. Desktop packaging, installed-client verification, GitHub Release verification, and old-device rollout evidence will be appended after those stages complete.
 
+## 2026-07-27 - 0.8.4 deterministic formula rendering
+
+- Added explicit formula parsing for `$...$`, `\(...\)`, `$$...$$`, and `\[...\]` while protecting fenced code, inline code, currency-like dollar text, and unmatched delimiters.
+- Kept ordinary streaming unchanged. At terminal completion, simple expressions remain selectable Unicode/native text; complex inline expressions render with their containing paragraph; block expressions render independently.
+- Added local KaTeX/Playwright rendering with embedded KaTeX fonts, system Edge/Chrome discovery, Bot-authenticated image upload, mixed card blocks, and one collapsed copyable LaTeX source panel.
+- The renderer is lazy-loaded only when an explicit formula is present, never calls an image-generation model, and adds no model-token consumption.
+- Added fail-open behavior with a shared 15-second deadline, one upload attempt per image, an eight-image limit, a 1,400-character paragraph limit, deterministic temporary-file cleanup, and original-Markdown fallback.
+- Focused tests passed `7/7`; the complete Bridge suite passed `82/82`; syntax/static checks, `git diff --check`, staged-engine smoke, packaged-Node smoke, and two formal Feishu card E2E runs passed.
+- Formal E2E message `om_x100b6942c4e154a0b4c5bf527afd308` completed formula enrichment in about 2.0 seconds and the final card open in about 1.7 seconds.
+
+Adversarial review:
+
+1. Three-month failure: prices, code samples, or unmatched delimiters become false formulas. Verification reproduced the inline-code gap. Fix: protect inline-code ranges in addition to fenced code and add focused currency/code/unmatched-delimiter regressions.
+2. Three-month failure: Lark CLI retries make the documented 15-second limit ineffective. Verification traced independent retry budgets. Fix: enforce one shared absolute deadline across browser startup, page work, screenshot, and one image-upload attempt; fall back to the original Markdown on expiry.
+3. Three-month failure: a long formula-heavy paragraph exceeds browser/card image limits or packaged dependencies disappear. Verification exercised oversized input and the staged engine with both system Node and the packaged Node runtime. Fix: cap rendered paragraphs at 1,400 characters, preserve raw text beyond the cap, and make staged/package smoke mandatory.
+
+Release, installation, old-device synchronization, and Bot recovery evidence will be appended after those stages complete.
+
 Implemented:
 
 - Added a platform-dispatched macOS backend using System Events, AppleScript, `screencapture`, `pbcopy`, and `pbpaste`. Windows retains its existing `pywin32` and UI Automation implementation.

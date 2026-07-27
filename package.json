@@ -12,6 +12,7 @@
     "check": "node scripts/check-syntax.mjs && node scripts/check-control-panel-static.mjs && node scripts/check-model-reasoning-capabilities.mjs && node --test test/*.test.mjs",
     "smoke:app-server": "node scripts/smoke-app-server.mjs",
     "smoke:app-server-pool": "node scripts/smoke-app-server-pool.mjs",
+    "smoke:formulas": "node scripts/smoke-formula-renderer.mjs",
     "doctor": "powershell.exe -NoProfile -File doctor-codex-feishu-bridge.ps1",
     "doctor:json": "powershell.exe -NoProfile -File doctor-codex-feishu-bridge.ps1 -Json",
     "register": "node register-codex-feishu-bot.mjs",
@@ -22,6 +23,8 @@
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.66.1",
+    "katex": "^0.16.22",
+    "playwright-core": "^1.55.0",
     "qrcode": "^1.5.4"
   },
   "overrides": {

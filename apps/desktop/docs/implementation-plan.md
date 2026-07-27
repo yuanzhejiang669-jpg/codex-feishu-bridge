@@ -537,3 +537,13 @@ These risks are addressed with protocol versioning, active-run guards, transacti
 - Serialize rapid steering requests per active job and revalidate the job, thread, and turn immediately before each request so late or concurrent commands cannot target a replacement task.
 - Keep ordinary message queuing, `/stop`, `/compact`, Provider switching, attachments, and session handling unchanged.
 - Deliver the reviewed engine as Windows desktop `0.8.1`, the stable Windows GitHub Release, and the old Windows client-managed deployment. The SSH-maintained physical Mac is outside this change.
+
+## 2026-07-27 - Deterministic formula rendering in Feishu cards
+
+- Preserve the existing low-latency streaming path. Formula detection and rendering run only once, immediately before the terminal card update.
+- Keep ordinary prose and simple mathematical symbols as selectable Feishu text. Render only explicit complex inline formulas with their containing paragraph and explicit block formulas as deterministic local images.
+- Use local KaTeX plus an installed Edge/Chrome browser; never call an image-generation model and never consume additional model tokens.
+- Upload rendered images through the existing Bot identity and mix them with native card text. Retain the original LaTeX in one collapsed, copyable source panel.
+- Fail open to the original Markdown when parsing, rendering, browser discovery, upload, size, image-count, or deadline checks fail.
+- Bound terminal enrichment to eight images, 1,400 characters per rendered paragraph, and a shared 15-second deadline.
+- Deliver the reviewed engine as Windows desktop `0.8.4`, the stable Windows GitHub Release, and both Windows deployments. Restart only idle affected Bots and preserve all Bot, workspace, Provider, session, and client data.

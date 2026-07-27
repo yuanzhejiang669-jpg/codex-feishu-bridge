@@ -32,6 +32,7 @@ import {
 } from "./src/feishu/events.mjs";
 import { createLarkClient } from "./src/feishu/lark-cli.mjs";
 import { createManagedCardClass } from "./src/feishu/cards/managed-card.mjs";
+import { createFormulaImageService } from "./src/feishu/cards/formula-renderer.mjs";
 import {
   cardMarkdownContent,
   idempotencyKey,
@@ -151,6 +152,11 @@ const CONFIG = {
   debugCards: (process.env.CODEX_FEISHU_CARD_DEBUG || "0") === "1",
   showFinalSteps: (process.env.CODEX_FEISHU_SHOW_FINAL_STEPS || "1") === "1",
   maxRunningToolDetails: Number(process.env.CODEX_FEISHU_CARD_MAX_RUNNING_TOOL_DETAILS || "20"),
+  formulaRendering: (process.env.CODEX_FEISHU_FORMULA_RENDERING || "1") !== "0",
+  formulaBrowserBin: process.env.CODEX_FEISHU_FORMULA_BROWSER_BIN || "",
+  formulaMaxImages: Number(process.env.CODEX_FEISHU_FORMULA_MAX_IMAGES || "8"),
+  formulaMaxParagraphChars: Number(process.env.CODEX_FEISHU_FORMULA_MAX_PARAGRAPH_CHARS || "1400"),
+  formulaRenderTimeoutMs: parseDurationMs(process.env.CODEX_FEISHU_FORMULA_RENDER_TIMEOUT_MS, 15_000),
   larkDataFileThreshold: Number(process.env.CODEX_FEISHU_LARK_DATA_FILE_THRESHOLD || "8000"),
   replyToMessage: (process.env.CODEX_FEISHU_REPLY_TO_MESSAGE || "0") === "1",
   useThreadReply: (process.env.CODEX_FEISHU_REPLY_IN_THREAD || "0") === "1",
@@ -190,6 +196,7 @@ const pidPath = path.join(CONFIG.stateDir, "bridge.pid");
 const lockPath = path.join(CONFIG.stateDir, "bridge.lock.json");
 const stopPath = path.join(CONFIG.stateDir, "bridge.stop");
 const larkDataTempDir = path.join(CONFIG.stateDir, "tmp");
+const formulaTempDir = path.join(CONFIG.stateDir, "tmp", "formulas");
 const eventLockScope = resolveLarkEventLockScope(CONFIG.larkProfile);
 const eventLocksDir = path.join(DEFAULT_DATA_ROOT, "event-locks", eventLockScope);
 const runtimeDir = path.join(CONFIG.workspace, ".codex-feishu-runtime");
@@ -308,7 +315,18 @@ const {
   runLark,
   sendMarkdown,
   sendText,
+  uploadImage,
 } = larkClient;
+const formulaImageService = createFormulaImageService({
+  enabled: CONFIG.formulaRendering && CONFIG.useCards,
+  browserExecutable: CONFIG.formulaBrowserBin,
+  tempDir: formulaTempDir,
+  uploadImage,
+  maxImages: CONFIG.formulaMaxImages,
+  maxParagraphChars: CONFIG.formulaMaxParagraphChars,
+  renderTimeoutMs: CONFIG.formulaRenderTimeoutMs,
+  log,
+});
 const ManagedCard = createManagedCardClass({
   larkJson,
   larkJsonWithData,
@@ -1746,6 +1764,10 @@ function createRunState(session, event, userContent) {
     goalSteerCount: 0,
     errorMsg: "",
     failure: null,
+    formulaRenderComplete: false,
+    formulaRenderPromise: null,
+    formulaSources: [],
+    formulaRenderStats: null,
     meta: {
       durationMs: undefined,
       inputTokens: undefined,
@@ -2228,7 +2250,11 @@ function renderRunCard(state) {
   const liveStatusElements = state.terminal === "running"
     ? [markdown(renderRunActivityMarkdown(state, Date.now(), displayToolName))]
     : [];
-  elements.push(...renderRunBlocks(state.blocks, state.terminal !== "running", liveStatusElements));
+  const finalized = state.terminal !== "running";
+  elements.push(...renderRunBlocks(state.blocks, finalized, liveStatusElements));
+  if (finalized && state.formulaSources?.length) {
+    elements.push(formulaSourcePanel(state.formulaSources));
+  }
 
   if (state.terminal === "running") {
     elements.push(noteMd(renderFooterText(state.footer, elapsed)));
@@ -2359,6 +2385,8 @@ function renderRunBlocks(blocks, finalized, beforeFirstTool = []) {
     for (const block of blocks) {
       if (block.kind === "tool") {
         tools.push(block.tool);
+      } else if (block.kind === "formula_image") {
+        elements.push(formulaImageElement(block));
       } else if (block.content.trim()) {
         elements.push(markdown(truncateCardText(block.content, 18_000)));
       }
@@ -2389,6 +2417,10 @@ function renderRunBlocks(blocks, finalized, beforeFirstTool = []) {
       continue;
     }
     flushTools();
+    if (block.kind === "formula_image") {
+      elements.push(formulaImageElement(block));
+      continue;
+    }
     if (block.content.trim()) {
       elements.push(markdown(truncateCardText(block.content, 18_000)));
     }
@@ -2396,6 +2428,48 @@ function renderRunBlocks(blocks, finalized, beforeFirstTool = []) {
   flushTools();
   if (!statusInserted) elements.push(...beforeFirstTool);
   return elements;
+}
+
+function formulaImageElement(block) {
+  return {
+    tag: "img",
+    img_key: block.imgKey,
+    alt: { tag: "plain_text", content: block.alt || "数学公式" },
+    title: { tag: "plain_text", content: block.title || "公式" },
+    scale_type: "fit_horizontal",
+    corner_radius: "8px",
+    preview: true,
+    margin: "0px 0px 8px 0px",
+  };
+}
+
+function formulaSourcePanel(sources) {
+  const body = [...new Set(sources.map((source) => String(source || "").trim()).filter(Boolean))]
+    .map((source, index) => `${index + 1}. ${source}`)
+    .join("\n\n");
+  return {
+    tag: "collapsible_panel",
+    expanded: false,
+    background_color: "grey-50",
+    border: { color: "blue-100", corner_radius: "8px" },
+    padding: "8px",
+    header: {
+      title: { tag: "plain_text", content: "查看可复制的 LaTeX 源码" },
+      width: "fill",
+      icon: {
+        tag: "standard_icon",
+        token: "code_outlined",
+        color: "blue",
+        size: "16px",
+      },
+      icon_position: "left",
+    },
+    elements: [{
+      tag: "markdown",
+      content: cardMarkdownContent(`\`\`\`latex\n${truncateCardText(body, 8000)}\n\`\`\``),
+      text_size: "notation",
+    }],
+  };
 }
 
 function renderToolGroup(tools, finalized) {
@@ -6566,6 +6640,31 @@ async function handleEvent(rawEvent, dispatchControl = {}) {
     latestCardState = state;
     if (!card) return;
     if (activeRunRecorded && state.terminal === "running") touchActiveRun(messageId);
+    if (state.terminal === "done" && !state.formulaRenderComplete) {
+      if (!state.formulaRenderPromise) {
+        state.formulaRenderPromise = (async () => {
+          const formulaStartedAt = Date.now();
+          const result = await formulaImageService.enrichBlocks(state.blocks);
+          state.blocks = result.blocks;
+          state.formulaSources = result.sources;
+          state.formulaRenderStats = result.stats;
+          state.formulaRenderComplete = true;
+          log("INFO", "formula rendering completed", {
+            messageId,
+            durationMs: Date.now() - formulaStartedAt,
+            ...result.stats,
+          });
+        })().catch((error) => {
+          state.formulaRenderComplete = true;
+          state.formulaRenderStats = { failed: true };
+          log("WARN", "formula rendering pipeline failed; preserving original markdown", {
+            messageId,
+            error: String(error?.message || error).slice(0, 1200),
+          });
+        });
+      }
+      await state.formulaRenderPromise;
+    }
     const rendered = renderRunCard(state);
     if (state.terminal === "running") {
       card.update(rendered);

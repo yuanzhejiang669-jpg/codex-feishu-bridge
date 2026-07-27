@@ -10,6 +10,7 @@ const ROOT_FILES = [
   "register-codex-feishu-bot.mjs",
   "control-panel.mjs",
   "scripts/smoke-app-server.mjs",
+  "scripts/smoke-formula-renderer.mjs",
 ];
 const WALK_DIRS = [
   "control-panel",

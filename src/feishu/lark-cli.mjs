@@ -90,6 +90,45 @@ export function createLarkClient({
     }
   }
 
+  async function uploadImage(imagePath, options = {}) {
+    const resolvedPath = path.resolve(String(imagePath || ""));
+    if (!resolvedPath || !fs.existsSync(resolvedPath)) {
+      throw new Error(`Image file is unavailable: ${resolvedPath || imagePath}`);
+    }
+    const result = await runLark([
+      "im",
+      "images",
+      "create",
+      "--as",
+      "bot",
+      "--data",
+      "-",
+      "--file",
+      `image=${path.basename(resolvedPath)}`,
+      "--format",
+      "json",
+    ], {
+      cwd: path.dirname(resolvedPath),
+      stdin: JSON.stringify({ image_type: "message" }),
+      timeoutMs: options.timeoutMs || 60_000,
+      attempts: options.attempts ?? 2,
+    });
+    if (result.code !== 0) {
+      throw new Error(`lark-cli image upload failed (${result.code}): ${result.stderr || result.stdout}`);
+    }
+    const parsed = parseJsonLoose(result.stdout) || {};
+    const imageKey = String(
+      parsed?.data?.image_key
+      || parsed?.image_key
+      || findNestedValue(parsed, "image_key")
+      || "",
+    ).trim();
+    if (!imageKey) {
+      throw new Error(`lark-cli image upload returned no image_key: ${String(result.stdout || "").slice(0, 500)}`);
+    }
+    return imageKey;
+  }
+
   async function larkJson(args, options = {}) {
     const result = await runLark(args, options);
     if (result.code !== 0) {
@@ -141,10 +180,21 @@ export function createLarkClient({
     runLark,
     sendMarkdown,
     sendText,
+    uploadImage,
   };
 }
 
 export function isTransientLarkError(result) {
   const text = `${result?.stderr || ""}\n${result?.stdout || ""}`;
   return /connectex|ECONN|ETIMEDOUT|open\.feishu\.cn|tenant_access_token|socket|cardid is invalid|ErrCode:\s*11310/i.test(text);
+}
+
+function findNestedValue(value, key) {
+  if (!value || typeof value !== "object") return undefined;
+  if (Object.prototype.hasOwnProperty.call(value, key)) return value[key];
+  for (const child of Object.values(value)) {
+    const found = findNestedValue(child, key);
+    if (found !== undefined) return found;
+  }
+  return undefined;
 }
