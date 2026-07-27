@@ -1,6 +1,6 @@
 # `/steer` 附件支持执行记录
 
-状态：实施中  
+状态：功能与发布完成；当前设备等待承载会话结束后自动升级  
 目标版本：Desktop `0.8.3`  
 日期：2026-07-27
 
@@ -55,4 +55,34 @@
 
 ## v4：发布与设备同步
 
-待 GitHub Release、当前设备和旧 Windows 同步完成后记录。
+GitHub：
+
+- 功能提交：`045dfdbecd628b118c00460bc68af36115d49d7b`。
+- `origin/main` 已推送，稳定标签为 `v0.8.3`。
+- GitHub Actions `Release Windows Desktop Client` 成功。
+- Release 为公开稳定版本，包含 5 个且仅包含 Windows 资产。
+- Actions 安装包大小：`169750981` bytes。
+- Actions 安装包 SHA-256：`29cdf445f00756d9ac9cf8fc1e17f63d93d6606ef46e78cd2e9b0e7892618d42`。
+- Release 资产重新下载后，安装包、blockmap 和 `latest.yml` 均与校验清单一致。
+
+旧 Windows：
+
+- 仓库快进到功能提交，原有未提交文件
+  `tools/codex-browser-control-mcp/scripts/restart-extension-bridge.ps1`
+  保持不变。
+- 根项目完整检查 75/75 通过。
+- 客户端安装为 `0.8.3.0`，Engine `sourceCommit` 为功能提交。
+- 首次从 SSH 内直接调用安装校验时，安装已经成功，但客户端进程随 SSH 作业结束，导致 Bot 恢复校验返回非零；未将其误报为完成。
+- 随后通过一次性计划任务在已登录桌面会话中启动客户端，17/17 Bot 依次恢复。
+- 删除一次性任务和临时远端安装包后继续观察 60 秒：客户端仍在线，17/17 Bot 在线，活动 run 为 0。
+
+当前 Windows：
+
+- 当前发布会话 Bot 仍有 1 个 active run，未被中断。
+- 已重新下载并校验正式 GitHub Release。
+- 已创建并启动一次性计划任务
+  `CodexFeishuBridgeDesktopPostUpgrade083`。
+- 任务会等待所有托管 Bot 的 active run 清零，然后执行哈希复核、安装 `0.8.3`、版本与 Engine 提交检查、全部在线 Bot 恢复及 60 秒稳定性验证。
+- 结果写入
+  `%LOCALAPPDATA%\CodexFeishuBridgeDesktop\pending-upgrades\complete-v0.8.3-result.json`；
+  日志写入同目录的 `complete-v0.8.3.log`。
