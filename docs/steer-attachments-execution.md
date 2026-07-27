@@ -78,11 +78,12 @@ GitHub：
 
 当前 Windows：
 
-- 当前发布会话 Bot 仍有 1 个 active run，未被中断。
 - 已重新下载并校验正式 GitHub Release。
-- 已创建并启动一次性计划任务
-  `CodexFeishuBridgeDesktopPostUpgrade083`。
-- 任务会等待所有托管 Bot 的 active run 清零，然后执行哈希复核、安装 `0.8.3`、版本与 Engine 提交检查、全部在线 Bot 恢复及 60 秒稳定性验证。
-- 结果写入
+- 一次性计划任务等待当前发布会话结束后执行安装，没有中断活动 run。
+- 客户端安装为 `0.8.3`，Engine `sourceCommit` 为功能提交。
+- 安装程序结束了升级包装脚本，导致脚本未自行写入结果文件，计划任务末次结果为 `3221225786`；没有将该包装脚本状态误报为成功。
+- 独立复核确认 18/18 Bot 在线；连续 15 秒前后 PID 无变化，无 Bot 离线或重启。
+- 独立复核结果补写至
   `%LOCALAPPDATA%\CodexFeishuBridgeDesktop\pending-upgrades\complete-v0.8.3-result.json`；
-  日志写入同目录的 `complete-v0.8.3.log`。
+  原始日志保留在同目录的 `complete-v0.8.3.log`。
+- 一次性计划任务在复核后删除。
