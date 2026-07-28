@@ -102,6 +102,7 @@ import {
   writeJsonFileAtomicSync,
 } from "./src/utils/json.mjs";
 import {
+  bridgeTimeoutError,
   classifyCodexFailure,
   emptyCompletionError,
   errorFromFailure,
@@ -111,6 +112,7 @@ import {
   isNoGoalExistsError,
   normalizeFailure,
   safeJson,
+  shouldWaitForNativeRetry,
 } from "./src/logging/errors.mjs";
 import modelReasoning from "./src/config/model-reasoning.cjs";
 
@@ -2100,7 +2102,7 @@ function reduceAppServerEvent(state, raw) {
     const failure = classifyCodexFailure(params, "Codex app-server 运行失败");
     state.failure = failure;
     state.errorMsg = failureDetailText(failure);
-    if (failure.recoverable && params.willRetry === true) {
+    if (shouldWaitForNativeRetry(failure, params.willRetry)) {
       closeStreamingBlocks(state);
       state.footer = "reconnecting";
       state.meta.durationMs = Date.now() - state.startedAt;
@@ -4965,7 +4967,10 @@ async function compactAppServerThread(session) {
     );
 
     if (watchdog.timedOut || !compacted) {
-      throw new Error(watchdog.reason || `codex app-server compaction idle timed out after ${Math.round(CONFIG.codexIdleTimeoutMs / 1000)}s`);
+      throw bridgeTimeoutError(
+        watchdog.reason || `codex app-server compaction idle timed out after ${Math.round(CONFIG.codexIdleTimeoutMs / 1000)}s`,
+        "idle",
+      );
     }
 
     markSessionCompacted(session);
@@ -5591,7 +5596,7 @@ async function runGoalLoop(run, goalPatch) {
         }
       } else if (message.method === "error") {
         const failure = classifyCodexFailure(params, "codex app-server goal error");
-        if (failure.recoverable && params.willRetry === true) continue;
+        if (shouldWaitForNativeRetry(failure, params.willRetry)) continue;
         throw errorFromFailure(failure);
       }
 
@@ -5602,7 +5607,10 @@ async function runGoalLoop(run, goalPatch) {
       if (goalRunTerminal(run) && !run.turnActive) break;
     }
 
-    if (watchdog.timedOut) throw new Error(watchdog.reason || "codex app-server goal timed out");
+    if (watchdog.timedOut) {
+      const reason = watchdog.reason || "codex app-server goal timed out";
+      throw bridgeTimeoutError(reason, reason.includes(" idle timed out ") ? "idle" : "total");
+    }
     if (stoppedJobs.has(messageId) || stoppedJobs.has(run.rootMessageId)) {
       throw new Error("codex job stopped by user");
     }
@@ -6030,7 +6038,7 @@ async function runCodexAppServer(event, session, state = null, onState = null, o
       }
       if (message.method === "error") {
         const failure = classifyCodexFailure(message.params, "codex app-server error");
-        if (failure.recoverable && message.params?.willRetry === true) {
+        if (shouldWaitForNativeRetry(failure, message.params?.willRetry)) {
           log("WARN", "codex app-server transient error; waiting for native retry", {
             messageId,
             sessionId: session.id,
@@ -6043,7 +6051,10 @@ async function runCodexAppServer(event, session, state = null, onState = null, o
       }
     }
 
-    if (watchdog.timedOut) throw new Error(watchdog.reason || "codex app-server timed out");
+    if (watchdog.timedOut) {
+      const reason = watchdog.reason || "codex app-server timed out";
+      throw bridgeTimeoutError(reason, reason.includes(" idle timed out ") ? "idle" : "total");
+    }
     if (!completed) {
       const error = new Error(`codex app-server ended before turn completed: ${client.stderrText().slice(-2000)}`);
       if (liveState.failure?.recoverable) error.codexFailure = liveState.failure;
@@ -6357,11 +6368,13 @@ async function runCodex(event, session, state = null, onState = null) {
   }
 
   if (timedOut) {
+    const reason = timeoutReason || "codex exec timed out";
+    const timeoutError = bridgeTimeoutError(reason, reason.includes(" idle timed out ") ? "idle" : "total");
     if (state) {
-      markRunError(state, timeoutReason || "codex exec timed out");
+      markRunError(state, timeoutError);
       await flushState();
     }
-    throw new Error(timeoutReason || "codex exec timed out");
+    throw timeoutError;
   }
   if (closeResult.code !== 0) {
     const stderr = Buffer.concat(stderrChunks).toString("utf8");

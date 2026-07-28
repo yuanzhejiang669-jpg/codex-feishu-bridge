@@ -45,6 +45,32 @@ export function normalizeFailure(value) {
   };
 }
 
+export function bridgeTimeoutFailure(reason = "", timeoutType = "total") {
+  const idle = timeoutType === "idle";
+  return {
+    kind: "timeout",
+    label: "Bridge 超时",
+    recoverable: false,
+    message: idle
+      ? "Bridge 等待 Codex 任务期间超过无进展时限。"
+      : "Bridge 等待 Codex 任务超过总时长配置时限。",
+    suggestion: idle
+      ? "检查 Codex 是否卡住，或按任务特征调整无进展超时。"
+      : "仅当任务确实需要更长总时长时调整总时长超时。",
+    detail: String(reason || ""),
+    at: Date.now(),
+  };
+}
+
+export function bridgeTimeoutError(reason = "", timeoutType = "total") {
+  return errorFromFailure(bridgeTimeoutFailure(reason, timeoutType));
+}
+
+export function shouldWaitForNativeRetry(failure, willRetry) {
+  const item = normalizeFailure(failure) || classifyCodexFailure(failure);
+  return item.recoverable && willRetry === true;
+}
+
 export function httpStatusFromText(text) {
   const value = String(text || "");
   const match = value.match(/httpStatusCode["']?\s*[:=]\s*(\d{3})/i)
@@ -149,16 +175,6 @@ export function classifyCodexFailure(value, fallback = "Codex 运行失败") {
       label: "飞书卡片更新失败",
       message: "Codex 可能仍在运行，但飞书动态卡片刷新失败。",
       suggestion: "这类问题应重试发卡或看日志，不应该重跑 Codex 任务。",
-    };
-  }
-
-  if (lower.includes("timed out")) {
-    return {
-      ...base,
-      kind: "timeout",
-      label: "Bridge 超时",
-      message: "Bridge 等待 Codex 任务超过配置时限。",
-      suggestion: "如果任务确实很长，可以调大超时；否则查看 Codex 是否卡住。",
     };
   }
 
