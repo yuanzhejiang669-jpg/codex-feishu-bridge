@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   bridgeTimeoutError,
   classifyCodexFailure,
+  nativeRetryExhaustedFailure,
   shouldWaitForNativeRetry,
 } from "../src/logging/errors.mjs";
 import { createRunWatchdog } from "../src/runtime/run-watchdog.mjs";
@@ -70,6 +71,10 @@ test("stream disconnect with willRetry false does not wait for native retry", ()
   assert.equal(failure.kind, "stream_disconnect");
   assert.equal(failure.recoverable, true);
   assert.equal(shouldWaitForNativeRetry(failure, false), false);
+  const exhausted = nativeRetryExhaustedFailure(failure, false);
+  assert.equal(exhausted.kind, "stream_disconnect");
+  assert.equal(exhausted.recoverable, true);
+  assert.equal(exhausted.label, "Codex 响应流重连失败");
 });
 
 test("a generic upstream request timeout is not mislabeled as Bridge timeout", () => {

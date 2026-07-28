@@ -71,6 +71,17 @@ export function shouldWaitForNativeRetry(failure, willRetry) {
   return item.recoverable && willRetry === true;
 }
 
+export function nativeRetryExhaustedFailure(failure, willRetry) {
+  const item = normalizeFailure(failure) || classifyCodexFailure(failure);
+  if (item.kind !== "stream_disconnect" || willRetry !== false) return item;
+  return {
+    ...item,
+    label: "Codex 响应流重连失败",
+    message: "Codex 原生响应流已耗尽重连尝试，仍未恢复。",
+    suggestion: "Bridge 将仅对此类断流尝试一次断点续跑；若仍失败，再报告任务失败。",
+  };
+}
+
 export function httpStatusFromText(text) {
   const value = String(text || "");
   const match = value.match(/httpStatusCode["']?\s*[:=]\s*(\d{3})/i)

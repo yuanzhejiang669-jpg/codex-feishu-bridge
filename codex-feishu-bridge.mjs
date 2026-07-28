@@ -110,6 +110,7 @@ import {
   failureDetailText,
   failureShortText,
   isNoGoalExistsError,
+  nativeRetryExhaustedFailure,
   normalizeFailure,
   safeJson,
   shouldWaitForNativeRetry,
@@ -2099,7 +2100,10 @@ function reduceAppServerEvent(state, raw) {
   }
 
   if (method === "error") {
-    const failure = classifyCodexFailure(params, "Codex app-server 运行失败");
+    const failure = nativeRetryExhaustedFailure(
+      classifyCodexFailure(params, "Codex app-server 运行失败"),
+      params.willRetry,
+    );
     state.failure = failure;
     state.errorMsg = failureDetailText(failure);
     if (shouldWaitForNativeRetry(failure, params.willRetry)) {
@@ -5595,7 +5599,10 @@ async function runGoalLoop(run, goalPatch) {
           activeJob.turnId = "";
         }
       } else if (message.method === "error") {
-        const failure = classifyCodexFailure(params, "codex app-server goal error");
+        const failure = nativeRetryExhaustedFailure(
+          classifyCodexFailure(params, "codex app-server goal error"),
+          params.willRetry,
+        );
         if (shouldWaitForNativeRetry(failure, params.willRetry)) continue;
         throw errorFromFailure(failure);
       }
@@ -6037,7 +6044,10 @@ async function runCodexAppServer(event, session, state = null, onState = null, o
         completed = true;
       }
       if (message.method === "error") {
-        const failure = classifyCodexFailure(message.params, "codex app-server error");
+        const failure = nativeRetryExhaustedFailure(
+          classifyCodexFailure(message.params, "codex app-server error"),
+          message.params?.willRetry,
+        );
         if (shouldWaitForNativeRetry(failure, message.params?.willRetry)) {
           log("WARN", "codex app-server transient error; waiting for native retry", {
             messageId,
