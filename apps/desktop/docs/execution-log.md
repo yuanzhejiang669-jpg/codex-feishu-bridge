@@ -1746,3 +1746,13 @@ Adversarial review covered the three most likely future regressions without broa
 1. Unmatched prices, escaped dollars, price ranges, inline code, and fenced code remain non-formula text.
 2. A paired numeric formula inside a dense mixed response is included in the render source and completes a real Edge screenshot.
 3. Negative decimals and thousands-separated values receive the same delimiter removal as integers.
+
+Release and rollout evidence:
+
+- Root verification passed 89/89 tests. Desktop verification passed 182/185 tests with three expected platform skips before release; the follow-up deployment-guard test brought the desktop total to 186 tests, with 183 passing and the same three expected skips.
+- The local Windows package staged engine commit `481c3fb2d33ac44484211e2d10613bd1b491974e`, passed packaged dependency checks and a real Edge formula smoke, and produced a verified `0.8.7` NSIS installer.
+- GitHub Actions run `30314997172` passed both Windows build and publish jobs. Public Release `v0.8.7` is the stable Latest release; its downloaded installer SHA-256 is `c1d9b3100bcceac828c797a142b7cdf4dc5397e7f6970b720ca14db30315d4c4`.
+- The old Windows repository fast-forwarded to `481c3fb` and passed its root check while preserving the unrelated modified `tools/codex-browser-control-mcp/scripts/restart-extension-bridge.ps1`.
+- The old Windows client upgraded to `0.8.7.0`; all 17 managed Bots received replacement PIDs, stayed online for 60 seconds, and the installed engine rendered all three real Edge smoke images with zero failures.
+- The rollout exposed a verifier gap created by persistent app-server processes: replacing and relaunching the desktop client did not itself reload already-running Bots. The verifier now explicitly stops only preverified idle managed PIDs, restarts them from the installed engine, and then enforces the existing online/restarted/stable gate.
+- The current device has one active run in `codex-assistant-1`. A scheduled watcher validates the public installer hash, waits until every managed Bot is idle, upgrades the installed client, reloads every managed Bot through the corrected verifier, and records installed commit plus formula-smoke evidence without interrupting this response.

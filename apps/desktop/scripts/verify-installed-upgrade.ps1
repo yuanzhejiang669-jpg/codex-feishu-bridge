@@ -97,6 +97,19 @@ if ($null -eq $uninstall -or $uninstall.DisplayVersion -ne $ExpectedVersion) {
     throw "Windows uninstall registry version mismatch: $($uninstall.DisplayVersion)"
 }
 
+$stopDeadline = (Get-Date).AddSeconds(20)
+foreach ($processId in $before.Values) {
+    Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
+}
+do {
+    $remainingManaged = @($before.Values | Where-Object { $null -ne (Get-Process -Id $_ -ErrorAction SilentlyContinue) })
+    if ($remainingManaged.Count -eq 0) { break }
+    Start-Sleep -Milliseconds 250
+} while ((Get-Date) -lt $stopDeadline)
+if ($remainingManaged.Count -gt 0) {
+    throw "Managed Bot processes did not stop before loading the upgraded engine: $($remainingManaged -join ', ')"
+}
+
 Start-Process -FilePath $InstalledExecutable -ArgumentList @('--background') -WindowStyle Hidden | Out-Null
 $deadline = (Get-Date).AddSeconds(20)
 do {
@@ -108,6 +121,33 @@ do {
     Start-Sleep -Milliseconds 250
 } while ((Get-Date) -lt $deadline)
 if (-not $desktopMain) { throw 'Upgraded desktop client did not start' }
+
+$startScript = Join-Path (Join-Path (Split-Path -Parent $InstalledExecutable) 'resources\engine') 'start-codex-feishu-bridge.ps1'
+$toolsRoot = Join-Path (Split-Path -Parent $InstalledExecutable) 'resources\tools'
+if (-not (Test-Path -LiteralPath $startScript)) {
+    throw "Installed managed Bot start script is missing: $startScript"
+}
+$originalLocalAppData = $env:LOCALAPPDATA
+$originalPath = $env:Path
+try {
+    $env:LOCALAPPDATA = Join-Path $DataRoot 'runtime-localappdata'
+    $env:Path = "$toolsRoot;$env:APPDATA\npm;$originalPath"
+    foreach ($name in $before.Keys | Sort-Object) {
+        $configPath = Join-Path (Join-Path $managedRoot $name) 'bot.json'
+        $bot = ([Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($configPath))) | ConvertFrom-Json
+        $arguments = @{
+            Name = [string]$bot.name
+            LarkProfile = [string]$bot.profile
+            Workspace = [string]$bot.workspace
+            CodexHome = [string]$bot.codexHome
+        }
+        if ($bot.provider.reasoning) { $arguments.Reasoning = [string]$bot.provider.reasoning }
+        & $startScript @arguments | Out-Null
+    }
+} finally {
+    $env:LOCALAPPDATA = $originalLocalAppData
+    $env:Path = $originalPath
+}
 
 $recoveryTimeoutSeconds = [Math]::Max(300, ($before.Count * 120) + 90)
 $recoveryDeadline = (Get-Date).AddSeconds($recoveryTimeoutSeconds)

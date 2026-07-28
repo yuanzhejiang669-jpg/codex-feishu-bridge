@@ -39,3 +39,12 @@ test("installed-upgrade verification scales its recovery window with managed Bot
   assert.doesNotMatch(script, /\$stableSignature\s*=\s*''/);
   assert.doesNotMatch(script, /AddMinutes\(5\)/);
 });
+
+test("installed-upgrade verification reloads idle managed Bots into the upgraded engine", () => {
+  const script = read("scripts/verify-installed-upgrade.ps1");
+  assert.match(script, /foreach \(\$processId in \$before\.Values\)/);
+  assert.match(script, /Stop-Process -Id \$processId -Force/);
+  assert.match(script, /start-codex-feishu-bridge\.ps1/);
+  assert.match(script, /foreach \(\$name in \$before\.Keys \| Sort-Object\)/);
+  assert.match(script, /& \$startScript @arguments/);
+});

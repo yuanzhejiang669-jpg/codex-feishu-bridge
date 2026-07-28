@@ -570,3 +570,4 @@ These risks are addressed with protocol versioning, active-run guards, transacti
 - Preserve unmatched prices, escaped dollars, inline code, fenced code, and common dollar-denominated ranges such as `$25-$30`.
 - Verify both sparse native-text conversion and dense mixed-image planning so numeric delimiters cannot leak into the final card or rendered PNG.
 - Publish the correction as the Windows desktop `0.8.7` patch and synchronize the current device, old Windows device, GitHub Release, and affected idle Bots.
+- During verified client replacement, explicitly stop every already-idle managed Bot and start it from the newly installed engine before applying the 60-second stability gate. A persistent app-server must not make an upgraded client appear complete while its Bot process still has the previous engine loaded.
