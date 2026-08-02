@@ -571,3 +571,10 @@ These risks are addressed with protocol versioning, active-run guards, transacti
 - Verify both sparse native-text conversion and dense mixed-image planning so numeric delimiters cannot leak into the final card or rendered PNG.
 - Publish the correction as the Windows desktop `0.8.7` patch and synchronize the current device, old Windows device, GitHub Release, and affected idle Bots.
 - During verified client replacement, explicitly stop every already-idle managed Bot and start it from the newly installed engine before applying the 60-second stability gate. A persistent app-server must not make an upgraded client appear complete while its Bot process still has the previous engine loaded.
+
+### 0.8.10 desktop initialization readiness correction
+
+- Defer and coalesce second-instance or tray show requests until every desktop IPC handler is registered.
+- Preserve normal single-instance and manual desktop launch behavior after readiness.
+- Cover delayed, coalesced, and post-readiness window requests with focused unit tests.
+- Publish the correction through the stable Windows channel and apply the equivalent reviewed source to the SSH-maintained physical Mac.

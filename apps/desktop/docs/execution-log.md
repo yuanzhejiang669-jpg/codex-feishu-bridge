@@ -1756,3 +1756,11 @@ Release and rollout evidence:
 - The old Windows client upgraded to `0.8.7.0`; all 17 managed Bots received replacement PIDs, stayed online for 60 seconds, and the installed engine rendered all three real Edge smoke images with zero failures.
 - The rollout exposed a verifier gap created by persistent app-server processes: replacing and relaunching the desktop client did not itself reload already-running Bots. The verifier now explicitly stops only preverified idle managed PIDs, restarts them from the installed engine, and then enforces the existing online/restarted/stable gate.
 - The current device has one active run in `codex-assistant-1`. A scheduled watcher validates the public installer hash, waits until every managed Bot is idle, upgrades the installed client, reloads every managed Bot through the corrected verifier, and records installed commit plus formula-smoke evidence without interrupting this response.
+
+## 2026-08-02 - 0.8.10 desktop initialization readiness correction
+
+- Reproduced the renderer initialization failure as a main-process ordering race: a second-instance or tray show request could create the window before `desktop:get-state` and the remaining IPC handlers were registered.
+- Added a readiness gate that defers and coalesces early show requests, then reveals the window after IPC registration completes.
+- Added focused regression tests for delayed requests, request coalescing, and immediate post-readiness display.
+- Local desktop verification passed 185 tests with zero failures and three expected platform skips. Windows packaging, protocol-proxy smoke, checksums, and release verification produced the validated `0.8.10` installer.
+- The current Windows client upgraded to `0.8.10`; all 21 managed Bots restarted and remained stable for 60 seconds. The Gmail-tailnet old Windows client also upgraded to `0.8.10`; all 17 managed Bots restarted and its visible client was verified in the logged-in Explorer session without background or development flags.

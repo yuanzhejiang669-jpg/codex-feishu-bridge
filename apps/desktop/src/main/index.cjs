@@ -75,6 +75,7 @@ const {
   registerFactoryBot,
 } = require("./services/workspace-factory.cjs");
 const { readTrustedCodexHomes } = require("./services/trusted-codex-homes.cjs");
+const { createWindowReadiness } = require("./services/window-readiness.cjs");
 
 const smokeTest = process.argv.includes("--smoke-test");
 const capturePath = process.env.CFB_DESKTOP_CAPTURE_PATH || "";
@@ -475,11 +476,17 @@ async function loadState() {
   return currentState;
 }
 
-function showMainWindow() {
+function revealMainWindow() {
   if (!mainWindow) createWindow();
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.show();
   mainWindow.focus();
+}
+
+const windowReadiness = createWindowReadiness(revealMainWindow);
+
+function showMainWindow() {
+  windowReadiness.requestShow();
 }
 
 function createTray() {
@@ -931,6 +938,7 @@ if (!singleInstance) {
       return result;
     });
     createWindow();
+    windowReadiness.markReady();
   });
 
   app.on("before-quit", (event) => {
