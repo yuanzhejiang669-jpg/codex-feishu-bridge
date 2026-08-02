@@ -16,3 +16,10 @@ test("stable GitHub releases publish only verified Windows desktop assets", () =
   assert.doesNotMatch(workflow, /^\s{2}build-macos:\s*$/m);
   assert.doesNotMatch(workflow, /macos-release|latest-mac\.yml|Codex-Feishu-Bridge-\*-mac-/);
 });
+
+test("release verification protects the packaged Codex runtime detector", () => {
+  const verifier = fs.readFileSync(path.join(__dirname, "..", "scripts", "verify-release.cjs"), "utf8");
+  assert.match(verifier, /detect-codex\.ps1/);
+  assert.match(verifier, /resolve-codex-runtime\.ps1/);
+  assert.match(verifier, /Packaged runtime detector differs from source/);
+});

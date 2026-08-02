@@ -13,6 +13,7 @@ const {
   createLoginManager,
   discoverCodexHomes,
   inspectCodexHome,
+  inspectLogin,
   inspectSessionOverrides,
   parseLoginState,
   previewModelSourceSwitch,
@@ -104,6 +105,25 @@ test("parses official Codex login status without exposing credentials", () => {
   assert.equal(parseLoginState("Logged in using ChatGPT", true), "signed-in");
   assert.equal(parseLoginState("Not logged in", false), "signed-out");
   assert.equal(parseLoginState("unexpected", false), "unknown");
+});
+
+test("login inspection degrades when the Codex process cannot be spawned", async () => {
+  const value = fixture();
+  const codexPath = path.join(value.root, "codex.exe");
+  fs.writeFileSync(codexPath, "", "utf8");
+  try {
+    const result = await inspectLogin(codexPath, value.writing, {
+      execFile: () => {
+        const error = new Error("spawn EPERM");
+        error.code = "EPERM";
+        throw error;
+      },
+    });
+    assert.equal(result.state, "unknown");
+    assert.equal(typeof result.summary, "string");
+  } finally {
+    fs.rmSync(value.root, { recursive: true, force: true });
+  }
 });
 
 test("clears and restores persisted Provider session overrides transactionally", () => {

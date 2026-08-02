@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { cleanVersion, findMacBundleRuntime, firstExecutable, inspectMacCodex, inspectRuntimeDirectory, loginState, macCodexCandidates, parseJsonOutput } = require("../src/main/services/environment.cjs");
+const { cleanVersion, findMacBundleRuntime, firstExecutable, inspectCodex, inspectMacCodex, inspectRuntimeDirectory, loginState, macCodexCandidates, parseJsonOutput } = require("../src/main/services/environment.cjs");
 
 test("parseJsonOutput tolerates a BOM and diagnostic prefix", () => {
   assert.deepEqual(parseJsonOutput("\uFEFFdiagnostic\n{\"packageFound\":true}\n"), { packageFound: true });
@@ -54,6 +54,52 @@ test("macOS Codex candidates include current ChatGPT and legacy Codex bundles", 
 
 test("firstExecutable ignores missing candidates", () => {
   assert.equal(firstExecutable([path.join(os.tmpdir(), "missing-codex"), process.execPath]), process.execPath);
+});
+
+test("Windows inspection never executes the protected source runtime without a cache", { skip: process.platform !== "win32" }, async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cfb-detect-source-only-"));
+  const detector = path.join(root, "detect.ps1");
+  try {
+    const payload = JSON.stringify({
+      packageFound: true,
+      packageFullName: "OpenAI.Codex_26.727.4816.0_x64__test",
+      sourceRuntimePath: process.execPath,
+      cachedRuntimePath: "",
+      runtimeFound: false,
+    }).replaceAll("'", "''");
+    fs.writeFileSync(detector, `[Console]::Out.Write('${payload}')\n`, "utf8");
+    const result = await inspectCodex(detector);
+    assert.equal(result.packageFound, true);
+    assert.equal(result.runtimeFound, false);
+    assert.equal(result.runtimePath, "");
+    assert.match(result.error, /cache/i);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Windows inspection rejects a corrupt cached runtime", { skip: process.platform !== "win32" }, async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cfb-detect-corrupt-cache-"));
+  const detector = path.join(root, "detect.ps1");
+  const corruptRuntime = path.join(root, "codex.exe");
+  try {
+    fs.writeFileSync(corruptRuntime, "not an executable", "utf8");
+    const payload = JSON.stringify({
+      packageFound: true,
+      packageFullName: "OpenAI.Codex_26.727.4816.0_x64__test",
+      sourceRuntimePath: "C:\\Program Files\\WindowsApps\\OpenAI.Codex_test\\codex.exe",
+      cachedRuntimePath: corruptRuntime,
+      runtimeFound: true,
+    }).replaceAll("'", "''");
+    fs.writeFileSync(detector, `[Console]::Out.Write('${payload}')\n`, "utf8");
+    const result = await inspectCodex(detector);
+    assert.equal(result.runtimeFound, false);
+    assert.equal(result.runtimePath, "");
+    assert.equal(result.runtimeCandidatePath, corruptRuntime);
+    assert.match(result.error, /could not be executed/i);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("inspectMacCodex accepts only the official bundle identifier", async () => {

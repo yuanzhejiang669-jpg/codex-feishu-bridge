@@ -1882,4 +1882,7 @@ document.querySelectorAll(".nav-item").forEach((button) => {
   });
 });
 
+window.bridgeDesktop.getVersion()
+  .then((version) => { elements.appVersion.textContent = `v${version}`; })
+  .catch(() => {});
 refresh();

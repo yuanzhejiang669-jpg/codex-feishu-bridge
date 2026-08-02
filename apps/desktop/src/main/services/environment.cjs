@@ -214,18 +214,25 @@ async function inspectCodex(scriptPath, options = {}) {
       encoding: "utf8",
     });
     const inspection = parseJsonOutput(result.stdout);
-    const runtimePath = inspection.cachedRuntimePath || inspection.sourceRuntimePath || "";
+    const runtimeCandidatePath = inspection.cachedRuntimePath || "";
+    const version = await runCodex(runtimeCandidatePath, ["--version"], 8_000);
+    const runtimePath = version.ok ? runtimeCandidatePath : "";
     const runtimeDirectory = inspectRuntimeDirectory(runtimePath, "win32");
-    const version = await runCodex(runtimePath, ["--version"], 8_000);
     const auth = await runCodex(runtimePath, ["login", "status"], 10_000);
+    const runtimeError = !runtimeCandidatePath
+      ? "No executable Codex runtime cache is available"
+      : (!version.ok ? "The cached Codex runtime could not be executed" : "");
     return {
       supported: true,
       ...inspection,
+      runtimeFound: Boolean(runtimePath),
+      runtimeCandidatePath,
       runtimePath,
       ...runtimeDirectory,
       cliVersion: cleanVersion(version.output),
       loginState: loginState(auth.output, auth.ok),
       loginSummary: auth.output.split(/\r?\n/).find(Boolean) || "",
+      error: runtimeError,
     };
   } catch (error) {
     return {

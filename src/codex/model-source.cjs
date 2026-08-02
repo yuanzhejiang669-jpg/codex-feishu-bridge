@@ -236,18 +236,23 @@ function parseLoginState(output, ok) {
 function execCodex(codexPath, args, codexHome, options = {}) {
   const runner = options.execFile || execFile;
   return new Promise((resolve) => {
-    runner(codexPath, args, {
-      windowsHide: true,
-      timeout: options.timeoutMs || 15_000,
-      encoding: "utf8",
-      maxBuffer: 1024 * 1024,
-      env: { ...process.env, ...(options.env || {}), CODEX_HOME: canonicalPath(codexHome) },
-    }, (error, stdout, stderr) => resolve({
+    const complete = (error, stdout = "", stderr = "") => resolve({
       ok: !error,
       code: typeof error?.code === "number" ? error.code : (error ? 1 : 0),
       output: `${stdout || ""}\n${stderr || ""}`.trim(),
       error: error?.code === "ETIMEDOUT" ? "timeout" : (error ? "unavailable" : ""),
-    }));
+    });
+    try {
+      runner(codexPath, args, {
+        windowsHide: true,
+        timeout: options.timeoutMs || 15_000,
+        encoding: "utf8",
+        maxBuffer: 1024 * 1024,
+        env: { ...process.env, ...(options.env || {}), CODEX_HOME: canonicalPath(codexHome) },
+      }, complete);
+    } catch (error) {
+      complete(error);
+    }
   });
 }
 

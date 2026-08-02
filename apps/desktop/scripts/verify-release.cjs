@@ -19,6 +19,7 @@ const proxyLicensePath = path.join(outRoot, "win-unpacked", "resources", "proxy"
 const packagedResources = path.join(outRoot, "win-unpacked", "resources");
 const packagedEngine = path.join(packagedResources, "engine");
 const packagedNode = path.join(packagedResources, "tools", "node.exe");
+const runtimeScripts = ["detect-codex.ps1", "resolve-codex-runtime.ps1"];
 
 function sha256(filePath) {
   return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex").toUpperCase();
@@ -36,8 +37,23 @@ function windowsProductVersion(filePath) {
   })).trim();
 }
 
-for (const required of [installerPath, unpackedPath, latestYmlPath, proxyManifestPath, proxyLicensePath]) {
+for (const required of [
+  installerPath,
+  unpackedPath,
+  latestYmlPath,
+  proxyManifestPath,
+  proxyLicensePath,
+  ...runtimeScripts.map((name) => path.join(packagedResources, "scripts", name)),
+]) {
   if (!fs.existsSync(required)) throw new Error(`Release artifact is missing: ${required}`);
+}
+
+for (const name of runtimeScripts) {
+  const sourcePath = path.join(desktopRoot, "resources", "scripts", name);
+  const packagedPath = path.join(packagedResources, "scripts", name);
+  if (sha256(sourcePath) !== sha256(packagedPath)) {
+    throw new Error(`Packaged runtime detector differs from source: ${name}`);
+  }
 }
 
 const proxyRuntimeManifest = JSON.parse(fs.readFileSync(path.join(desktopRoot, "proxy-runtime", "package.json"), "utf8"));

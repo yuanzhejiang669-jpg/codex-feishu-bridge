@@ -1,6 +1,7 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("bridgeDesktop", Object.freeze({
+  getVersion: () => ipcRenderer.invoke("desktop:get-version"),
   getState: () => ipcRenderer.invoke("desktop:get-state"),
   checkUpdate: () => ipcRenderer.invoke("desktop:check-update"),
   installUpdate: () => ipcRenderer.invoke("desktop:install-update"),

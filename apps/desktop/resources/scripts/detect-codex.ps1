@@ -1,6 +1,8 @@
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
+. (Join-Path $PSScriptRoot 'resolve-codex-runtime.ps1')
+
 $packages = @(Get-AppxPackage -Name 'OpenAI.Codex' -ErrorAction SilentlyContinue | Sort-Object Version -Descending)
 $package = $packages | Select-Object -First 1
 
@@ -10,6 +12,8 @@ $packageVersion = ''
 $installLocation = ''
 $sourceRuntimePath = ''
 $cachedRuntimePath = ''
+$cachedPackageFullName = ''
+$cacheMatch = 'none'
 
 if ($packageFound) {
   $packageFullName = [string]$package.PackageFullName
@@ -20,11 +24,16 @@ if ($packageFound) {
     $sourceRuntimePath = (Resolve-Path -LiteralPath $candidate).Path
   }
 
-  $cacheCandidate = Join-Path (Join-Path (Join-Path $env:LOCALAPPDATA 'CodexFeishuBridge\official-codex-cli') $packageFullName) 'codex.exe'
-  if (Test-Path -LiteralPath $cacheCandidate) {
-    $cachedRuntimePath = (Resolve-Path -LiteralPath $cacheCandidate).Path
-  }
 }
+
+$cacheRoots = @(
+  (Join-Path $env:LOCALAPPDATA 'CodexFeishuBridge\official-codex-cli'),
+  (Join-Path $env:LOCALAPPDATA 'CodexFeishuBridgeDesktop\runtime-localappdata\CodexFeishuBridge\official-codex-cli')
+)
+$cachedRuntime = Resolve-CodexCachedRuntime -PackageFullName $packageFullName -CacheRoots $cacheRoots
+$cachedRuntimePath = $cachedRuntime.cachedRuntimePath
+$cachedPackageFullName = $cachedRuntime.cachedPackageFullName
+$cacheMatch = $cachedRuntime.cacheMatch
 
 $payload = [ordered]@{
   packageFound = $packageFound
@@ -33,8 +42,9 @@ $payload = [ordered]@{
   installLocation = $installLocation
   sourceRuntimePath = $sourceRuntimePath
   cachedRuntimePath = $cachedRuntimePath
-  runtimeFound = [bool]($cachedRuntimePath -or $sourceRuntimePath)
+  cachedPackageFullName = $cachedPackageFullName
+  cacheMatch = $cacheMatch
+  runtimeFound = [bool]$cachedRuntimePath
 }
 
 $payload | ConvertTo-Json -Compress
-

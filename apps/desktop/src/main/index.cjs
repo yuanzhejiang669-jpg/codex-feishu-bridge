@@ -648,6 +648,7 @@ if (!singleInstance) {
       if (!startupStatePromise) startupStatePromise = loadState();
       return startupStatePromise;
     };
+    ipcMain.handle("desktop:get-version", () => app.getVersion());
     ipcMain.handle("desktop:get-state", () => (runtimeInitializing ? startupState() : loadState()));
     ipcMain.handle("desktop:check-update", () => updaterService?.check());
     ipcMain.handle("desktop:install-update", () => updaterService?.install());
