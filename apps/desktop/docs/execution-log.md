@@ -1764,3 +1764,9 @@ Release and rollout evidence:
 - Added focused regression tests for delayed requests, request coalescing, and immediate post-readiness display.
 - Local desktop verification passed 185 tests with zero failures and three expected platform skips. Windows packaging, protocol-proxy smoke, checksums, and release verification produced the validated `0.8.10` installer.
 - The current Windows client upgraded to `0.8.10`; all 21 managed Bots restarted and remained stable for 60 seconds. The Gmail-tailnet old Windows client also upgraded to `0.8.10`; all 17 managed Bots restarted and its visible client was verified in the logged-in Explorer session without background or development flags.
+
+## 2026-08-02 - 0.8.11 non-blocking desktop cold start
+
+- The Hotmail-tailnet lab Windows device upgraded to `0.8.10` but a normal Start Menu launch remained windowless for more than 90 seconds. The process was in the logged-in Explorer session with no background flags, but had no renderer process or window handle.
+- The packaged smoke path completed in about one second, isolating the delay to runtime-service startup after state discovery rather than the shortcut, installation, single-instance lock, or state scan.
+- Moved full IPC registration and initial window creation ahead of protocol-proxy startup, while sharing the first state promise between the renderer and runtime initializer.

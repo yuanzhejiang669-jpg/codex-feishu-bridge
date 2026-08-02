@@ -578,3 +578,9 @@ These risks are addressed with protocol versioning, active-run guards, transacti
 - Preserve normal single-instance and manual desktop launch behavior after readiness.
 - Cover delayed, coalesced, and post-readiness window requests with focused unit tests.
 - Publish the correction through the stable Windows channel and apply the equivalent reviewed source to the SSH-maintained physical Mac.
+
+### 0.8.11 non-blocking desktop cold start
+
+- Register desktop IPC and create the initial window before awaiting protocol-proxy or recovery-service startup.
+- Coalesce the renderer's initial state request with runtime initialization so cold start does not duplicate state discovery.
+- Keep the normal installed shortcut and single-instance behavior while guaranteeing a visible initialization surface on slow devices.

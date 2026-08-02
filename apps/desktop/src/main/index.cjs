@@ -399,6 +399,34 @@ function createDesktopUpdater() {
   });
 }
 
+async function initializeDesktopRuntime(initialStatePromise) {
+  await initialStatePromise;
+  const proxyCliPath = app.isPackaged
+    ? path.join(process.resourcesPath, "proxy", "node_modules", "mimo2codex", "dist", "cli.js")
+    : path.join(__dirname, "..", "..", "..", "proxy-runtime", "node_modules", "mimo2codex", "dist", "cli.js");
+  protocolProxyService = createProtocolProxyService({
+    dataRoot: managedDataRoot(),
+    nodePath: currentState?.engine?.nodePath || "",
+    proxyCliPath,
+    readUserEnvironmentVariable: providerCredentialStore?.read || readUserEnvironmentVariable,
+    resolveModelCapabilities,
+  });
+  createTray();
+  await protocolProxyService.start().catch(() => {});
+  updaterService = createDesktopUpdater();
+  if (!startupError && app.isPackaged) {
+    recoverySupervisor = createManagedRecoverySupervisor();
+    void restoreUpdateBots(managedDataRoot(), async (name) => {
+      await loadState();
+      await startManagedBot(name, supervisorOptions());
+    }).finally(() => recoverySupervisor?.start());
+    legacyAdoptionTimer = setInterval(() => { void processPendingLegacyAdoptionQueue(); }, 15_000);
+    legacyAdoptionTimer.unref?.();
+    void processPendingLegacyAdoptionQueue();
+  }
+  updaterService.start();
+}
+
 function managedBotForAction(name) {
   const normalized = String(name || "").trim();
   const bot = readManagedBots(managedDataRoot()).find((item) => item.name === normalized);
@@ -614,34 +642,13 @@ if (!singleInstance) {
       );
       return;
     }
-    if (!capturePath) {
-      await loadState();
-      const proxyCliPath = app.isPackaged
-        ? path.join(process.resourcesPath, "proxy", "node_modules", "mimo2codex", "dist", "cli.js")
-        : path.join(__dirname, "..", "..", "..", "proxy-runtime", "node_modules", "mimo2codex", "dist", "cli.js");
-      protocolProxyService = createProtocolProxyService({
-        dataRoot: managedDataRoot(),
-        nodePath: currentState?.engine?.nodePath || "",
-        proxyCliPath,
-        readUserEnvironmentVariable: providerCredentialStore?.read || readUserEnvironmentVariable,
-        resolveModelCapabilities,
-      });
-      await protocolProxyService.start().catch(() => {});
-      createTray();
-      updaterService = createDesktopUpdater();
-      if (!startupError && app.isPackaged) {
-        recoverySupervisor = createManagedRecoverySupervisor();
-        void restoreUpdateBots(managedDataRoot(), async (name) => {
-          await loadState();
-          await startManagedBot(name, supervisorOptions());
-        }).finally(() => recoverySupervisor?.start());
-        legacyAdoptionTimer = setInterval(() => { void processPendingLegacyAdoptionQueue(); }, 15_000);
-        legacyAdoptionTimer.unref?.();
-        void processPendingLegacyAdoptionQueue();
-      }
-      updaterService.start();
-    }
-    ipcMain.handle("desktop:get-state", () => loadState());
+    let startupStatePromise = null;
+    let runtimeInitializing = !capturePath;
+    const startupState = () => {
+      if (!startupStatePromise) startupStatePromise = loadState();
+      return startupStatePromise;
+    };
+    ipcMain.handle("desktop:get-state", () => (runtimeInitializing ? startupState() : loadState()));
     ipcMain.handle("desktop:check-update", () => updaterService?.check());
     ipcMain.handle("desktop:install-update", () => updaterService?.install());
     ipcMain.handle("desktop:open-path", async (_event, requestedPath) => {
@@ -939,6 +946,14 @@ if (!singleInstance) {
     });
     createWindow();
     windowReadiness.markReady();
+    if (!capturePath) {
+      try {
+        await initializeDesktopRuntime(startupState());
+      } finally {
+        runtimeInitializing = false;
+        startupStatePromise = null;
+      }
+    }
   });
 
   app.on("before-quit", (event) => {
