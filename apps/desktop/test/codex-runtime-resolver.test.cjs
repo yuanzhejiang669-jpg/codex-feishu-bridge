@@ -16,6 +16,10 @@ function addRuntime(root, packageFullName, contents = "runtime") {
   return runtimePath;
 }
 
+function canonicalPath(filePath) {
+  return fs.realpathSync.native(filePath);
+}
+
 function resolveRuntime(packageFullName, roots) {
   const powershell = path.join(process.env.SystemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
   const script = [
@@ -46,7 +50,7 @@ test("runtime resolver prefers an exact package match across every cache root", 
     addRuntime(first, "OpenAI.Codex_26.721.4979.0_x64__test");
     const exact = addRuntime(second, currentPackage);
     const result = resolveRuntime(currentPackage, [first, second]);
-    assert.equal(result.cachedRuntimePath, exact);
+    assert.equal(canonicalPath(result.cachedRuntimePath), canonicalPath(exact));
     assert.equal(result.cachedPackageFullName, currentPackage);
     assert.equal(result.cacheMatch, "exact");
   } finally {
@@ -62,7 +66,7 @@ test("runtime resolver chooses the highest fallback version globally", { skip: p
     addRuntime(first, "OpenAI.Codex_26.721.9999.0_x64__test");
     const newest = addRuntime(second, "OpenAI.Codex_26.727.4000.0_x64__test");
     const result = resolveRuntime(currentPackage, [first, second]);
-    assert.equal(result.cachedRuntimePath, newest);
+    assert.equal(canonicalPath(result.cachedRuntimePath), canonicalPath(newest));
     assert.equal(result.cacheMatch, "fallback");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
