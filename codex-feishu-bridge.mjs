@@ -89,6 +89,12 @@ import {
 } from "./src/sessions/delete-selection.mjs";
 import { createSessionStore } from "./src/sessions/store.mjs";
 import {
+  evaluateThreadHealth,
+  markThreadHealthNotified,
+  normalizeThreadHealth,
+  recordThreadHealthSample,
+} from "./src/sessions/thread-health.mjs";
+import {
   discoverCodexHomeRegistry,
   loadRegisteredBridgeBindings,
   removeThreadFromRegisteredBridgeSessions,
@@ -183,6 +189,11 @@ const CONFIG = {
   sidebarReconcileIntervalMs: parseDurationMs(process.env.CODEX_FEISHU_SIDEBAR_RECONCILE_INTERVAL_MS, 60_000),
   syncSessionsFromCodex: (process.env.CODEX_FEISHU_SYNC_SESSIONS_FROM_CODEX || "1") !== "0",
   keepEmptySessionMs: Number(process.env.CODEX_FEISHU_KEEP_EMPTY_SESSION_MS || `${10 * 60_000}`),
+  threadHealthReminder: (process.env.CODEX_FEISHU_THREAD_HEALTH_REMINDER || "1") !== "0",
+  threadHealthWarningBytes: Number(process.env.CODEX_FEISHU_THREAD_HEALTH_WARNING_MB || "120") * 1_000_000,
+  threadHealthCriticalBytes: Number(process.env.CODEX_FEISHU_THREAD_HEALTH_CRITICAL_MB || "200") * 1_000_000,
+  threadHealthWarningResumeMs: parseDurationMs(process.env.CODEX_FEISHU_THREAD_HEALTH_WARNING_RESUME_MS, 30_000),
+  threadHealthCriticalResumeMs: parseDurationMs(process.env.CODEX_FEISHU_THREAD_HEALTH_CRITICAL_RESUME_MS, 60_000),
   codexHome: CODEX_HOME_PATH,
   desktopCodexHome: DESKTOP_CODEX_HOME_PATH,
 };
@@ -359,6 +370,13 @@ const PROVIDER_BUNDLES = [
     provider: "mimo2codex",
     model: "deepseek-v4-flash",
     reasoning: "medium",
+  },
+  {
+    id: "deepseek-direct-flash",
+    name: "DeepSeek Official Responses / V4 Flash",
+    provider: "deepseek-direct",
+    model: "deepseek-v4-flash",
+    reasoning: "high",
   },
   {
     id: "m2c-apideepseek",
@@ -581,6 +599,7 @@ async function resetCurrentSession(chatId) {
   session.lastContextPeakUsage = null;
   session.lastCompactedAt = null;
   session.lastThreadStatus = "";
+  session.threadHealth = null;
   session.updatedAt = Date.now();
   saveSessions();
   return session;
@@ -600,6 +619,7 @@ function normalizeSessionData(session) {
     lastContextPeakUsage: normalizeContextUsage(session?.lastContextPeakUsage),
     lastCompactedAt: Number(session?.lastCompactedAt) || null,
     lastThreadStatus: typeof session?.lastThreadStatus === "string" ? session.lastThreadStatus : "",
+    threadHealth: normalizeThreadHealth(session?.threadHealth, session?.codexThreadId),
     lastGoal: normalizeGoal(session?.lastGoal),
     lastFailure: normalizeFailure(session?.lastFailure),
     modelOverride: cleanOverride(session?.modelOverride),
@@ -1614,6 +1634,7 @@ function materializeSessionForChat(chatId, entry) {
       lastContextPeakUsage: entry?.lastContextPeakUsage || null,
       lastCompactedAt: entry?.lastCompactedAt || null,
       lastThreadStatus: entry?.lastThreadStatus || "",
+      threadHealth: entry?.threadHealth || null,
     });
     chatState.sessions.unshift(match);
   }
@@ -1734,6 +1755,7 @@ function createSessionData(title) {
     lastContextPeakUsage: null,
     lastCompactedAt: null,
     lastThreadStatus: "",
+    threadHealth: null,
     providerBundleOverride: "",
   };
 }
@@ -6100,6 +6122,7 @@ async function runCodexAppServer(event, session, state = null, onState = null, o
       tokens: tokenStringFromState(liveState),
       mode: "app-server",
       threadId,
+      threadResumeMs: threadReadyAt - initializedAt,
     };
   } catch (error) {
     discardClient = true;
@@ -6749,6 +6772,8 @@ async function handleEvent(rawEvent, dispatchControl = {}) {
         messageId,
       );
     }
+    if (activeRunRecorded) clearActiveRun(messageId);
+    await maybeSendThreadHealthReminder(chatId, messageId, session, result);
     log("INFO", "message answered", { messageId, sessionId: session.id, durationMs: result.durationMs });
   } catch (error) {
     if (stoppedJobs.has(messageId)) {
@@ -8717,6 +8742,109 @@ function formatAnswer(result, session) {
 function formatDuration(ms) {
   if (ms < 1000) return `${ms}ms`;
   return `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)}s`;
+}
+
+function threadHealthThresholds() {
+  return {
+    warningBytes: CONFIG.threadHealthWarningBytes,
+    criticalBytes: CONFIG.threadHealthCriticalBytes,
+    warningResumeMs: CONFIG.threadHealthWarningResumeMs,
+    criticalResumeMs: CONFIG.threadHealthCriticalResumeMs,
+  };
+}
+
+function formatThreadHealthMegabytes(bytes) {
+  if (bytes === null || bytes === undefined || bytes === "") return "未知";
+  const value = Number(bytes);
+  return Number.isFinite(value) && value >= 0 ? `${(value / 1_000_000).toFixed(1)} MB` : "未知";
+}
+
+function threadHealthReminderMarkdown(assessment) {
+  const samples = assessment.samples.map((value) => `${Math.round(value / 1000)} 秒`).join("、");
+  const urgent = assessment.level >= 2;
+  return [
+    urgent ? "**当前会话初始化明显变慢**" : "**会话健康提醒**",
+    "",
+    `线程记录：${formatThreadHealthMegabytes(assessment.rolloutBytes)}`,
+    samples ? `最近 ${assessment.samples.length} 次初始化：${samples}` : "",
+    "",
+    urgent
+      ? "当前线程已经达到建议切换的级别。这个时间只统计本地线程恢复，不包含模型生成和 Provider 网络耗时。"
+      : "线程记录和初始化时间已同时达到提醒阈值，后续可能继续变慢。",
+    "",
+    "建议在合适的时候发送 `/new` 开启新会话。",
+    "旧会话不会删除，之后仍可通过 `/list` 和 `/switch` 返回。",
+    urgent ? "达到新的提醒级别前，本线程不会重复提示。" : "本线程进入更高提醒级别前不会重复提示。",
+  ].filter(Boolean).join("\n");
+}
+
+async function maybeSendThreadHealthReminder(chatId, messageId, session, result) {
+  if (!CONFIG.threadHealthReminder || result?.mode !== "app-server") return;
+  const threadId = String(result?.threadId || session?.codexThreadId || "").trim();
+  const resumeMs = Number(result?.threadResumeMs);
+  if (!threadId || !Number.isFinite(resumeMs) || resumeMs < 0) return;
+
+  let rolloutBytes;
+  try {
+    const info = await loadCodexThreadResumeInfo(threadId);
+    if (info.rolloutPath && fs.existsSync(info.rolloutPath)) {
+      rolloutBytes = fs.statSync(info.rolloutPath).size;
+    }
+  } catch (error) {
+    log("WARN", "thread health rollout inspection failed", {
+      messageId,
+      sessionId: session.id,
+      threadId,
+      error: String(error?.message || error).slice(0, 1000),
+    });
+  }
+
+  const thresholds = threadHealthThresholds();
+  session.threadHealth = recordThreadHealthSample(session.threadHealth, {
+    threadId,
+    resumeMs,
+    rolloutBytes,
+  }, thresholds);
+  saveSessions();
+  const assessment = evaluateThreadHealth(session.threadHealth, thresholds);
+  log("INFO", "thread health evaluated", {
+    messageId,
+    sessionId: session.id,
+    threadId,
+    rolloutBytes: assessment.rolloutBytes,
+    resumeMs,
+    medianResumeMs: assessment.medianResumeMs,
+    level: assessment.level,
+    notifiedLevel: assessment.notifiedLevel,
+    reason: assessment.reason,
+  });
+  if (!assessment.shouldNotify) return;
+
+  try {
+    await sendMarkdown(
+      chatId,
+      threadHealthReminderMarkdown(assessment),
+      `thread-health-${assessment.level}`,
+      messageId,
+    );
+    session.threadHealth = markThreadHealthNotified(session.threadHealth, assessment.level);
+    saveSessions();
+    log("INFO", "thread health reminder sent", {
+      messageId,
+      sessionId: session.id,
+      threadId,
+      level: assessment.level,
+      reason: assessment.reason,
+    });
+  } catch (error) {
+    log("WARN", "thread health reminder failed", {
+      messageId,
+      sessionId: session.id,
+      threadId,
+      level: assessment.level,
+      error: String(error?.message || error).slice(0, 1000),
+    });
+  }
 }
 
 function formatNumber(value) {
