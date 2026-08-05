@@ -192,7 +192,8 @@ const CONFIG = {
   threadHealthReminder: (process.env.CODEX_FEISHU_THREAD_HEALTH_REMINDER || "1") !== "0",
   threadHealthWarningBytes: Number(process.env.CODEX_FEISHU_THREAD_HEALTH_WARNING_MB || "120") * 1_000_000,
   threadHealthCriticalBytes: Number(process.env.CODEX_FEISHU_THREAD_HEALTH_CRITICAL_MB || "200") * 1_000_000,
-  threadHealthWarningResumeMs: parseDurationMs(process.env.CODEX_FEISHU_THREAD_HEALTH_WARNING_RESUME_MS, 30_000),
+  threadHealthWarningResumeMs: parseDurationMs(process.env.CODEX_FEISHU_THREAD_HEALTH_WARNING_RESUME_MS, 15_000),
+  threadHealthPersistentResumeMs: parseDurationMs(process.env.CODEX_FEISHU_THREAD_HEALTH_PERSISTENT_RESUME_MS, 30_000),
   threadHealthCriticalResumeMs: parseDurationMs(process.env.CODEX_FEISHU_THREAD_HEALTH_CRITICAL_RESUME_MS, 60_000),
   codexHome: CODEX_HOME_PATH,
   desktopCodexHome: DESKTOP_CODEX_HOME_PATH,
@@ -8749,6 +8750,7 @@ function threadHealthThresholds() {
     warningBytes: CONFIG.threadHealthWarningBytes,
     criticalBytes: CONFIG.threadHealthCriticalBytes,
     warningResumeMs: CONFIG.threadHealthWarningResumeMs,
+    persistentResumeMs: CONFIG.threadHealthPersistentResumeMs,
     criticalResumeMs: CONFIG.threadHealthCriticalResumeMs,
   };
 }
@@ -8762,15 +8764,18 @@ function formatThreadHealthMegabytes(bytes) {
 function threadHealthReminderMarkdown(assessment) {
   const samples = assessment.samples.map((value) => `${Math.round(value / 1000)} 秒`).join("、");
   const urgent = assessment.level >= 2;
+  const persistentOnly = assessment.reason === "warning_persistent_resume";
   return [
-    urgent ? "**当前会话初始化明显变慢**" : "**会话健康提醒**",
+    urgent ? "**当前会话建议切换**" : "**会话健康提醒**",
     "",
     `线程记录：${formatThreadHealthMegabytes(assessment.rolloutBytes)}`,
-    samples ? `最近 ${assessment.samples.length} 次初始化：${samples}` : "",
+    samples ? `最近 ${assessment.samples.length} 次本地线程恢复：${samples}` : "",
     "",
     urgent
       ? "当前线程已经达到建议切换的级别。这个时间只统计本地线程恢复，不包含模型生成和 Provider 网络耗时。"
-      : "线程记录和初始化时间已同时达到提醒阈值，后续可能继续变慢。",
+      : persistentOnly
+        ? "最近几次本地线程恢复持续偏慢，即使线程记录尚未达到大小阈值，也建议留意后续速度。"
+        : "线程记录和本地线程恢复时间已同时达到提醒阈值，后续可能继续变慢。",
     "",
     "建议在合适的时候发送 `/new` 开启新会话。",
     "旧会话不会删除，之后仍可通过 `/list` 和 `/switch` 返回。",

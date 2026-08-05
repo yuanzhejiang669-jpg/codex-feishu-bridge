@@ -1770,3 +1770,19 @@ Release and rollout evidence:
 - The Hotmail-tailnet lab Windows device upgraded to `0.8.10` but a normal Start Menu launch remained windowless for more than 90 seconds. The process was in the logged-in Explorer session with no background flags, but had no renderer process or window handle.
 - The packaged smoke path completed in about one second, isolating the delay to runtime-service startup after state discovery rather than the shortcut, installation, single-instance lock, or state scan.
 - Moved full IPC registration and initial window creation ahead of protocol-proxy startup, while sharing the first state promise between the renderer and runtime initializer.
+
+## 2026-08-05 - 0.8.15 thread-health warning refinement
+
+- Changed the combined warning signal to 120 MB plus a 15-second median across the latest three local thread resumes.
+- Added an independent warning for three consecutive local resumes of at least 30 seconds; rollout size is not required for this path.
+- Preserved the critical conditions at 200 MB or two consecutive 60-second local resumes, with one notification per thread severity level.
+- Updated the Feishu reminder to distinguish persistent resume slowdown from the combined size-and-time signal and to avoid attributing local resume time to Provider or model latency.
+- Added focused boundary, missing-rollout, reminder-state, and configuration-normalization regression coverage. Release, packaging, GitHub publication, and device rollout evidence will be appended after verification.
+
+Adversarial review covered the three most likely failures after several months:
+
+1. A future environment override could invert ordinary and critical resume thresholds. Configuration normalization now raises the critical threshold to at least both ordinary thresholds; the inverted-config regression passes.
+2. Rollout stat discovery could temporarily fail or its path could move. The independent three-resume warning does not require rollout size; a missing-rollout regression confirms it still warns while preserving size as unknown.
+3. Operators could mistake local resume delay for Provider/model latency, or a size-only critical warning could claim initialization was slow. Reminder copy now names local thread resume explicitly, varies by trigger reason, and uses a neutral critical title.
+
+Local verification passed 106 root tests and 193 desktop tests with three expected platform skips.

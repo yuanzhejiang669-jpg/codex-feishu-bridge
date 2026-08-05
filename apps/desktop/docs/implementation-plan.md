@@ -584,3 +584,11 @@ These risks are addressed with protocol versioning, active-run guards, transacti
 - Register desktop IPC and create the initial window before awaiting protocol-proxy or recovery-service startup.
 - Coalesce the renderer's initial state request with runtime initialization so cold start does not duplicate state discovery.
 - Keep the normal installed shortcut and single-instance behavior while guaranteeing a visible initialization surface on slow devices.
+
+### 0.8.15 thread-health warning refinement
+
+- Warn when a thread is at least 120 decimal MB and the median of its latest three local resume times is at least 15 seconds.
+- Also warn when the latest three local resume times are each at least 30 seconds, even when rollout size is unavailable or below 120 MB.
+- Keep the critical recommendation at 200 decimal MB or two consecutive local resume times of at least 60 seconds.
+- Measure local thread resume only; exclude model generation and Provider network latency from the signal and describe the trigger accurately in Feishu.
+- Notify once per thread severity level, never force `/new`, and preserve existing session history and Bot state.

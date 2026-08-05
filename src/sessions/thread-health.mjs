@@ -1,6 +1,7 @@
 const DEFAULT_WARNING_BYTES = 120 * 1_000_000;
 const DEFAULT_CRITICAL_BYTES = 200 * 1_000_000;
-const DEFAULT_WARNING_RESUME_MS = 30_000;
+const DEFAULT_WARNING_RESUME_MS = 15_000;
+const DEFAULT_PERSISTENT_RESUME_MS = 30_000;
 const DEFAULT_CRITICAL_RESUME_MS = 60_000;
 const DEFAULT_SAMPLE_WINDOW = 3;
 const DEFAULT_CRITICAL_SAMPLE_COUNT = 2;
@@ -29,8 +30,13 @@ export function normalizeThreadHealthConfig(config = {}) {
     positiveNumber(config.criticalBytes, DEFAULT_CRITICAL_BYTES),
   );
   const warningResumeMs = positiveNumber(config.warningResumeMs, DEFAULT_WARNING_RESUME_MS);
+  const persistentResumeMs = positiveNumber(
+    config.persistentResumeMs,
+    DEFAULT_PERSISTENT_RESUME_MS,
+  );
   const criticalResumeMs = Math.max(
     warningResumeMs,
+    persistentResumeMs,
     positiveNumber(config.criticalResumeMs, DEFAULT_CRITICAL_RESUME_MS),
   );
   const sampleWindow = positiveInteger(config.sampleWindow, DEFAULT_SAMPLE_WINDOW);
@@ -42,6 +48,7 @@ export function normalizeThreadHealthConfig(config = {}) {
     warningBytes,
     criticalBytes,
     warningResumeMs,
+    persistentResumeMs,
     criticalResumeMs,
     sampleWindow,
     criticalSampleCount,
@@ -102,6 +109,8 @@ export function evaluateThreadHealth(value, config = {}) {
     && health.rolloutBytes >= thresholds.warningBytes
     && samples.length === thresholds.sampleWindow
     && medianResumeMs >= thresholds.warningResumeMs;
+  const warningByPersistentResume = samples.length === thresholds.sampleWindow
+    && samples.every((item) => item >= thresholds.persistentResumeMs);
 
   let level = 0;
   let reason = "healthy";
@@ -110,9 +119,11 @@ export function evaluateThreadHealth(value, config = {}) {
     reason = criticalBySize && criticalByResume
       ? "critical_size_and_resume"
       : criticalBySize ? "critical_size" : "critical_resume";
-  } else if (warningByCombinedSignal) {
+  } else if (warningByCombinedSignal || warningByPersistentResume) {
     level = 1;
-    reason = "warning_size_and_resume";
+    reason = warningByCombinedSignal && warningByPersistentResume
+      ? "warning_size_and_persistent_resume"
+      : warningByCombinedSignal ? "warning_size_and_resume" : "warning_persistent_resume";
   }
 
   return {
