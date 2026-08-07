@@ -1,40 +1,47 @@
-# 工作空间工厂
+# 工作空间与 Bot 队列
 
-工作空间工厂用于批量创建垂类 Bot，例如写作 Bot、百科 Bot、画图 Bot。它把过去需要手工执行的创建目录、迁移配置、注册飞书 APP、写入 profile、安装 watchdog、启动 Bridge 串成一个可跟踪队列。
+桌面客户端的“工作空间”页用于批量创建垂类 Bot，例如写作、百科或画图空间。它把工作目录、隔离 Codex Home、Provider、推理档位、MCP / Skills 迁移和飞书扫码注册组织成可恢复的队列。
 
-![工作空间工厂](assets/readme/workspace-factory.jpg)
+![工作空间页面](assets/desktop/workspaces.png)
 
 ## 推荐流程
 
-1. 在控制面板打开“工作空间工厂”。
-2. 填空间名、slug、起始序号、数量、Codex Home 目录名。
-3. 选择要从全局迁移的 Skills 和 MCP。
-4. 生成本地空间：创建 workspace、Codex Home、`config.toml`、必要目录。
-5. 逐个注册 Bot：每个 Bot 都会生成自己的二维码和 profile。
-6. 手机飞书扫码授权。
-7. 校验 scopes：以基准 profile 的实际 scopes 为准，不硬编码权限列表。
-8. 写入实例配置：写入 `bridge.instances.local.json`。
-9. 安装 watchdog。
-10. 启动 Bot。
+1. 打开客户端“工作空间”页，点击“新建空间 Bot”。
+2. 填写空间名称、slug、起始序号、数量和 Codex Home 名称。
+3. 选择空间默认 Provider、模型和推理档位。
+4. 选择是否复制工作空间 `AGENTS.md`，以及要迁移的 Skills 和 MCP。
+5. 先预览路径、配置来源和创建数量，再加入队列。
+6. 逐个 Bot 扫码创建飞书应用；队列保存进度，但不保存 App Secret、Token 或 API key。
+7. 创建完成后在“Bot”页检查并启动实例。
 
-## 并行与顺序
+每个队列项都有独立状态。某个 Bot 注册失败不会要求重做其他已完成项；取消扫码也不会把凭据写入残留文件。
 
-创建队列可以一次生成多个 Bot。实际扫码、补授权、写入和启动可以按单个 Bot 操作，不要求必须从第一个做到最后一个。每个 job 都应该显示自己的名称、profile、二维码、日志和当前状态。
+## Codex Home
 
-## 空间 Codex Home
-
-垂类空间建议使用独立 Codex Home，例如：
+同一垂类空间的多个 Bot 通常共享一个隔离 Codex Home：
 
 ```text
-C:\Users\<you>\Documents\Codex\codex-homes\codex-assistant-writing
+C:\Users\<you>\Documents\Codex\codex-homes\codex-space-writing
 ```
 
-这样空间 Bot 的配置、Skills、MCP 和会话状态不会直接污染全局 `.codex`。空间工厂默认不配置 `desktopCodexHome`，空间会话不会镜像到全局桌面侧边栏；`/list all` 也只聚合同一 Codex Home 下的 Bot 会话。
+它们会共享该空间的 Provider、模型选择、Skills、MCP 和会话库，但保留各自的飞书身份、workspace 和 Bridge 运行数据。不同 Codex Home 的会话不会出现在彼此的 `/list` 中。
 
-## Provider 同步
+## MCP 与 Skills
 
-Provider 以全局 `config.toml` 为源。同步时只复制可公开配置块，例如 provider name、base_url、wire_api、env_key。实际 API key 通过 Windows 用户环境变量读取，不写入空间 `config.toml`。
+创建前可以从全局 Codex Home 选择性迁移能力。创建后也可在“MCP / Skills”页重新预览源与目标库存，再补充迁移。
 
-## 卸载
+![MCP 与 Skills 迁移](assets/desktop/capabilities.png)
 
-卸载垂类 Bot 会清理本机 Bridge runtime、registration 记录、可选 workspace，并从本地实例配置移除。卸载整个空间会处理该 group 下的正式 Bot、残留 job 和可选 Codex Home。飞书开放平台应用需要用户在飞书后台自行删除。
+迁移只处理已选择的配置或目录，不会把环境变量中的 API key 写入公开配置。目标空间已有内容会先参与差异检查，避免无提示覆盖。
+
+## Provider
+
+空间默认 Provider 来自客户端可见的全局目录。实际密钥保存在操作系统凭据存储或环境变量中，不写入队列。改变整个空间的模型来源会生成预览，并在确认后清理会话级覆盖、重启空闲的客户端 Bot。
+
+## 删除
+
+删除单个 Bot 或整个空间前，客户端会展示将处理的 runtime、workspace、Codex Home 和 Provider 引用。活动任务会阻止破坏性操作。飞书开放平台中的应用仍需用户在飞书后台自行删除。
+
+## 旧网页工厂
+
+仓库中的旧网页控制面板仍保留工作空间工厂，供兼容脚本部署使用。新安装不需要先运行 `npm run panel`，也不需要手工安装 watchdog。

@@ -1,153 +1,78 @@
 # Codex 飞书 Bridge
 
-把飞书 Bot 接到本机 Codex 的 Windows Bridge。它负责接收飞书消息、下载附件、调用本机 `codex app-server`、把进度和结果回写到飞书，并提供一个本地控制面板管理 Bot、Provider、工作空间和运行状态。
+把飞书 Bot 接到本机 Codex。桌面客户端负责安装运行环境、创建或接管 Bot、管理工作空间与 Provider，并把飞书消息交给本机 `codex app-server`；任务进度、工具调用和最终结果会回写到飞书。
 
-> 当前项目面向个人本机部署和多 Bot 工作流，不是云端托管服务。仓库只保存代码、脚本、示例配置和公开文档；真实密钥、飞书 profile、运行日志、二维码、会话状态和本机实例配置不会提交。
+> 这是个人本机部署工具，不是云端托管服务。仓库只保存代码、示例配置和公开文档；真实密钥、飞书 profile、运行日志、二维码、会话状态和本机实例配置不会提交。
 
-Windows 用户可以从 GitHub Releases 下载 `Codex Feishu Bridge Setup.exe`。客户端内置 Node.js、lark-cli 和 Bridge 引擎；`v0.2.0` 之后的安装版通过“系统 -> 客户端更新”检查 GitHub 稳定发行版，后台下载，并在没有活动任务时重启安装。
+## 推荐安装方式
 
-## 界面预览
+Windows 用户从 [GitHub Releases](https://github.com/yuanzhejiang669-jpg/codex-feishu-bridge/releases) 下载最新的 `Codex Feishu Bridge Setup.exe` 并安装。客户端已内置 Node.js、lark-cli 和 Bridge 引擎，不需要先运行仓库里的 PowerShell 部署脚本。
 
-控制面板把多 Bot、watchdog、本地模型代理、Provider 和工作空间管理集中到一个本机网页里。
+安装后：
 
-![控制面板总览](docs/assets/readme/control-panel-overview.jpg)
+1. 打开 **Codex Feishu Bridge**。
+2. 在“系统”页确认 Codex、内置运行时和兼容性检查正常。
+3. 在“Bot”页新建 Bot，或接管已有脚本部署的 Bot。
+4. 需要多个垂类 Bot 时，在“工作空间”页创建队列并逐个扫码。
+5. 第三方模型在“Provider”页添加并实测，再分配给 Bot 或空间。
 
-每个 Bot 都可以单独查看 PID、active run、watchdog、最近运行模型和 Codex Desktop 侧边栏索引状态。
+客户端可在“系统 -> 客户端更新”检查 GitHub 稳定发行版。更新会后台下载，并在没有活动任务时安装；升级后会恢复原本启用的客户端 Bot。
 
-![Bot 运行状态](docs/assets/readme/bot-status.jpg)
+macOS 构建也在 Releases 提供，但当前测试包尚未签名和公证，需要用户明确允许打开；macOS 客户端内自动安装更新暂未开放。
 
-Provider 添加、测试、环境变量替换、同步到空间 Codex Home 和空闲 Bot 重启都在同一个安全操作区完成。
+## 客户端预览
 
-![Provider 与安全重启](docs/assets/readme/provider-operations.jpg)
+总览页集中显示 Codex 环境、在线 Bot 和活动任务。
 
-飞书对话卡片展示 Codex 任务进度、工具调用折叠和最终结果，长任务结束后只保留最近 20 个调用明细。
+![桌面客户端总览](docs/assets/desktop/overview.png)
+
+Bot 页支持新建、接管、启停、检查和安全重启。公开截图中的名称与路径均已替换为示例。
+
+![Bot 管理](docs/assets/desktop/bots.png)
+
+工作空间页管理空间 Bot 创建队列，每个 Bot 独立扫码，凭据不会写入队列文件。
+
+![工作空间](docs/assets/desktop/workspaces.png)
+
+MCP / Skills 页可以预览全局 Codex Home 与目标空间的差异，再选择性迁移。
+
+![MCP 与 Skills](docs/assets/desktop/capabilities.png)
+
+系统页提供更新、登录启动、托盘运行和运行时兼容性检查。
+
+![系统与更新](docs/assets/desktop/system.png)
+
+飞书对话卡片展示任务进度、工具调用折叠和最终结果，长任务结束后只保留最近 20 个调用明细。
 
 ![飞书运行卡片](docs/assets/readme/feishu-run-card.png)
 
 ## 核心能力
 
-- 飞书消息到本机 Codex：支持普通对话、继续当前线程、附件输入、图片/文件下载。
-- 公式混合渲染：简单行内 LaTeX 转成可复制字符；复杂独立公式生成局部图片；含复杂行内公式的段落由本机 KaTeX 排版，渲染或上传失败时保留原始 Markdown。
-- 多 Bot 实例：每个 Bot 独立飞书 profile、运行目录、日志、workspace、watchdog。
-- 会话命令：`/help`、`/list`、`/switch`、`/new`、`/delete`、`/confirm delete`、`/rename` 等。
-- 安全删除：先按 `/list` 序号生成 threadId 快照，二次确认后清理 Codex DB、rollout、索引、侧边栏状态和 Bridge 绑定。
-- 垂类空间：支持写作、百科、画图等空间 Bot，共用或独立 Codex Home；不同 Codex Home 的会话严格隔离，不再镜像到全局侧边栏。
-- 控制面板：查看进程、日志、Provider、MCP、工作空间工厂、Bot 卸载和空间卸载。
-- 自动注册辅助：生成飞书 Bot、写入 lark-cli profile、校验 scopes、安装 watchdog、启动实例。
-- Provider 同步：从全局 Codex 配置同步可枚举 provider 到空间 Codex Home，密钥走环境变量。
-- Windows watchdog：通过计划任务维持 Bridge、控制面板和可选本地代理进程。
+- 飞书消息到本机 Codex：普通对话、继续线程、任务补充、图片和文件附件。
+- 多 Bot 管理：每个 Bot 独立飞书身份、workspace、运行目录、日志和恢复策略。
+- 垂类空间：多个 Bot 可共享一个隔离 Codex Home，共用该空间的 Provider、Skills、MCP 和会话库。
+- Provider 管理：支持 OpenAI 登录、Responses Provider，以及通过内置 mimo2codex 适配的 Chat Completions Provider。
+- MCP / Skills 迁移：预览源与目标库存后选择性复制或链接，不自动暴露密钥。
+- 客户端更新：检查、后台下载、活动任务保护、安装后 Bot 恢复。
+- 安全会话管理：`/list`、`/switch`、`/new`、`/delete`、`/confirm delete`、`/rename`、`/steer`。
+- 公式混合渲染：简单 LaTeX 转可复制字符，复杂公式由本机 KaTeX 确定性渲染，失败时保留 Markdown。
+- 响应优化：飞书卡片创建与 Codex 启动并行，app-server 可在空闲窗口内热复用。
+- 旧消息保护：重启后跳过超过宽限窗口的积压事件，避免突然回复历史消息。
 
 ## 工作方式
 
 ```text
 飞书用户
   -> 飞书 Bot / lark-cli 事件
-  -> codex-feishu-bridge.mjs
+  -> Codex Feishu Bridge 引擎
   -> codex app-server --listen stdio://
   -> 本机 Codex Home / workspace / sessions
   -> Bridge 回写飞书卡片和文本
 ```
 
-每个 Bot 都是独立进程，但共用本仓库里的同一套 Bridge 代码。改 Bridge 源码后，已运行的 Bot 需要重启对应进程才会加载新代码。
-
-普通对话会让飞书卡片创建和 Codex 启动并行进行。初始化后的 app-server 使用独占租约保留一段空闲时间，后续热会话跳过重复进程启动和 `initialize`；同一个 stdio 客户端不会同时交给两个任务。默认热保留 15 分钟、池大小跟随消息并发数，也可以通过 `.env.example` 中的性能环境变量调整或恢复为每次冷启动。
-
-公式渲染只发生在最终卡片刷新阶段，不阻塞 Codex 启动和流式文字。Bridge 会保留普通正文，把简单公式转换成 Unicode；独立复杂公式单独生成图片，复杂行内公式所在段落生成局部图片，并在卡片底部折叠保留可复制的 LaTeX 源码。图片由本机 KaTeX 和 Edge/Chrome 确定性排版，不调用图片模型；浏览器、渲染或上传不可用时，回复自动退回原始 Markdown。
-
-Bridge 启动时还会建立事件时间水位线。超过重启宽限窗口的积压旧消息会被持久化标记并跳过，避免客户端升级或 Bot 重启后突然回复历史内容。
-
-## 环境要求
-
-- Windows 10/11
-- Node.js 20+
-- 已安装并可运行的 Codex CLI / Codex Desktop 对应 `codex.exe`
-- 已安装并登录的 `lark-cli`
-- 一个可用的飞书开放平台应用，或使用本项目的注册脚本辅助创建
-- PowerShell 5.1 或 PowerShell 7
-
-安装依赖：
-
-```powershell
-npm install
-```
-
-语法检查：
-
-```powershell
-npm run check
-```
-
-## 配置
-
-公开仓库里的 `bridge.instances.json` 是示例配置。真实设备请复制为本地配置：
-
-```powershell
-Copy-Item .\bridge.instances.json .\bridge.instances.local.json
-```
-
-然后修改 `bridge.instances.local.json` 里的本机路径、Bot 名、飞书 profile、workspace、Codex Home 和计划任务名。这个文件已被 `.gitignore` 忽略，不会提交。
-
-控制面板加载顺序：
-
-1. 环境变量 `CODEX_FEISHU_INSTANCES_CONFIG` 指向的文件
-2. 仓库根目录 `bridge.instances.local.json`
-3. 仓库根目录 `bridge.instances.json`
-4. 内置 fallback 配置
-
-## 启动一个 Bot
-
-示例：
-
-```powershell
-powershell.exe -NoProfile -File .\start-codex-feishu-bridge.ps1 `
-  -Name codex-assistant-1 `
-  -LarkProfile codex-assistant-1 `
-  -Workspace "$env:USERPROFILE\Documents\Codex\workspaces\feishu-bridge-codex-assistant-1" `
-  -CodexHome "$env:USERPROFILE\.codex"
-```
-
-停止：
-
-```powershell
-powershell.exe -NoProfile -File .\stop-codex-feishu-bridge.ps1 -Name codex-assistant-1
-```
-
-安装 watchdog：
-
-```powershell
-powershell.exe -NoProfile -File .\install-codex-feishu-watchdog.ps1 `
-  -Name codex-assistant-1 `
-  -LarkProfile codex-assistant-1 `
-  -Workspace "$env:USERPROFILE\Documents\Codex\workspaces\feishu-bridge-codex-assistant-1" `
-  -CodexHome "$env:USERPROFILE\.codex"
-```
-
-## 控制面板
-
-启动：
-
-```powershell
-npm run panel
-```
-
-默认地址：
-
-```text
-http://127.0.0.1:8320/
-```
-
-控制面板可以做这些事：
-
-- 查看每个 Bot 的 PID、watchdog、日志、active run、最近错误。
-- 新建垂类工作空间和 Bot 注册队列。
-- 展示注册二维码、补授权二维码和每个 job 的当前状态。
-- 写入实例配置、安装 watchdog、启动 Bot。
-- 添加 Provider、写入用户环境变量、同步 Provider 到空间。
-- 卸载垂类 Bot、清理未完成注册残留、卸载整个空间。
+每个 Bot 都有独立运行进程。桌面客户端负责进程生命周期、托盘运行、登录启动和限频恢复；底层 Bridge 引擎仍可被高级用户通过脚本单独运行。
 
 ## 飞书侧命令
-
-常用命令：
 
 ```text
 /help
@@ -162,28 +87,43 @@ http://127.0.0.1:8320/
 /provider list
 ```
 
-`/list` 会合并当前 Bot 绑定、同一 Codex Home 的其他 Bot 绑定、Codex DB、rollout 文件、`session_index.jsonl` 和 `.codex-global-state.json`，并标注来源；不会列出其他 Codex Home 的会话。`/delete` 只生成待删除快照，`/confirm delete` 才真正按 threadId 清理当前 Home 和同 Home Bridge 绑定，避免列表顺序变化造成误删或跨空间删除。
+`/delete` 只生成 threadId 快照，`/confirm delete` 才执行清理。删除范围限制在当前 Codex Home，不会跨空间删除会话。
 
-`/steer <补充内容>` 会把新要求追加到当前正在运行的 Codex turn，不进入普通消息队列，也不会创建新任务。当前没有可追加的原生 app-server turn 时，命令会明确拒绝且不执行降级操作。
+## 高级与兼容模式
+
+仓库根目录的 PowerShell 脚本、本地网页控制面板和 Windows watchdog 用于源码开发、诊断或维护旧脚本部署。新用户不需要先运行它们。
+
+源码环境要求：Windows 10/11、Node.js 20+、可运行的 Codex CLI、已登录的 lark-cli，以及 PowerShell 5.1 或 7。
+
+```powershell
+npm install
+npm run check
+npm run panel
+```
+
+网页控制面板默认监听 `http://127.0.0.1:8320/`。单 Bot 的脚本启动方式和本机实例配置见 [控制与高级运维](docs/control-panel.md)。
+
+## 配置与安全
+
+公开仓库中的 `bridge.instances.json` 只是示例。旧脚本部署的真实设备配置应放在被忽略的 `bridge.instances.local.json`；桌面客户端使用自己的版本化数据目录和加密凭据存储。
+
+不会提交：
+
+- `.env`、API key、token、飞书 app secret、cookie
+- `.lark-cli/`、`.codex/`、真实 `config.toml`
+- `bridge.instances.local.json`
+- runtime state、日志、PID、二维码和授权页面
+- Codex 会话数据库、rollout、附件和真实 workspace 内容
 
 ## 文档
 
-- [个人环境迁移](docs/personal-environment-migration.md)
-- [架构说明](docs/architecture.md)
-- [控制面板](docs/control-panel.md)
-- [工作空间工厂](docs/workspace-factory.md)
+- [桌面客户端与高级控制](docs/control-panel.md)
+- [工作空间与 Bot 队列](docs/workspace-factory.md)
 - [配置与安全边界](docs/configuration-and-security.md)
+- [架构说明](docs/architecture.md)
 - [故障排查](docs/troubleshooting.md)
-- [极致响应改造规划](docs/bridge-performance-plan.md)
-- [极致响应执行记录](docs/bridge-performance-execution.md)
-
-## 不会提交的内容
-
-- `.env`、密钥、token、飞书 app secret、API key
-- `.lark-cli/`、`.codex/`、真实 `config.toml`
-- `bridge.instances.local.json`
-- runtime state、日志、PID、二维码、授权页面
-- Codex 会话数据库、rollout、附件和 workspace 真实内容
+- [个人环境迁移](docs/personal-environment-migration.md)
+- [桌面端开发说明](apps/desktop/README.md)
 
 ## 许可证
 
