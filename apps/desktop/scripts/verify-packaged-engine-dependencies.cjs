@@ -7,6 +7,7 @@ function verifyPackagedEngineDependencies({ engineRoot, nodeRuntime, runFormulaS
   const required = [
     path.join(engineRoot, "node_modules", "katex", "package.json"),
     path.join(engineRoot, "node_modules", "katex", "dist", "fonts", "KaTeX_Main-Regular.woff2"),
+    path.join(engineRoot, "node_modules", "markdown-it", "package.json"),
     path.join(engineRoot, "node_modules", "playwright-core", "package.json"),
     path.join(engineRoot, "scripts", "check-formula-runtime-dependencies.mjs"),
     nodeRuntime,
@@ -37,7 +38,7 @@ function verifyPackagedEngineDependencies({ engineRoot, nodeRuntime, runFormulaS
         windowsHide: true,
       });
       const result = JSON.parse(String(output || "").trim());
-      if (result.skipped || result.stats?.rendered !== 3 || result.stats?.failed !== 0) {
+      if (result.skipped || result.stats?.rendered !== 4 || result.stats?.failed !== 0) {
         throw new Error(`Packaged formula renderer smoke failed: ${JSON.stringify(result)}`);
       }
     }

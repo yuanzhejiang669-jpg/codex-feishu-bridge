@@ -24,6 +24,7 @@
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.66.1",
     "katex": "^0.16.22",
+    "markdown-it": "^15.0.0",
     "playwright-core": "^1.55.0",
     "qrcode": "^1.5.4"
   },

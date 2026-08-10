@@ -1,4 +1,5 @@
 import katex from "katex";
+import MarkdownIt from "markdown-it";
 import { chromium } from "playwright-core";
 
 const rendered = katex.renderToString(String.raw`\frac{P_s}{P_n}`, {
@@ -7,7 +8,9 @@ const rendered = katex.renderToString(String.raw`\frac{P_s}{P_n}`, {
   throwOnError: true,
 });
 
-if (!rendered.includes("katex") || typeof chromium?.launch !== "function") {
+const table = new MarkdownIt({ html: false }).render("| A | B |\n|---|---|\n| 1 | 2 |");
+
+if (!rendered.includes("katex") || !table.includes("<table>") || typeof chromium?.launch !== "function") {
   throw new Error("Formula runtime dependencies are incomplete");
 }
 

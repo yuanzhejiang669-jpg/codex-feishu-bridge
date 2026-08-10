@@ -40,6 +40,11 @@ try {
         "",
         "复杂行内公式 \\(p(\\theta\\mid D)=\\frac{p(D\\mid\\theta)p(\\theta)}{p(D)}\\) 应渲染所在段落。",
         "",
+        "| 对比项 | 电子 | 光子 |",
+        "|---|---|---|",
+        "| 静止能量 | \\(E_0=m_ec^2\\) | \\(E=h\\nu\\) |",
+        "| 动量关系 | \\(p=mv\\) | \\(p=\\frac{h}{\\lambda}\\) |",
+        "",
         "\\[\\sum_{i=1}^{n}\\lVert x_i-\\mu\\rVert_2^2\\]",
       ].join("\n"),
       streaming: false,
@@ -53,10 +58,10 @@ try {
       streaming: false,
     },
   ]);
-  assert.equal(result.stats.rendered, 3);
+  assert.equal(result.stats.rendered, 4);
   assert.equal(result.stats.failed, 0);
-  assert.equal(uploads.length, 3);
-  assert.equal(result.blocks.filter((block) => block.kind === "formula_image").length, 3);
+  assert.equal(uploads.length, 4);
+  assert.equal(result.blocks.filter((block) => block.kind === "formula_image").length, 4);
   assert.equal(result.sources.includes("1"), true);
   assert.match(result.blocks.find((block) => block.kind === "text")?.content || "", /x²\+y²=1/);
   assert.match(result.blocks.find((block) => block.kind === "text")?.content || "", /数字公式 1/);

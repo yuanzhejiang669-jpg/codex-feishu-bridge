@@ -3,12 +3,15 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import MarkdownIt from "markdown-it";
 
 import {
+  createFormulaMarkdownRenderer,
   createFormulaImageService,
   isComplexLatex,
   planDenseFormulaRendering,
   planFormulaRendering,
+  renderMixedHtml,
   scanLatexFormulas,
   simplifyInlineLatex,
 } from "../src/feishu/cards/formula-renderer.mjs";
@@ -59,6 +62,60 @@ test("a prose paragraph with complex inline formulas becomes one paragraph image
   assert.equal(plans[0].kind, "image");
   assert.equal(plans[0].mode, "inline-paragraph");
   assert.equal(plans[0].formulas.length, 2);
+});
+
+test("markdown tables retain their structure and KaTeX formulas", () => {
+  const markdown = createFormulaMarkdownRenderer(MarkdownIt);
+  const katex = {
+    renderToString: (latex) => `<span class="katex-test">${latex}</span>`,
+  };
+  const source = [
+    "| 对比项 | 电子 | 光子 |",
+    "|---|---:|:---|",
+    String.raw`| 静止能量 | \(E_0=m_ec^2\) | \(E=h\nu\) |`,
+    String.raw`| 条件概率 | \(P(A\mid B)=\frac{P(A\cap B)}{P(B)}\) | 不适用 |`,
+  ].join("\n");
+
+  const html = renderMixedHtml(source, katex, markdown);
+  assert.match(html, /<table>/);
+  assert.match(html, /<th>对比项<\/th>/);
+  assert.match(html, /text-align:right/);
+  assert.match(html, /class="katex-test">E_0=m_ec\^2<\/span>/);
+  assert.match(html, /P\(A\\mid B\)=\\frac/);
+  assert.doesNotMatch(html, /\|---\|/);
+  assert.doesNotMatch(html, /CODEXFORMULATOKEN/);
+});
+
+test("formula placeholders cannot collide with user text or enable raw HTML", () => {
+  const markdown = createFormulaMarkdownRenderer(MarkdownIt);
+  const katex = { renderToString: (latex) => `<span class="katex-test">${latex}</span>` };
+  const source = [
+    "| 名称 | 内容 |",
+    "|---|---|",
+    String.raw`| CODEXFORMULATOKEN0END | \(\frac{a}{b}\) <script>alert(1)</script> |`,
+  ].join("\n");
+
+  const html = renderMixedHtml(source, katex, markdown);
+  assert.match(html, /CODEXFORMULATOKEN0END/);
+  assert.match(html, /class="katex-test">\\frac\{a\}\{b\}<\/span>/);
+  assert.doesNotMatch(html, /<script>/);
+  assert.match(html, /&lt;script&gt;/);
+});
+
+test("formula table rendering never fetches remote links or images", () => {
+  const markdown = createFormulaMarkdownRenderer(MarkdownIt);
+  const katex = { renderToString: (latex) => `<span class="katex-test">${latex}</span>` };
+  const source = [
+    "| 名称 | 内容 |",
+    "|---|---|",
+    String.raw`| 公式 | \(\frac{a}{b}\) [说明](https://example.com) ![远程图](https://example.com/a.png) |`,
+  ].join("\n");
+
+  const html = renderMixedHtml(source, katex, markdown);
+  assert.match(html, /说明/);
+  assert.match(html, /远程图/);
+  assert.doesNotMatch(html, /<(?:a|img)\b/);
+  assert.doesNotMatch(html, /https:\/\//);
 });
 
 test("display formulas become isolated images while surrounding prose stays native", () => {

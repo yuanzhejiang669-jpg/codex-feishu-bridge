@@ -20,6 +20,7 @@ test("staged desktop Bridge engine includes formula runtime dependencies", () =>
   for (const relativePath of [
     "node_modules/katex/package.json",
     "node_modules/katex/dist/fonts/KaTeX_Main-Regular.woff2",
+    "node_modules/markdown-it/package.json",
     "node_modules/playwright-core/package.json",
     "scripts/check-formula-runtime-dependencies.mjs",
   ]) {

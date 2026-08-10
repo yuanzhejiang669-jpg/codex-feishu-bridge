@@ -263,7 +263,7 @@ export function createFormulaImageService({
     let failed = 0;
     const deadline = Date.now() + Math.max(2_000, Number(renderTimeoutMs || 20_000));
     try {
-      const { katex, chromium } = await loadFormulaDependencies();
+      const { katex, chromium, markdown } = await loadFormulaDependencies();
       browser = await chromium.launch({
         executablePath: resolvedBrowser,
         headless: true,
@@ -300,7 +300,7 @@ export function createFormulaImageService({
           const fileName = `formula-${process.pid}-${Date.now()}-${crypto.randomUUID()}.png`;
           const imagePath = path.join(tempDir, fileName);
           try {
-            const html = formulaCaptureHtml(plan, katex);
+            const html = formulaCaptureHtml(plan, katex, markdown);
             await page.setContent(html, { waitUntil: "load", timeout: Math.max(1_000, deadline - Date.now()) });
             await page.locator(".capture").screenshot({
               path: imagePath,
@@ -542,10 +542,10 @@ function pushOutputBlock(output, plan) {
   else output.push({ kind: "text", content, streaming: false });
 }
 
-function formulaCaptureHtml(plan, katex) {
+function formulaCaptureHtml(plan, katex, markdown) {
   const body = plan.mode === "block"
     ? katex.renderToString(plan.formulas[0].latex, { displayMode: true, throwOnError: false, strict: "ignore" })
-    : renderMixedHtml(plan.content, katex);
+    : renderMixedHtml(plan.content, katex, markdown);
   const css = embeddedKatexCss();
   const compact = plan.mode === "block";
   return `<!doctype html>
@@ -564,6 +564,10 @@ body{font-family:"Microsoft YaHei","PingFang SC","Segoe UI",sans-serif;color:#1f
 .paragraph strong{font-weight:700}
 .paragraph h1,.paragraph h2,.paragraph h3{margin:.35em 0 .25em;font-weight:700;line-height:1.35}
 .paragraph h1{font-size:1.28em}.paragraph h2{font-size:1.18em}.paragraph h3{font-size:1.1em}
+.paragraph table{width:100%;margin:8px 0;border-collapse:collapse;table-layout:auto;font-size:.9em;line-height:1.55}
+.paragraph th,.paragraph td{padding:12px 14px;border:1px solid #c8d3e8;text-align:left;vertical-align:top;overflow-wrap:anywhere}
+.paragraph th{background:#eef3ff;font-weight:700}
+.paragraph tr:nth-child(even) td{background:#fafcff}
 .display-formula{display:flex;align-items:center;justify-content:center;min-height:120px;margin:18px 0;padding:18px 12px;background:#f8faff;border-radius:12px;overflow:hidden}
 .katex{font-size:1.02em}
 .katex-display{margin:0}
@@ -573,22 +577,62 @@ body{font-family:"Microsoft YaHei","PingFang SC","Segoe UI",sans-serif;color:#1f
 </html>`;
 }
 
-function renderMixedHtml(content, katex) {
+export function renderMixedHtml(content, katex, markdown) {
   const formulas = scanLatexFormulas(content);
-  let html = "";
+  const markerPrefix = formulaMarkerPrefix(content);
+  const renderedFormulas = [];
+  let protectedMarkdown = "";
   let cursor = 0;
-  for (const formula of formulas) {
-    html += basicMarkdownHtml(content.slice(cursor, formula.start));
+  for (const [index, formula] of formulas.entries()) {
+    protectedMarkdown += content.slice(cursor, formula.start);
     const rendered = katex.renderToString(formula.latex, {
       displayMode: formula.display,
       throwOnError: false,
       strict: "ignore",
     });
-    html += formula.display ? `<div class="display-formula">${rendered}</div>` : rendered;
+    renderedFormulas.push(formula.display ? `<span class="display-formula">${rendered}</span>` : rendered);
+    protectedMarkdown += `${markerPrefix}${index}END`;
     cursor = formula.end;
   }
-  html += basicMarkdownHtml(content.slice(cursor));
+  protectedMarkdown += content.slice(cursor);
+
+  let html = containsMarkdownTable(protectedMarkdown) && markdown
+    ? markdown.render(protectedMarkdown)
+    : basicMarkdownHtml(protectedMarkdown);
+  for (const [index, rendered] of renderedFormulas.entries()) {
+    html = html.split(`${markerPrefix}${index}END`).join(rendered);
+  }
   return html;
+}
+
+export function createFormulaMarkdownRenderer(MarkdownIt) {
+  const markdown = new MarkdownIt({
+    breaks: true,
+    html: false,
+    linkify: false,
+    typographer: false,
+  });
+  markdown.renderer.rules.image = (tokens, index) => escapeHtml(tokens[index]?.content || "");
+  markdown.renderer.rules.link_open = () => "";
+  markdown.renderer.rules.link_close = () => "";
+  return markdown;
+}
+
+function formulaMarkerPrefix(content) {
+  let prefix = "CODEXFORMULATOKEN";
+  while (String(content || "").includes(prefix)) prefix += "X";
+  return prefix;
+}
+
+function containsMarkdownTable(text) {
+  const lines = String(text || "").split(/\r?\n/);
+  for (let index = 1; index < lines.length; index += 1) {
+    if (!lines[index - 1].includes("|")) continue;
+    const delimiter = lines[index].trim().replace(/^\|/, "").replace(/\|$/, "");
+    const cells = delimiter.split("|").map((cell) => cell.trim());
+    if (cells.length >= 2 && cells.every((cell) => /^:?-{3,}:?$/.test(cell))) return true;
+  }
+  return false;
 }
 
 function basicMarkdownHtml(text) {
@@ -641,9 +685,11 @@ function loadFormulaDependencies() {
     formulaDependencyPromise = Promise.all([
       import("katex"),
       import("playwright-core"),
-    ]).then(([katexModule, playwright]) => ({
+      import("markdown-it"),
+    ]).then(([katexModule, playwright, markdownModule]) => ({
       katex: katexModule.default || katexModule,
       chromium: playwright.chromium,
+      markdown: createFormulaMarkdownRenderer(markdownModule.default || markdownModule),
     }));
   }
   return formulaDependencyPromise;
