@@ -94,6 +94,7 @@ import {
   normalizeThreadHealth,
   recordThreadHealthSample,
 } from "./src/sessions/thread-health.mjs";
+import { readThreadMetrics } from "./src/sessions/thread-metrics.mjs";
 import {
   discoverCodexHomeRegistry,
   loadRegisteredBridgeBindings,
@@ -8473,13 +8474,18 @@ function goalMarkdown(session, goal, title = "Codex goal") {
 async function statusMarkdown(chatId) {
   await syncChatSessionsWithCodex(chatId);
   const session = getSession(chatId);
-  const [eventStatus, authStatus, codexRuntimeStatus] = await Promise.all([
+  const [eventStatus, authStatus, codexRuntimeStatus, threadInfo] = await Promise.all([
     readEventStatus(),
     readAuthSummary(),
     readCodexRuntimeVersionStatus({ codexCli: CONFIG.codexCli, runTool }),
+    session.codexThreadId ? loadCodexThreadResumeInfo(session.codexThreadId) : null,
   ]);
   const job = activeCodexJobs.get(chatId);
   const context = sessionContextSummary(session);
+  const threadMetrics = readThreadMetrics(threadInfo?.rolloutPath || "");
+  const firstTokenSummary = threadMetrics.firstTokenSamplesMs.length
+    ? threadMetrics.firstTokenSamplesMs.map((value) => formatDuration(value)).join("、")
+    : "暂无";
   return [
     "**Codex Feishu Bot 状态**",
     "",
@@ -8488,6 +8494,8 @@ async function statusMarkdown(chatId) {
     `登录授权：${authStatus}`,
     `当前聊天绑定：${session.title || "未命名会话"} (${session.id})`,
     `原生 thread：${session.codexThreadId ? `\`${session.codexThreadId}\`` : "未创建"}`,
+    `线程文件大小：${formatThreadHealthMegabytes(threadMetrics.rolloutBytes)}`,
+    `近 ${threadMetrics.firstTokenSamplesMs.length || 3} 次首 Token 延迟：${firstTokenSummary}`,
     `Goal：${goalSummary(session.lastGoal)}`,
     `上下文：${context}`,
     `运行中：${job ? `是，已运行 ${formatDuration(Date.now() - job.startedAt)}` : "否"}`,
@@ -8897,6 +8905,19 @@ function startConsumer() {
   });
 
   startSidebarReconciler();
+  const formulaWarmupDelayMs = 5_000 + crypto.randomInt(0, 55_001);
+  const formulaWarmupTimer = setTimeout(() => {
+    void formulaImageService.warmup().then((result) => {
+      log("INFO", "formula renderer warmup completed", { delayMs: formulaWarmupDelayMs, ...result });
+    }).catch((error) => {
+      log("WARN", "formula renderer warmup failed", {
+        delayMs: formulaWarmupDelayMs,
+        error: String(error?.message || error).slice(0, 1000),
+      });
+    });
+  }, formulaWarmupDelayMs);
+  formulaWarmupTimer.unref?.();
+  shutdownCallbacks.add(() => clearTimeout(formulaWarmupTimer));
   for (const eventKey of CONFIG.eventKeys) startEventConsumer(eventKey);
 
   const stopTimer = setInterval(() => {

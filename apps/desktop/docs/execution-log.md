@@ -1786,3 +1786,17 @@ Adversarial review covered the three most likely failures after several months:
 3. Operators could mistake local resume delay for Provider/model latency, or a size-only critical warning could claim initialization was slow. Reminder copy now names local thread resume explicitly, varies by trigger reason, and uses a neutral critical title.
 
 Local verification passed 106 root tests and 193 desktop tests with three expected platform skips.
+
+## 2026-08-14 - 0.8.17 status metrics and formula readiness
+
+- Added `/status` fields for the current rollout file size and the latest three model first-token delays. The first-token delay is read from native `task_complete.time_to_first_token_ms` events and remains separate from the local thread-resume time used by thread-health reminders.
+- Added bounded tail reading for rollout metrics. A real 130.54 MB rollout returned its latest three samples in about 6 ms without reading the complete file.
+- Added non-blocking, randomized formula-renderer warmup after Bot startup. A formal formula request shares an in-progress warmup, and its normal render timeout starts only after warmup completes.
+- Added display-formula safety space for complex subscripts. This protects the generated PNG edge but intentionally does not claim control over Feishu's mobile or desktop OCR overlays.
+- Root verification passes 113/113 tests. Desktop verification passes 193 tests with three expected platform skips. Release packaging, GitHub publication, and two-device rollout evidence will be appended after completion.
+
+Adversarial review covers the three most likely regressions after three months:
+
+1. Large rollout files could make `/status` block the Bot. The reader scans backward with a 32 MB ceiling, stops as soon as three samples are found, and has regression coverage for missing and partial-tail data.
+2. Many Bots could launch Chromium simultaneously after a desktop restart, or a shutting-down Bot could fire a stale warmup timer. Warmup is delayed by a per-process random 5-to-60-second interval, stays off the startup critical path, shares one Promise within each Bot, and its pending timer is canceled during shutdown.
+3. A failed warmup could permanently disable formulas or consume the normal screenshot deadline. Failed warmup state is cleared for retry, formal rendering keeps the existing readable fallback, and the screenshot deadline begins only after warmup succeeds.

@@ -119,4 +119,7 @@ test("Bridge records resume time, preserves reminder state, and clears active st
   assert.match(bridgeSource, /CODEX_FEISHU_THREAD_HEALTH_WARNING_RESUME_MS, 15_000/);
   assert.match(bridgeSource, /CODEX_FEISHU_THREAD_HEALTH_PERSISTENT_RESUME_MS, 30_000/);
   assert.match(bridgeSource, /最近.*次本地线程恢复/);
+  assert.match(bridgeSource, /近 .*次首 Token 延迟/);
+  assert.match(bridgeSource, /readThreadMetrics/);
+  assert.match(bridgeSource, /threadResumeMs: threadReadyAt - initializedAt/);
 });

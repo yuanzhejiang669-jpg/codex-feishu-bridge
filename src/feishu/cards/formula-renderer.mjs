@@ -212,6 +212,36 @@ export function createFormulaImageService({
   log = () => {},
 } = {}) {
   const resolvedBrowser = resolveFormulaBrowserExecutable(browserExecutable);
+  let warmupPromise;
+
+  function warmup() {
+    if (!enabled || !resolvedBrowser) {
+      return Promise.resolve({ enabled, browser: Boolean(resolvedBrowser), warmed: false });
+    }
+    if (!warmupPromise) {
+      warmupPromise = (async () => {
+        const startedAt = Date.now();
+        const { chromium } = await loadFormulaDependencies();
+        const browser = await chromium.launch({
+          executablePath: resolvedBrowser,
+          headless: true,
+          args: ["--disable-gpu", "--hide-scrollbars"],
+          timeout: Math.max(30_000, Number(renderTimeoutMs || 20_000) * 6),
+        });
+        try {
+          const page = await browser.newPage({ viewport: { width: 1200, height: 900 }, deviceScaleFactor: 1 });
+          await page.setContent("<!doctype html><meta charset=\"utf-8\"><div>ready</div>", { waitUntil: "load" });
+        } finally {
+          await browser.close().catch(() => {});
+        }
+        return { enabled: true, browser: true, warmed: true, durationMs: Date.now() - startedAt };
+      })().catch((error) => {
+        warmupPromise = undefined;
+        throw error;
+      });
+    }
+    return warmupPromise;
+  }
 
   async function enrichBlocks(blocks) {
     if (!enabled) {
@@ -261,9 +291,10 @@ export function createFormulaImageService({
     const sources = [];
     let rendered = 0;
     let failed = 0;
-    const deadline = Date.now() + Math.max(2_000, Number(renderTimeoutMs || 20_000));
     try {
+      await warmup();
       const { katex, chromium, markdown } = await loadFormulaDependencies();
+      const deadline = Date.now() + Math.max(2_000, Number(renderTimeoutMs || 20_000));
       browser = await chromium.launch({
         executablePath: resolvedBrowser,
         headless: true,
@@ -359,6 +390,7 @@ export function createFormulaImageService({
   return {
     browserExecutable: resolvedBrowser,
     enrichBlocks,
+    warmup,
   };
 }
 
@@ -568,9 +600,9 @@ body{font-family:"Microsoft YaHei","PingFang SC","Segoe UI",sans-serif;color:#1f
 .paragraph th,.paragraph td{padding:12px 14px;border:1px solid #c8d3e8;text-align:left;vertical-align:top;overflow-wrap:anywhere}
 .paragraph th{background:#eef3ff;font-weight:700}
 .paragraph tr:nth-child(even) td{background:#fafcff}
-.display-formula{display:flex;align-items:center;justify-content:center;min-height:120px;margin:18px 0;padding:18px 12px;background:#f8faff;border-radius:12px;overflow:hidden}
-.katex{font-size:1.02em}
-.katex-display{margin:0}
+  .display-formula{display:flex;align-items:center;justify-content:center;min-height:140px;margin:18px 0;padding:24px 18px 36px;background:#f8faff;border-radius:12px;overflow:visible}
+  .katex{font-size:1.02em}
+  .katex-display{margin:0;padding:.15em .2em .45em}
 </style>
 </head>
 <body><div class="capture"><div class="inner ${compact ? "block" : "paragraph"}">${body}</div></div></body>

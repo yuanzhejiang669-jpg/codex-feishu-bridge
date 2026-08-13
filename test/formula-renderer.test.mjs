@@ -232,6 +232,26 @@ test("renderer fallback never exposes raw LaTeX when image upload is unavailable
   assert.equal(result.stats.failed, 2);
 });
 
+test("formula service exposes shared warmup and display formulas reserve subscript space", async () => {
+  const service = createFormulaImageService({ enabled: false });
+  assert.equal(typeof service.warmup, "function");
+  const [first, second] = await Promise.all([service.warmup(), service.warmup()]);
+  assert.deepEqual(first, second);
+  assert.equal(first.enabled, false);
+  assert.equal(first.warmed, false);
+
+  const source = fs.readFileSync(new URL("../src/feishu/cards/formula-renderer.mjs", import.meta.url), "utf8");
+  assert.match(source, /\.display-formula\{[^\n]*padding:24px 18px 36px[^\n]*overflow:visible/);
+  assert.match(source, /\.katex-display\{margin:0;padding:\.15em \.2em \.45em\}/);
+});
+
+test("Bridge schedules formula warmup off the startup critical path", () => {
+  const source = fs.readFileSync(new URL("../codex-feishu-bridge.mjs", import.meta.url), "utf8");
+  assert.match(source, /formulaWarmupDelayMs = 5_000 \+ crypto\.randomInt\(0, 55_001\)/);
+  assert.match(source, /formulaWarmupTimer\.unref\?\.\(\)/);
+  assert.match(source, /shutdownCallbacks\.add\(\(\) => clearTimeout\(formulaWarmupTimer\)\)/);
+});
+
 test("lark client uploads images with stdin JSON and a cwd-relative file argument", async (t) => {
   const calls = [];
   const client = createLarkClient({
