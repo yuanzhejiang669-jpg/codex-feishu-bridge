@@ -114,8 +114,10 @@ test("normalizes inverted or invalid threshold configuration", () => {
 test("Bridge records resume time, preserves reminder state, and clears active state before notifying", () => {
   assert.match(bridgeSource, /threadResumeMs: threadReadyAt - initializedAt/);
   assert.match(bridgeSource, /threadHealth: entry\?\.threadHealth \|\| null/);
-  const clearAt = bridgeSource.indexOf("if (activeRunRecorded) clearActiveRun(messageId);\n    await maybeSendThreadHealthReminder");
+  const clearAt = bridgeSource.indexOf("if (activeRunRecorded) clearActiveRunSafely(messageId, \"answer-completed\");\n    await maybeSendThreadHealthReminder");
   assert.notEqual(clearAt, -1);
+  assert.match(bridgeSource, /function clearActiveRunSafely[\s\S]*active run cleanup deferred after local state write failure/);
+  assert.match(bridgeSource, /function recordActiveRunSafely[\s\S]*active run registration skipped after local state write failure/);
   assert.match(bridgeSource, /CODEX_FEISHU_THREAD_HEALTH_WARNING_RESUME_MS, 15_000/);
   assert.match(bridgeSource, /CODEX_FEISHU_THREAD_HEALTH_PERSISTENT_RESUME_MS, 30_000/);
   assert.match(bridgeSource, /最近.*次本地线程恢复/);

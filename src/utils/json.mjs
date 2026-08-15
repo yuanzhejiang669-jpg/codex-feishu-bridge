@@ -2,6 +2,10 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
+const TRANSIENT_RENAME_CODES = new Set(["EACCES", "EBUSY", "EPERM"]);
+const RENAME_RETRY_DELAYS_MS = [25, 50, 100, 200, 300, 400, 500, 750];
+const SLEEP_BUFFER = new Int32Array(new SharedArrayBuffer(4));
+
 export function readJsonFile(file) {
   try {
     return JSON.parse(fs.readFileSync(file, "utf8"));
@@ -28,7 +32,7 @@ export function writeJsonFileAtomicSync(file, value, { space = 2 } = {}) {
     fs.fsyncSync(fd);
     fs.closeSync(fd);
     fd = null;
-    fs.renameSync(tempFile, file);
+    renameWithRetrySync(tempFile, file);
   } finally {
     if (fd !== null) {
       try {
@@ -38,6 +42,19 @@ export function writeJsonFileAtomicSync(file, value, { space = 2 } = {}) {
     try {
       fs.rmSync(tempFile, { force: true });
     } catch {}
+  }
+}
+
+function renameWithRetrySync(source, destination) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      fs.renameSync(source, destination);
+      return;
+    } catch (error) {
+      const delayMs = RENAME_RETRY_DELAYS_MS[attempt];
+      if (!TRANSIENT_RENAME_CODES.has(error?.code) || delayMs === undefined) throw error;
+      Atomics.wait(SLEEP_BUFFER, 0, 0, delayMs);
+    }
   }
 }
 

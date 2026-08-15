@@ -7,6 +7,7 @@ import {
   nativeRetryExhaustedFailure,
   shouldWaitForNativeRetry,
 } from "../src/logging/errors.mjs";
+import { createServiceTierPolicy } from "../src/config/service-tier.mjs";
 import { createRunWatchdog } from "../src/runtime/run-watchdog.mjs";
 
 test("response stream disconnect wins over request timed out and waits for native retry", () => {
@@ -80,4 +81,20 @@ test("stream disconnect with willRetry false does not wait for native retry", ()
 test("a generic upstream request timeout is not mislabeled as Bridge timeout", () => {
   const failure = classifyCodexFailure("request timed out");
   assert.equal(failure.kind, "unknown");
+});
+
+test("local Windows file locks never trigger service tier fallback", () => {
+  const error = new Error("EPERM: operation not permitted, rename active-runs.json.tmp -> active-runs.json");
+  error.code = "EPERM";
+  const failure = classifyCodexFailure(error);
+  assert.equal(failure.kind, "local_io");
+
+  const policy = createServiceTierPolicy({
+    findProvider: () => ({ serviceTierPassthrough: true }),
+  });
+  const tierPlan = policy.serviceTierPlanForTurnSettings({
+    provider: "backup-api",
+    serviceTier: "standard",
+  });
+  assert.equal(policy.shouldRetryWithoutServiceTier(failure, tierPlan), false);
 });

@@ -256,6 +256,45 @@ const {
   saveActiveRuns,
   touchActiveRun,
 } = activeRunStore;
+
+function clearActiveRunSafely(messageId, reason) {
+  try {
+    clearActiveRun(messageId);
+    return true;
+  } catch (error) {
+    log("WARN", "active run cleanup deferred after local state write failure", {
+      messageId,
+      reason,
+      error: String(error?.message || error).slice(0, 1000),
+    });
+    return false;
+  }
+}
+
+function recordActiveRunSafely(record, reason) {
+  try {
+    recordActiveRun(record);
+    return true;
+  } catch (error) {
+    log("WARN", "active run registration skipped after local state write failure", {
+      messageId: record?.messageId,
+      reason,
+      error: String(error?.message || error).slice(0, 1000),
+    });
+    return false;
+  }
+}
+
+function touchActiveRunSafely(messageId) {
+  try {
+    touchActiveRun(messageId);
+  } catch (error) {
+    log("WARN", "active run heartbeat skipped after local state write failure", {
+      messageId,
+      error: String(error?.message || error).slice(0, 1000),
+    });
+  }
+}
 const pendingAttachmentStore = createPendingAttachmentStore({
   maxPendingAttachments: CONFIG.maxPendingAttachments,
   pendingTtlMs: CONFIG.attachmentPendingTtlMs,
@@ -5254,15 +5293,14 @@ async function startGoalRun(chatId, event, session, goalPatch, options = {}) {
   try {
     card = await openGoalRunCard(chatId, messageId, state);
     if (card) {
-      recordActiveRun({
+      activeRunRecorded = recordActiveRunSafely({
         chatId,
         messageId,
         sessionId: session.id,
         cardId: card.cardId,
         cardMessageId: card.messageId,
         startedAt: state.startedAt,
-      });
-      activeRunRecorded = true;
+      }, "goal-card-open");
     }
   } catch (error) {
     log("WARN", "goal card open failed; falling back to markdown", {
@@ -5311,7 +5349,7 @@ async function startGoalRun(chatId, event, session, goalPatch, options = {}) {
   });
   run.updateCard = async () => {
     if (!run.card) return;
-    if (run.activeRunRecorded && run.state.terminal === "running") touchActiveRun(run.messageId);
+    if (run.activeRunRecorded && run.state.terminal === "running") touchActiveRunSafely(run.messageId);
     const rendered = renderRunCard(run.state);
     if (run.state.terminal === "running") {
       run.card.update(rendered);
@@ -5694,7 +5732,7 @@ async function runGoalLoop(run, goalPatch) {
     if (job?.pid === client.child?.pid) activeCodexJobs.delete(chatId);
     const currentRun = activeGoalRuns.get(chatId);
     if (currentRun === run) activeGoalRuns.delete(chatId);
-    if (run.activeRunRecorded) clearActiveRun(messageId);
+    if (run.activeRunRecorded) clearActiveRunSafely(messageId, "goal-finally");
     await client.stop();
   }
 }
@@ -6673,21 +6711,20 @@ async function handleEvent(rawEvent, dispatchControl = {}) {
   }
   const cardState = createRunState(session, event, userContent);
   let card = null;
-  const activeRunRecorded = true;
-  recordActiveRun({
+  let activeRunRecorded = recordActiveRunSafely({
     chatId,
     messageId,
     sessionId: session.id,
     cardId: "",
     cardMessageId: "",
     startedAt: cardState.startedAt,
-  });
+  }, "message-start");
   let finalCardFlushOk = true;
   let latestCardState = cardState;
   const updateCard = async (state) => {
     latestCardState = state;
     if (!card) return;
-    if (activeRunRecorded && state.terminal === "running") touchActiveRun(messageId);
+    if (activeRunRecorded && state.terminal === "running") touchActiveRunSafely(messageId);
     if (state.terminal === "done" && !state.formulaRenderComplete) {
       if (!state.formulaRenderPromise) {
         state.formulaRenderPromise = (async () => {
@@ -6740,14 +6777,14 @@ async function handleEvent(rawEvent, dispatchControl = {}) {
         cardOpenMs: Date.now() - cardOpenStartedAt,
         parallelWithCodex: true,
       });
-      recordActiveRun({
+      activeRunRecorded = recordActiveRunSafely({
         chatId,
         messageId,
         sessionId: session.id,
         cardId: card.cardId,
         cardMessageId: card.messageId,
         startedAt: cardState.startedAt,
-      });
+      }, "card-open") || activeRunRecorded;
       await updateCard(latestCardState);
       return card;
     } catch (error) {
@@ -6774,7 +6811,7 @@ async function handleEvent(rawEvent, dispatchControl = {}) {
         messageId,
       );
     }
-    if (activeRunRecorded) clearActiveRun(messageId);
+    if (activeRunRecorded) clearActiveRunSafely(messageId, "answer-completed");
     await maybeSendThreadHealthReminder(chatId, messageId, session, result);
     log("INFO", "message answered", { messageId, sessionId: session.id, durationMs: result.durationMs });
   } catch (error) {
@@ -6830,7 +6867,7 @@ async function handleEvent(rawEvent, dispatchControl = {}) {
     throw error;
   } finally {
     await cardOpenPromise;
-    if (activeRunRecorded) clearActiveRun(messageId);
+    if (activeRunRecorded) clearActiveRunSafely(messageId, "message-finally");
   }
 }
 

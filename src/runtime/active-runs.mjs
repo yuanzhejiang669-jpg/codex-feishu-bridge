@@ -16,6 +16,7 @@ export function createActiveRunStore({
   function recordActiveRun(record) {
     const key = activeRunKey(record?.messageId);
     if (!key) return;
+    const previous = activeRuns.runs[key];
     activeRuns.runs[key] = {
       messageId: key,
       chatId: String(record.chatId || ""),
@@ -27,22 +28,40 @@ export function createActiveRunStore({
       bridgePid,
       workspace,
     };
-    saveActiveRuns();
+    try {
+      saveActiveRuns();
+    } catch (error) {
+      if (previous) activeRuns.runs[key] = previous;
+      else delete activeRuns.runs[key];
+      throw error;
+    }
   }
 
   function touchActiveRun(messageId) {
     const key = activeRunKey(messageId);
     if (!key || !activeRuns.runs[key]) return;
     if (Date.now() - Number(activeRuns.runs[key].updatedAt || 0) < 10_000) return;
+    const previousUpdatedAt = activeRuns.runs[key].updatedAt;
     activeRuns.runs[key].updatedAt = Date.now();
-    saveActiveRuns();
+    try {
+      saveActiveRuns();
+    } catch (error) {
+      activeRuns.runs[key].updatedAt = previousUpdatedAt;
+      throw error;
+    }
   }
 
   function clearActiveRun(messageId) {
     const key = activeRunKey(messageId);
     if (!key || !activeRuns.runs[key]) return;
+    const previous = activeRuns.runs[key];
     delete activeRuns.runs[key];
-    saveActiveRuns();
+    try {
+      saveActiveRuns();
+    } catch (error) {
+      activeRuns.runs[key] = previous;
+      throw error;
+    }
   }
 
   return {

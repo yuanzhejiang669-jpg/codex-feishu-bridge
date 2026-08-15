@@ -1800,3 +1800,16 @@ Adversarial review covers the three most likely regressions after three months:
 1. Large rollout files could make `/status` block the Bot. The reader scans backward with a 32 MB ceiling, stops as soon as three samples are found, and has regression coverage for missing and partial-tail data.
 2. Many Bots could launch Chromium simultaneously after a desktop restart, or a shutting-down Bot could fire a stale warmup timer. Warmup is delayed by a per-process random 5-to-60-second interval, stays off the startup critical path, shares one Promise within each Bot, and its pending timer is canceled during shutdown.
 3. A failed warmup could permanently disable formulas or consume the normal screenshot deadline. Failed warmup state is cleared for retry, formal rendering keeps the existing readable fallback, and the screenshot deadline begins only after warmup succeeds.
+
+## 2026-08-15 - 0.8.18 Windows active-run state write hardening
+
+- Reproduced two consecutive writing-Bot failures from the installed `0.8.17` log. Both began with `EPERM` while replacing `active-runs.json`; the old error path misclassified the local file lock, attempted a service-tier fallback, stopped the working app-server, and failed again.
+- Added bounded atomic-rename retries, transactional in-memory rollback, a dedicated `local_io` classification, and safe active-run registration/heartbeat/cleanup wrappers. The model task is no longer coupled to best-effort bookkeeping persistence.
+- Focused regression coverage verifies recovery from a temporary rename lock, preservation and later retry after a persistent write failure, and suppression of service-tier fallback for local I/O errors.
+- Final local verification passed 117/117 root tests and 193 desktop tests with three expected macOS skips. Release and device-rollout evidence will be appended after completion.
+
+Adversarial review targets the three most likely regressions after three months:
+
+1. Antivirus or indexers may hold the destination longer than the bounded retry window. The permanent-lock test verifies that exhausted retries degrade only bookkeeping and do not become a model retry or app-server shutdown.
+2. A failed cleanup could remove the run only from memory and prevent a later retry. The store now restores the previous in-memory entry when persistence fails, and the regression test confirms a subsequent cleanup succeeds.
+3. A future generic fallback rule could again treat local disk failures as upstream failures. `local_io` is explicitly excluded by the service-tier policy and covered at the policy boundary.

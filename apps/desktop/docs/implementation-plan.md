@@ -592,3 +592,11 @@ These risks are addressed with protocol versioning, active-run guards, transacti
 - Keep the critical recommendation at 200 decimal MB or two consecutive local resume times of at least 60 seconds.
 - Measure local thread resume only; exclude model generation and Provider network latency from the signal and describe the trigger accurately in Feishu.
 - Notify once per thread severity level, never force `/new`, and preserve existing session history and Bot state.
+
+## 2026-08-15 - 0.8.18 Windows active-run state write hardening
+
+- Retry transient `EACCES`, `EBUSY`, and `EPERM` failures while atomically replacing Bridge JSON state on Windows.
+- Restore in-memory active-run state if persistence ultimately fails, so a later heartbeat or cleanup can retry consistently.
+- Treat local state-file failures as `local_io`; never interpret them as Provider failures or retry a model turn without `service_tier`.
+- Make active-run registration, heartbeat, and cleanup best-effort after bounded persistence retries. A locked bookkeeping file must not block model startup, terminate a successful model turn, or destroy its app-server.
+- Publish the reviewed engine as Windows desktop `0.8.18`, then synchronize the current Windows device and the assistant-maintained old Windows device. macOS and the user-maintained lab device remain outside this correction.

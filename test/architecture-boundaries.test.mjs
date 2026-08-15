@@ -700,7 +700,7 @@ test("ordinary messages start Codex without awaiting CardKit and use the warm ap
   const handlerStart = bridgeSource.indexOf("async function handleEvent(");
   const handlerEnd = bridgeSource.indexOf("function cleanupClearedDownloads(", handlerStart);
   const handlerSource = bridgeSource.slice(handlerStart, handlerEnd);
-  const activeRunIndex = handlerSource.indexOf("recordActiveRun({", handlerSource.indexOf("const cardState ="));
+  const activeRunIndex = handlerSource.indexOf("recordActiveRunSafely({", handlerSource.indexOf("const cardState ="));
   const cardPromiseIndex = handlerSource.indexOf("const cardOpenPromise =");
   const runCodexIndex = handlerSource.indexOf("const result = await runCodex(");
   const awaitCardIndex = handlerSource.indexOf("await cardOpenPromise;", runCodexIndex);

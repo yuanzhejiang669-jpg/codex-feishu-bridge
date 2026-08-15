@@ -94,6 +94,7 @@ export function classifyCodexFailure(value, fallback = "Codex 运行失败") {
 
   const detail = errorText(value, fallback);
   const lower = detail.toLowerCase();
+  const errorCode = String(value?.code || value?.cause?.code || "").toUpperCase();
   const httpStatus = httpStatusFromText(detail);
   const base = {
     kind: "unknown",
@@ -104,6 +105,19 @@ export function classifyCodexFailure(value, fallback = "Codex 运行失败") {
     detail,
     at: Date.now(),
   };
+
+  if (
+    ["EACCES", "EBUSY", "EPERM"].includes(errorCode)
+    || /\b(?:eacces|ebusy|eperm):/.test(lower)
+  ) {
+    return {
+      ...base,
+      kind: "local_io",
+      label: "Bridge 本地文件占用",
+      message: "Bridge 读写本地状态文件时被 Windows 暂时阻止。",
+      suggestion: "这不是 Provider 错误，不应通过切换 service_tier 或重跑模型任务处理。",
+    };
+  }
 
   if (
     lower.includes("cloud config bundle")

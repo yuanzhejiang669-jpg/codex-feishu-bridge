@@ -23,7 +23,7 @@ import {
   renderRunActivityMarkdown,
   runActivityView,
 } from "../src/runtime/run-activity.mjs";
-import { recordsMatchColumns } from "../src/utils/json.mjs";
+import { recordsMatchColumns, writeJsonFileAtomicSync } from "../src/utils/json.mjs";
 
 test("watchdog omits an empty reasoning argument and preserves explicit values", () => {
   const script = fs.readFileSync(new URL("../watch-codex-feishu-bridge.ps1", import.meta.url), "utf8");
@@ -54,11 +54,88 @@ test("active run state preserves the previous JSON when an atomic write fails", 
 
   assert.deepEqual(JSON.parse(fs.readFileSync(statePath, "utf8")), previous);
   assert.equal(fs.readdirSync(directory).some((name) => name.endsWith(".tmp")), false);
+  assert.equal(store.activeRuns.runs.new, undefined);
 
-  store.saveActiveRuns();
+  store.recordActiveRun({ messageId: "new" });
   const saved = JSON.parse(fs.readFileSync(statePath, "utf8"));
   assert.equal(saved.runs.existing.messageId, "existing");
   assert.equal(saved.runs.new.messageId, "new");
+});
+
+test("atomic JSON writes retry transient Windows rename locks", (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-feishu-rename-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const statePath = path.join(directory, "state.json");
+  fs.writeFileSync(statePath, JSON.stringify({ value: "old" }), "utf8");
+
+  const originalRename = fs.renameSync;
+  let attempts = 0;
+  fs.renameSync = (...args) => {
+    attempts += 1;
+    if (attempts < 3) {
+      const error = new Error("injected Windows file lock");
+      error.code = "EPERM";
+      throw error;
+    }
+    return originalRename(...args);
+  };
+  try {
+    writeJsonFileAtomicSync(statePath, { value: "new" });
+  } finally {
+    fs.renameSync = originalRename;
+  }
+
+  assert.equal(attempts, 3);
+  assert.deepEqual(JSON.parse(fs.readFileSync(statePath, "utf8")), { value: "new" });
+  assert.equal(fs.readdirSync(directory).some((name) => name.endsWith(".tmp")), false);
+});
+
+test("active run cleanup restores memory when persistence fails", (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-feishu-clear-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const statePath = path.join(directory, "active-runs.json");
+  fs.writeFileSync(statePath, JSON.stringify({ runs: { current: { messageId: "current" } } }), "utf8");
+  const store = createActiveRunStore({ activeRunsPath: statePath });
+
+  const originalRename = fs.renameSync;
+  fs.renameSync = () => {
+    const error = new Error("injected permanent write failure");
+    error.code = "EIO";
+    throw error;
+  };
+  try {
+    assert.throws(() => store.clearActiveRun("current"), /injected permanent write failure/);
+  } finally {
+    fs.renameSync = originalRename;
+  }
+
+  assert.equal(store.activeRuns.runs.current.messageId, "current");
+  assert.equal(JSON.parse(fs.readFileSync(statePath, "utf8")).runs.current.messageId, "current");
+  store.clearActiveRun("current");
+  assert.deepEqual(JSON.parse(fs.readFileSync(statePath, "utf8")), { runs: {} });
+});
+
+test("active run registration restores memory when persistence fails", (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-feishu-record-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const statePath = path.join(directory, "active-runs.json");
+  fs.writeFileSync(statePath, JSON.stringify({ runs: {} }), "utf8");
+  const store = createActiveRunStore({ activeRunsPath: statePath });
+
+  const originalRename = fs.renameSync;
+  fs.renameSync = () => {
+    const error = new Error("injected permanent registration failure");
+    error.code = "EIO";
+    throw error;
+  };
+  try {
+    assert.throws(() => store.recordActiveRun({ messageId: "new" }), /injected permanent registration failure/);
+  } finally {
+    fs.renameSync = originalRename;
+  }
+
+  assert.equal(store.activeRuns.runs.new, undefined);
+  assert.deepEqual(JSON.parse(fs.readFileSync(statePath, "utf8")), { runs: {} });
 });
 
 test("logger rotates at the configured size and enforces backup retention", (t) => {

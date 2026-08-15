@@ -79,7 +79,7 @@ export function createServiceTierPolicy({ findProvider = () => null } = {}) {
     if (options.disableServiceTier || options.serviceTierFallbackAttempt) return false;
     if (!tierPlan?.serviceTier || !tierPlan.autoFallback) return false;
     const item = normalizeFailure(failure) || classifyCodexFailure(failure);
-    if (["user_stop", "feishu_card", "missing_rollout", "empty_completion", "stream_disconnect"].includes(item.kind)) {
+    if (["user_stop", "feishu_card", "local_io", "missing_rollout", "empty_completion", "stream_disconnect"].includes(item.kind)) {
       return false;
     }
     const lower = errorText(item.detail || item.message || failure, "").toLowerCase();
