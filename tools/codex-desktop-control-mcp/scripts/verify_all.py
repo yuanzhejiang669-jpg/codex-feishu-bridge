@@ -18,6 +18,7 @@ def run(label: str, args: list[str]) -> None:
 def main() -> int:
     python = sys.executable
     run('protocol smoke', [python, 'scripts/desktop_protocol_smoke_test.py'])
+    run('workflow unit', [python, 'scripts/desktop_workflow_test.py'])
     if sys.platform == 'darwin':
         run('macOS desktop smoke', [python, 'scripts/macos_desktop_smoke_test.py'])
     else:

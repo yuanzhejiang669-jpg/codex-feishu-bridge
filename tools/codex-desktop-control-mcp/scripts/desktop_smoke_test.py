@@ -95,6 +95,45 @@ def main() -> None:
         server._restore_clipboard_snapshot = originals["restore"]
         server._send_hotkey = originals["hotkey"]
 
+    if not server.IS_MACOS:
+        input_calls = []
+        original_input = server._windows_input
+
+        class FakeInput:
+            @staticmethod
+            def mouse_button(x, y, **kwargs):
+                input_calls.append(('mouse_button', x, y, kwargs))
+
+            @staticmethod
+            def move_mouse(x, y, **kwargs):
+                input_calls.append(('move_mouse', x, y, kwargs))
+
+            @staticmethod
+            def scroll(delta_y, delta_x=0):
+                input_calls.append(('scroll', delta_y, delta_x))
+
+            @staticmethod
+            def drag(start_x, start_y, end_x, end_y, **kwargs):
+                input_calls.append(('drag', start_x, start_y, end_x, end_y, kwargs))
+
+            @staticmethod
+            def type_text(text, **kwargs):
+                input_calls.append(('type_text', text, kwargs))
+
+        try:
+            server._windows_input = FakeInput
+            screen = status['screen']
+            x = screen['virtual_left'] + 10
+            y = screen['virtual_top'] + 10
+            require(server.codex_desktop_control_mouse_button(x, y, button='right').get('ok'), 'right click primitive failed')
+            require(server.codex_desktop_control_move_mouse(x, y, duration_ms=25).get('ok'), 'move primitive failed')
+            require(server.codex_desktop_control_scroll(-120).get('ok'), 'scroll primitive failed')
+            require(server.codex_desktop_control_drag(x, y, x + 10, y + 10).get('ok'), 'drag primitive failed')
+            require(server.codex_desktop_control_type_text('Unicode test').get('ok'), 'type primitive failed')
+            require([item[0] for item in input_calls] == ['mouse_button', 'move_mouse', 'scroll', 'drag', 'type_text'], f'unexpected input calls: {input_calls}')
+        finally:
+            server._windows_input = original_input
+
     if self_check.get("desktop_available"):
         verified = server.codex_desktop_control_hotkey(keys=[], verify_after=True, verify_bbox=[0, 0, 320, 200])
         require(verified.get("ok") is True, f"hotkey verification failed: {verified}")

@@ -116,6 +116,14 @@ def main() -> None:
             'codex_desktop_control_uia_find',
             'codex_desktop_control_uia_tree',
             'codex_desktop_control_uia_click',
+            'codex_desktop_control_mouse_button',
+            'codex_desktop_control_move_mouse',
+            'codex_desktop_control_scroll',
+            'codex_desktop_control_drag',
+            'codex_desktop_control_press_key',
+            'codex_desktop_control_type_text',
+            'codex_desktop_control_observe',
+            'codex_desktop_control_workflow',
         ]:
             require(required in names, f'missing tool {required}; tools={names}')
 
@@ -139,6 +147,9 @@ def main() -> None:
 
         invalid = parse_tool_payload(request('tools/call', {'name': 'codex_desktop_control_wait_for_text', 'arguments': {'query': ''}}))
         require(invalid.get('code') == 'VALIDATION_ERROR', f'invalid wait_for_text did not return a stable code: {invalid}')
+
+        invalid_workflow = parse_tool_payload(request('tools/call', {'name': 'codex_desktop_control_workflow', 'arguments': {'steps': []}}))
+        require(invalid_workflow.get('code') == 'VALIDATION_ERROR', f'invalid workflow did not return a stable code: {invalid_workflow}')
 
         print(f'OK: {len(names)} desktop tools listed and protocol calls succeeded.')
     finally:

@@ -15,10 +15,14 @@ from mcp.server.fastmcp import FastMCP
 
 from diagnostics import fail as _fail
 from diagnostics import ui_model_install_payload as _build_ui_model_install_payload
+from workflow_runtime import compare_images as _compare_images
+from workflow_runtime import execute_workflow as _execute_workflow
 
 IS_MACOS = sys.platform == 'darwin'
 if IS_MACOS:
     import macos_backend as _macos
+else:
+    import windows_input as _windows_input
 
 mcp = FastMCP('codex-desktop-control')
 
@@ -735,10 +739,10 @@ def _uia_status_payload() -> dict[str, Any]:
         accessibility = _macos.accessibility_status()
         return {
             'ok': True,
-            'available': False,
+            'available': bool(accessibility.get('available')),
             'backend': 'macos-accessibility',
             'accessibility_permission': bool(accessibility.get('available')),
-            'reason': 'macOS semantic Accessibility-tree tools are not implemented; OCR, visual fallback, windows, screenshots, and coordinate actions remain available.',
+            'reason': accessibility.get('reason'),
             'fallbacks': ['ocr', 'visual_fallback', 'coordinate_actions'],
         }
     modules = {name: _module_available(name) for name in UIA_OPTIONAL_MODULES}
@@ -865,6 +869,36 @@ def _matches_uia_payload(
         and match_field(payload.get('class_name', ''), class_name)
         and match_field(payload.get('control_type', ''), control_type)
     )
+
+
+def _macos_uia_find(
+    *,
+    query: str | None = None,
+    name_contains: str | None = None,
+    automation_id: str | None = None,
+    class_name: str | None = None,
+    control_type: str | None = None,
+    hwnd: int | None = None,
+    title_contains: str | None = None,
+    exact: bool = False,
+    limit: int = 50,
+) -> tuple[int, list[dict[str, Any]]]:
+    resolved = _resolve_hwnd(hwnd=hwnd, title_contains=title_contains)
+    scan_limit = max(50, min(500, int(limit) * 10))
+    elements = _macos.accessibility_elements(resolved, limit=scan_limit)
+    found = [
+        item for item in elements
+        if _matches_uia_payload(
+            item,
+            query=query,
+            name_contains=name_contains,
+            automation_id=automation_id,
+            class_name=class_name,
+            control_type=control_type,
+            exact=exact,
+        )
+    ]
+    return resolved, found[:max(1, min(int(limit), 200))]
 
 
 def _uia_find_controls(
@@ -1040,7 +1074,7 @@ def codex_desktop_control_ui_status() -> dict[str, Any]:
 
 @mcp.tool()
 def codex_desktop_control_uia_status() -> dict[str, Any]:
-    """Report semantic UI automation availability. Windows exposes UIA; macOS currently reports Accessibility permission and visual fallbacks."""
+    """Report semantic UI automation availability through Windows UIA or macOS Accessibility."""
     return _uia_status_payload()
 
 
@@ -1064,6 +1098,13 @@ def codex_desktop_control_uia_find(
     if not any([query, name_contains, automation_id, class_name, control_type]):
         return _fail('provide query, name_contains, automation_id, class_name, or control_type', 'VALIDATION_ERROR')
     try:
+        if IS_MACOS:
+            _resolved, found = _macos_uia_find(
+                query=query, name_contains=name_contains, automation_id=automation_id,
+                class_name=class_name, control_type=control_type, hwnd=hwnd,
+                title_contains=title_contains, exact=exact, limit=limit,
+            )
+            return {'ok': True, 'backend': 'macos-accessibility', 'count': len(found), 'matches': found}
         found = _uia_find_controls(
             query=query,
             name_contains=name_contains,
@@ -1096,6 +1137,19 @@ def codex_desktop_control_uia_tree(
 ) -> dict[str, Any]:
     """Return a bounded native UIA control tree for a selected window. Select by hwnd or title_contains; max_depth and limit cap traversal size."""
     try:
+        if IS_MACOS:
+            resolved = _resolve_hwnd(hwnd=hwnd, title_contains=title_contains)
+            elements = _macos.accessibility_elements(resolved, limit=limit)
+            window = _macos.resolve_window(resolved)
+            root = {
+                'depth': 0,
+                'name': window.get('title', ''),
+                'control_type': 'AXWindow',
+                'rect': window.get('rect'),
+                'coordinate_system': 'macos_screen_points',
+                'children': elements,
+            }
+            return {'ok': True, 'backend': 'macos-accessibility', 'tree': root, 'truncated': len(elements) >= int(limit)}
         root = _uia_root(hwnd=hwnd, title_contains=title_contains)
         max_depth = max(0, min(int(max_depth), 8))
         limit_state = {'remaining': max(0, min(int(limit), 500))}
@@ -1133,6 +1187,23 @@ def codex_desktop_control_uia_click(
     if not any([query, name_contains, automation_id, class_name, control_type]):
         return _fail('provide query, name_contains, automation_id, class_name, or control_type', 'VALIDATION_ERROR')
     try:
+        if IS_MACOS:
+            resolved, found = _macos_uia_find(
+                query=query, name_contains=name_contains, automation_id=automation_id,
+                class_name=class_name, control_type=control_type, hwnd=hwnd,
+                title_contains=title_contains, exact=exact, limit=max(1, int(index) + 1),
+            )
+            if not found:
+                return _fail('no matching Accessibility control found', 'UIA_UNAVAILABLE')
+            selected = found[max(0, min(int(index), len(found) - 1))]
+            clicked = _macos.accessibility_press(resolved, selected['accessibility_index'])
+            result: dict[str, Any] = {'ok': bool(clicked.get('ok')), 'selected': selected, 'click': clicked}
+            if verify_after:
+                result['verification'] = _post_action_verification(
+                    bbox=verify_bbox,
+                    delay_seconds=float(verify_delay_ms) / 1000.0,
+                )
+            return result
         found = _uia_find_controls(
             query=query,
             name_contains=name_contains,
@@ -1287,6 +1358,95 @@ def codex_desktop_control_screenshot(
             img = _capture_screen(_normalize_bbox(bbox))
             default_name = 'screen'
         return _image_to_payload(img, include_data=include_data, path=path, format=fmt, default_name=default_name)
+    except Exception as exc:
+        return _fail(exc)
+
+
+@mcp.tool()
+def codex_desktop_control_observe(
+    before_image_path: str | None = None,
+    hwnd: int | None = None,
+    title_contains: str | None = None,
+    bbox: list[int] | None = None,
+    client_area: bool = False,
+    threshold: int = 12,
+    path: str | None = None,
+) -> dict[str, Any]:
+    """Capture current desktop state and optionally compare it with a prior screenshot created under the configured output directory."""
+    try:
+        current, origin, coordinate_space, source = _capture_source(
+            hwnd=hwnd, title_contains=title_contains, bbox=bbox, client_area=client_area,
+        )
+        snapshot_path = path or f'observe_{time.time_ns()}.png'
+        snapshot = _image_to_payload(current, include_data=False, path=snapshot_path, format='png', default_name='observe')
+        result: dict[str, Any] = {
+            'ok': True,
+            'source': source,
+            'origin': origin,
+            'coordinate_space': coordinate_space,
+            'snapshot': snapshot,
+            'image': _image_diagnostics(current),
+        }
+        if before_image_path:
+            before, _before_origin, _before_space, before_source = _capture_source(image_path=before_image_path)
+            result['before_source'] = before_source
+            result['difference'] = _compare_images(before, current, threshold=threshold)
+        return result
+    except Exception as exc:
+        return _fail(exc)
+
+
+def _workflow_dispatch(action: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    normalized = action.strip().lower()
+    prefix = 'codex_desktop_control_'
+    if normalized.startswith(prefix):
+        normalized = normalized[len(prefix):]
+    actions = {
+        'activate_window': codex_desktop_control_activate_window,
+        'screenshot': codex_desktop_control_screenshot,
+        'observe': codex_desktop_control_observe,
+        'uia_click': codex_desktop_control_uia_click,
+        'click': codex_desktop_control_click,
+        'mouse_button': codex_desktop_control_mouse_button,
+        'move_mouse': codex_desktop_control_move_mouse,
+        'scroll': codex_desktop_control_scroll,
+        'drag': codex_desktop_control_drag,
+        'hotkey': codex_desktop_control_hotkey,
+        'press_key': codex_desktop_control_press_key,
+        'type_text': codex_desktop_control_type_text,
+        'paste_text': codex_desktop_control_paste_text,
+        'find_text': codex_desktop_control_find_text,
+        'wait_for_text': codex_desktop_control_wait_for_text,
+        'click_and_wait_text': codex_desktop_control_click_and_wait_text,
+    }
+    if normalized == 'sleep':
+        duration_ms = max(0, min(int(arguments.get('duration_ms', 0)), 60_000))
+        time.sleep(duration_ms / 1000.0)
+        return {'ok': True, 'duration_ms': duration_ms}
+    target = actions.get(normalized)
+    if target is None:
+        return _fail(f'unsupported workflow action: {action}', 'VALIDATION_ERROR', supported_actions=sorted([*actions, 'sleep']))
+    return target(**arguments)
+
+
+@mcp.tool()
+def codex_desktop_control_workflow(
+    steps: list[dict[str, Any]],
+    continue_on_error: bool = False,
+    observe_changes: bool = False,
+    observe_bbox: list[int] | None = None,
+    change_threshold: int = 12,
+) -> dict[str, Any]:
+    """Execute up to 50 desktop actions in order in one MCP call. Steps are unrestricted existing actions; failures stop the workflow unless continue_on_error=true."""
+    try:
+        before = _capture_screen(_normalize_bbox(observe_bbox)) if observe_changes else None
+        result = _execute_workflow(steps, _workflow_dispatch, continue_on_error=continue_on_error)
+        if before is not None:
+            after = _capture_screen(_normalize_bbox(observe_bbox))
+            result['difference'] = _compare_images(before, after, threshold=change_threshold)
+        return result
+    except ValueError as exc:
+        return _fail(exc, 'VALIDATION_ERROR')
     except Exception as exc:
         return _fail(exc)
 
@@ -1567,6 +1727,54 @@ def codex_desktop_control_detect_ui_elements(
         return _fail(exc, model_path=str(DEFAULT_UI_MODEL_PATH), model_install=_ui_model_install_payload())
 
 
+def _screen_point(x: float, y: float) -> tuple[int, int, dict[str, Any]]:
+    screen = _get_screen_info()
+    ix = int(round(x))
+    iy = int(round(y))
+    if ix < screen['virtual_left'] or iy < screen['virtual_top'] or ix >= screen['virtual_right'] or iy >= screen['virtual_bottom']:
+        raise ValueError(f'coordinates outside virtual screen bounds: ({ix}, {iy})')
+    return ix, iy, screen
+
+
+def _activate_if_requested(title_contains: str | None) -> None:
+    if title_contains:
+        _activate(_resolve_hwnd(title_contains=title_contains))
+
+
+def _mouse_button_payload(
+    x: float,
+    y: float,
+    *,
+    button: str = 'left',
+    action: str = 'click',
+    clicks: int = 1,
+    activate_title_contains: str | None = None,
+) -> dict[str, Any]:
+    try:
+        _activate_if_requested(activate_title_contains)
+        ix, iy, screen = _screen_point(x, y)
+        normalized_button = str(button).lower()
+        normalized_action = str(action).lower()
+        if normalized_button not in {'left', 'right', 'middle'}:
+            return _fail('button must be left, right, or middle', 'VALIDATION_ERROR')
+        if normalized_action not in {'click', 'down', 'up'}:
+            return _fail('action must be click, down, or up', 'VALIDATION_ERROR')
+        if IS_MACOS:
+            _macos.mouse_button(ix, iy, button=normalized_button, action=normalized_action, clicks=clicks)
+        else:
+            _windows_input.mouse_button(ix, iy, button=normalized_button, action=normalized_action, clicks=clicks)
+        return {
+            'ok': True, 'x': ix, 'y': iy, 'button': normalized_button,
+            'action': normalized_action, 'clicks': max(1, int(clicks)),
+            'coordinate_system': screen['coordinate_system'],
+        }
+    except ValueError as exc:
+        code = 'COORD_OUT_OF_BOUNDS' if 'outside virtual screen bounds' in str(exc) else 'VALIDATION_ERROR'
+        return _fail(exc, code)
+    except Exception as exc:
+        return _fail(exc)
+
+
 def _click_payload(
     x: float,
     y: float,
@@ -1576,23 +1784,18 @@ def _click_payload(
     verify_delay_ms: int = 200,
 ) -> dict[str, Any]:
     try:
-        if activate_title_contains:
-            _activate(_resolve_hwnd(title_contains=activate_title_contains))
-        screen = _get_screen_info()
-        ix = int(round(x))
-        iy = int(round(y))
-        if ix < screen['virtual_left'] or iy < screen['virtual_top'] or ix >= screen['virtual_right'] or iy >= screen['virtual_bottom']:
-            return _fail('coordinates outside virtual screen bounds', 'COORD_OUT_OF_BOUNDS', screen=screen, x=ix, y=iy)
         if IS_MACOS:
+            _activate_if_requested(activate_title_contains)
+            ix, iy, screen = _screen_point(x, y)
             _macos.click(ix, iy)
+            result = {'ok': True, 'x': ix, 'y': iy, 'coordinate_system': screen['coordinate_system']}
         else:
-            win32api, win32con, _gui, _ui, _clip, _windll = _import_win32()
-            win32api.SetCursorPos((ix, iy))
-            time.sleep(0.05)
-            win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0)
-            time.sleep(0.05)
-            win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0)
-        result: dict[str, Any] = {'ok': True, 'x': x, 'y': y, 'coordinate_system': screen['coordinate_system']}
+            result = _mouse_button_payload(
+                x, y, button='left', action='click', clicks=1,
+                activate_title_contains=activate_title_contains,
+            )
+        if not result.get('ok'):
+            return result
         if verify_after:
             result['verification'] = _post_action_verification(
                 bbox=verify_bbox,
@@ -1621,6 +1824,109 @@ def codex_desktop_control_click(
         verify_bbox=verify_bbox,
         verify_delay_ms=verify_delay_ms,
     )
+
+
+@mcp.tool()
+def codex_desktop_control_mouse_button(
+    x: float,
+    y: float,
+    button: str = 'left',
+    action: str = 'click',
+    clicks: int = 1,
+    activate_title_contains: str | None = None,
+) -> dict[str, Any]:
+    """Click, press, or release the left, right, or middle mouse button at physical screen coordinates. No confirmation or application restriction is added."""
+    return _mouse_button_payload(
+        x, y, button=button, action=action, clicks=clicks,
+        activate_title_contains=activate_title_contains,
+    )
+
+
+@mcp.tool()
+def codex_desktop_control_move_mouse(
+    x: float,
+    y: float,
+    duration_ms: int = 0,
+    activate_title_contains: str | None = None,
+) -> dict[str, Any]:
+    """Move the pointer to physical screen coordinates, optionally animating the move over duration_ms."""
+    try:
+        _activate_if_requested(activate_title_contains)
+        ix, iy, screen = _screen_point(x, y)
+        if IS_MACOS:
+            _macos.move_mouse(ix, iy, duration_ms=max(0, int(duration_ms)))
+        else:
+            _windows_input.move_mouse(ix, iy, duration_ms=max(0, int(duration_ms)))
+        return {'ok': True, 'x': ix, 'y': iy, 'duration_ms': max(0, int(duration_ms)), 'coordinate_system': screen['coordinate_system']}
+    except ValueError as exc:
+        code = 'COORD_OUT_OF_BOUNDS' if 'outside virtual screen bounds' in str(exc) else 'VALIDATION_ERROR'
+        return _fail(exc, code)
+    except Exception as exc:
+        return _fail(exc)
+
+
+@mcp.tool()
+def codex_desktop_control_scroll(
+    delta_y: int,
+    delta_x: int = 0,
+    x: float | None = None,
+    y: float | None = None,
+    activate_title_contains: str | None = None,
+) -> dict[str, Any]:
+    """Scroll vertically and/or horizontally. Positive delta_y scrolls up; negative scrolls down. Optional x,y first position the pointer."""
+    try:
+        _activate_if_requested(activate_title_contains)
+        if (x is None) != (y is None):
+            return _fail('x and y must be provided together', 'VALIDATION_ERROR')
+        if x is not None and y is not None:
+            ix, iy, _screen = _screen_point(x, y)
+            if IS_MACOS:
+                _macos.move_mouse(ix, iy)
+            else:
+                _windows_input.move_mouse(ix, iy)
+        if IS_MACOS:
+            _macos.scroll(int(delta_y), int(delta_x))
+        else:
+            _windows_input.scroll(int(delta_y), int(delta_x))
+        return {'ok': True, 'delta_y': int(delta_y), 'delta_x': int(delta_x), 'x': x, 'y': y}
+    except ValueError as exc:
+        code = 'COORD_OUT_OF_BOUNDS' if 'outside virtual screen bounds' in str(exc) else 'VALIDATION_ERROR'
+        return _fail(exc, code)
+    except Exception as exc:
+        return _fail(exc)
+
+
+@mcp.tool()
+def codex_desktop_control_drag(
+    start_x: float,
+    start_y: float,
+    end_x: float,
+    end_y: float,
+    duration_ms: int = 400,
+    button: str = 'left',
+    activate_title_contains: str | None = None,
+) -> dict[str, Any]:
+    """Drag directly between two physical screen points with the selected mouse button."""
+    try:
+        _activate_if_requested(activate_title_contains)
+        sx, sy, screen = _screen_point(start_x, start_y)
+        ex, ey, _screen = _screen_point(end_x, end_y)
+        normalized_button = str(button).lower()
+        if normalized_button not in {'left', 'right', 'middle'}:
+            return _fail('button must be left, right, or middle', 'VALIDATION_ERROR')
+        if IS_MACOS:
+            _macos.drag(sx, sy, ex, ey, duration_ms=max(0, int(duration_ms)), button=normalized_button)
+        else:
+            _windows_input.drag(sx, sy, ex, ey, duration_ms=max(0, int(duration_ms)), button=normalized_button)
+        return {
+            'ok': True, 'start': [sx, sy], 'end': [ex, ey], 'button': normalized_button,
+            'duration_ms': max(0, int(duration_ms)), 'coordinate_system': screen['coordinate_system'],
+        }
+    except ValueError as exc:
+        code = 'COORD_OUT_OF_BOUNDS' if 'outside virtual screen bounds' in str(exc) else 'VALIDATION_ERROR'
+        return _fail(exc, code)
+    except Exception as exc:
+        return _fail(exc)
 
 
 @mcp.tool()
@@ -1698,6 +2004,49 @@ def codex_desktop_control_hotkey(
                 delay_seconds=float(verify_delay_ms) / 1000.0,
             )
         return result
+    except Exception as exc:
+        return _fail(exc)
+
+
+@mcp.tool()
+def codex_desktop_control_press_key(
+    key: str,
+    presses: int = 1,
+    interval_ms: int = 50,
+    activate_title_contains: str | None = None,
+) -> dict[str, Any]:
+    """Press one supported key repeatedly. This is direct input and does not add confirmation or policy checks."""
+    try:
+        _activate_if_requested(activate_title_contains)
+        count = max(1, min(int(presses), 1000))
+        for index in range(count):
+            _send_hotkey([key])
+            if index + 1 < count and interval_ms > 0:
+                time.sleep(int(interval_ms) / 1000.0)
+        return {'ok': True, 'key': key, 'presses': count, 'interval_ms': max(0, int(interval_ms))}
+    except Exception as exc:
+        return _fail(exc)
+
+
+@mcp.tool()
+def codex_desktop_control_type_text(
+    text: str,
+    interval_ms: int = 0,
+    activate_title_contains: str | None = None,
+) -> dict[str, Any]:
+    """Type Unicode text directly into the focused control, optionally pausing between characters. Unlike paste_text, this does not use the clipboard."""
+    try:
+        _activate_if_requested(activate_title_contains)
+        if IS_MACOS:
+            if interval_ms > 0:
+                for char in text:
+                    _macos.type_text(char)
+                    time.sleep(int(interval_ms) / 1000.0)
+            else:
+                _macos.type_text(text)
+        else:
+            _windows_input.type_text(text, interval_ms=max(0, int(interval_ms)))
+        return {'ok': True, 'length': len(text), 'interval_ms': max(0, int(interval_ms)), 'method': 'direct_unicode_input'}
     except Exception as exc:
         return _fail(exc)
 

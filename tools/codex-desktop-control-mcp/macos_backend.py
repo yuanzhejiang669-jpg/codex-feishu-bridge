@@ -4,6 +4,7 @@ import os
 import subprocess
 import tempfile
 import time
+from ctypes import CDLL, Structure, c_double, c_int32, c_uint32, c_void_p
 from pathlib import Path
 from typing import Any
 
@@ -211,6 +212,124 @@ end tell
     }
 
 
+_ACCESSIBILITY_ELEMENTS_SCRIPT = r'''
+on cleanText(valueText)
+    try
+        set valueText to valueText as text
+    on error
+        set valueText to ""
+    end try
+    set AppleScript's text item delimiters to {tab, return, linefeed, ASCII character 30, ASCII character 31}
+    set parts to text items of valueText
+    set AppleScript's text item delimiters to " "
+    set valueText to parts as text
+    set AppleScript's text item delimiters to ""
+    return valueText
+end cleanText
+
+on run argv
+    set targetPid to item 1 of argv as integer
+    set targetIndex to item 2 of argv as integer
+    set resultLimit to item 3 of argv as integer
+    set outputText to ""
+    tell application "System Events"
+        set targetProcess to first application process whose unix id is targetPid
+        set targetWindow to window targetIndex of targetProcess
+        set allElements to entire contents of targetWindow
+        set elementIndex to 0
+        repeat with elementItem in allElements
+            set elementIndex to elementIndex + 1
+            if elementIndex > resultLimit then exit repeat
+            set elementName to ""
+            set elementRole to ""
+            set elementSubrole to ""
+            set elementDescription to ""
+            set elementPosition to {0, 0}
+            set elementSize to {0, 0}
+            try
+                set elementName to my cleanText(name of elementItem)
+            end try
+            try
+                set elementRole to my cleanText(role of elementItem)
+            end try
+            try
+                set elementSubrole to my cleanText(subrole of elementItem)
+            end try
+            try
+                set elementDescription to my cleanText(description of elementItem)
+            end try
+            try
+                set elementPosition to position of elementItem
+            end try
+            try
+                set elementSize to size of elementItem
+            end try
+            set outputText to outputText & (elementIndex as text) & (ASCII character 31) & elementName & (ASCII character 31) & elementRole & (ASCII character 31) & elementSubrole & (ASCII character 31) & elementDescription & (ASCII character 31) & ((item 1 of elementPosition) as text) & (ASCII character 31) & ((item 2 of elementPosition) as text) & (ASCII character 31) & ((item 1 of elementSize) as text) & (ASCII character 31) & ((item 2 of elementSize) as text) & (ASCII character 30)
+        end repeat
+    end tell
+    return outputText
+end run
+'''
+
+
+def accessibility_elements(hwnd: int, *, limit: int = 200) -> list[dict[str, Any]]:
+    window = resolve_window(hwnd)
+    raw = _osascript(
+        _ACCESSIBILITY_ELEMENTS_SCRIPT,
+        [str(window['pid']), str(window['window_index']), str(max(1, min(int(limit), 500)))],
+        timeout=30.0,
+    )
+    elements: list[dict[str, Any]] = []
+    for record in raw.split(RECORD_SEPARATOR):
+        fields = record.split(FIELD_SEPARATOR)
+        if len(fields) != 9:
+            continue
+        item_index, name, role, subrole, description, left, top, width, height = fields
+        x = float(left)
+        y = float(top)
+        w = float(width)
+        h = float(height)
+        rect = [x, y, x + w, y + h] if w > 0 and h > 0 else None
+        elements.append({
+            'depth': None,
+            'name': name,
+            'automation_id': '',
+            'class_name': subrole,
+            'control_type': role,
+            'description': description,
+            'accessibility_index': int(item_index),
+            'rect': rect,
+            'center': [(x + w / 2), (y + h / 2)] if rect else None,
+            'coordinate_system': 'macos_screen_points' if rect else None,
+        })
+    return elements
+
+
+def accessibility_press(hwnd: int, accessibility_index: int) -> dict[str, Any]:
+    window = resolve_window(hwnd)
+    script = r'''
+on run argv
+    set targetPid to item 1 of argv as integer
+    set targetIndex to item 2 of argv as integer
+    set elementIndex to item 3 of argv as integer
+    tell application "System Events"
+        set targetProcess to first application process whose unix id is targetPid
+        set targetWindow to window targetIndex of targetProcess
+        set targetElement to item elementIndex of (entire contents of targetWindow)
+        try
+            perform action "AXPress" of targetElement
+            return "AXPress"
+        on error
+            click targetElement
+            return "click"
+        end try
+    end tell
+end run
+'''
+    method = _osascript(script, [str(window['pid']), str(window['window_index']), str(int(accessibility_index))])
+    return {'ok': True, 'method': f'macos_accessibility_{method}'}
+
+
 def _capture_region(rect: tuple[int, int, int, int] | None):
     from PIL import Image
 
@@ -256,6 +375,89 @@ def capture_window(hwnd: int, client_area: bool = False):
     return _capture_region(tuple(int(value) for value in window['rect']))
 
 
+class _CGPoint(Structure):
+    _fields_ = [('x', c_double), ('y', c_double)]
+
+
+_CORE_GRAPHICS = None
+
+
+def _core_graphics():
+    global _CORE_GRAPHICS
+    if _CORE_GRAPHICS is None:
+        framework = CDLL('/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices')
+        framework.CGEventCreateMouseEvent.argtypes = [c_void_p, c_uint32, _CGPoint, c_uint32]
+        framework.CGEventCreateMouseEvent.restype = c_void_p
+        framework.CGEventPost.argtypes = [c_uint32, c_void_p]
+        framework.CGEventCreate.argtypes = [c_void_p]
+        framework.CGEventCreate.restype = c_void_p
+        framework.CGEventGetLocation.argtypes = [c_void_p]
+        framework.CGEventGetLocation.restype = _CGPoint
+        framework.CFRelease.argtypes = [c_void_p]
+        framework.CGEventCreateScrollWheelEvent.restype = c_void_p
+        _CORE_GRAPHICS = framework
+    return _CORE_GRAPHICS
+
+
+def _post_mouse_event(event_type: int, x: int, y: int, button: int) -> None:
+    framework = _core_graphics()
+    event = framework.CGEventCreateMouseEvent(None, event_type, _CGPoint(float(x), float(y)), button)
+    if not event:
+        raise RuntimeError('CGEventCreateMouseEvent failed')
+    try:
+        framework.CGEventPost(0, event)
+    finally:
+        framework.CFRelease(event)
+
+
+def _mouse_position() -> tuple[int, int]:
+    framework = _core_graphics()
+    event = framework.CGEventCreate(None)
+    if not event:
+        raise RuntimeError('CGEventCreate failed')
+    try:
+        point = framework.CGEventGetLocation(event)
+        return round(point.x), round(point.y)
+    finally:
+        framework.CFRelease(event)
+
+
+def move_mouse(x: int, y: int, *, duration_ms: int = 0) -> None:
+    start_x, start_y = _mouse_position()
+    steps = max(1, min(120, int(duration_ms) // 16))
+    for index in range(1, steps + 1):
+        ratio = index / steps
+        target_x = round(start_x + (x - start_x) * ratio)
+        target_y = round(start_y + (y - start_y) * ratio)
+        _post_mouse_event(5, target_x, target_y, 0)
+        if duration_ms > 0:
+            time.sleep(duration_ms / 1000.0 / steps)
+
+
+def mouse_button(x: int, y: int, *, button: str = 'left', action: str = 'click', clicks: int = 1) -> None:
+    button_map = {
+        'left': (0, 1, 2),
+        'right': (1, 3, 4),
+        'middle': (2, 25, 26),
+    }
+    if button not in button_map:
+        raise ValueError(f'unsupported mouse button: {button}')
+    button_number, down_type, up_type = button_map[button]
+    move_mouse(x, y)
+    if action == 'down':
+        _post_mouse_event(down_type, x, y, button_number)
+        return
+    if action == 'up':
+        _post_mouse_event(up_type, x, y, button_number)
+        return
+    if action != 'click':
+        raise ValueError(f'unsupported mouse action: {action}')
+    for _ in range(max(1, int(clicks))):
+        _post_mouse_event(down_type, x, y, button_number)
+        _post_mouse_event(up_type, x, y, button_number)
+        time.sleep(0.05)
+
+
 def click(x: int, y: int) -> None:
     script = r'''
 on run argv
@@ -265,6 +467,45 @@ on run argv
 end run
 '''
     _osascript(script, [str(x), str(y)])
+
+
+def drag(start_x: int, start_y: int, end_x: int, end_y: int, *, duration_ms: int = 400, button: str = 'left') -> None:
+    button_map = {'left': (0, 1, 2, 6), 'right': (1, 3, 4, 7), 'middle': (2, 25, 26, 27)}
+    if button not in button_map:
+        raise ValueError(f'unsupported mouse button: {button}')
+    button_number, down_type, up_type, drag_type = button_map[button]
+    move_mouse(start_x, start_y)
+    _post_mouse_event(down_type, start_x, start_y, button_number)
+    steps = max(1, min(120, int(duration_ms) // 16))
+    try:
+        for index in range(1, steps + 1):
+            ratio = index / steps
+            x = round(start_x + (end_x - start_x) * ratio)
+            y = round(start_y + (end_y - start_y) * ratio)
+            _post_mouse_event(drag_type, x, y, button_number)
+            time.sleep(max(0, duration_ms) / 1000.0 / steps)
+    finally:
+        _post_mouse_event(up_type, end_x, end_y, button_number)
+
+
+def scroll(delta_y: int, delta_x: int = 0) -> None:
+    framework = _core_graphics()
+    event = framework.CGEventCreateScrollWheelEvent(None, c_uint32(0), c_uint32(2), c_int32(delta_y), c_int32(delta_x))
+    if not event:
+        raise RuntimeError('CGEventCreateScrollWheelEvent failed')
+    try:
+        framework.CGEventPost(0, event)
+    finally:
+        framework.CFRelease(event)
+
+
+def type_text(text: str) -> None:
+    script = r'''
+on run argv
+    tell application "System Events" to keystroke (item 1 of argv)
+end run
+'''
+    _osascript(script, [text])
 
 
 _KEY_CODES = {

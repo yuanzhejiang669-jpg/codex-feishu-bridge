@@ -8,10 +8,16 @@
 - 截图、OCR、找文字：`codex_desktop_control_screenshot`、`codex_desktop_control_ocr`、`codex_desktop_control_find_text`、`codex_desktop_control_wait_for_text`
 - UI 检测：`codex_desktop_control_detect_ui_elements`
 - 坐标动作：`codex_desktop_control_click`、`codex_desktop_control_double_click`、`codex_desktop_control_hotkey`
+- 完整输入：`codex_desktop_control_mouse_button`、`codex_desktop_control_move_mouse`、`codex_desktop_control_scroll`、`codex_desktop_control_drag`、`codex_desktop_control_press_key`、`codex_desktop_control_type_text`
 - 粘贴文本：`codex_desktop_control_paste_text`，默认会尝试恢复原剪贴板文本格式
 - UI Automation 语义层：`codex_desktop_control_uia_status`、`codex_desktop_control_uia_tree`、`codex_desktop_control_uia_find`、`codex_desktop_control_uia_click`
+- 连续执行与观察：`codex_desktop_control_workflow`、`codex_desktop_control_observe`
 
-macOS 核心后端使用系统 `screencapture`、System Events、AppleScript 和 `pbcopy` / `pbpaste`，覆盖窗口、截图、点击、快捷键和粘贴。Windows UIA 工具在 macOS 上会明确返回不可用并引导回退到 OCR、视觉和坐标操作。
+macOS 核心后端使用系统 `screencapture`、System Events、Accessibility、CoreGraphics、AppleScript 和 `pbcopy` / `pbpaste`，覆盖窗口、截图、完整鼠标输入、快捷键、直接文本输入、粘贴和语义控件操作。
+
+`codex_desktop_control_workflow` 最多连续执行 50 步，默认在首个失败处停止，也可用 `continue_on_error=true` 继续。它不增加确认、白名单或应用限制。`observe_changes=true` 会返回整个工作流执行前后的像素变化比例和变化区域。
+
+`codex_desktop_control_observe` 会保存当前快照；将其返回的路径作为下一次调用的 `before_image_path`，即可得到两次界面的差异指标。
 
 ## macOS 权限
 

@@ -51,13 +51,25 @@ def main() -> None:
         )
         require(pasted.get('ok'), f'paste/verify failed: {pasted}')
 
+        workflow = server.codex_desktop_control_workflow(
+            steps=[
+                {'action': 'hotkey', 'arguments': {'keys': ['ctrl', 'end'], 'activate_title_contains': fixture.name}},
+                {'action': 'press_key', 'arguments': {'key': 'enter'}},
+                {'action': 'type_text', 'arguments': {'text': 'E2E_TYPED'}},
+                {'action': 'wait_for_text', 'arguments': {'query': 'E2E_TYPED', 'title_contains': fixture.name, 'timeout_ms': 8000}},
+            ],
+            observe_changes=True,
+        )
+        require(workflow.get('ok'), f'direct input workflow failed: {workflow}')
+        require(workflow.get('difference', {}).get('changed') is True, f'workflow did not observe a visual change: {workflow}')
+
         screenshot = server.codex_desktop_control_screenshot(
             title_contains=fixture.name,
             path='notepad_e2e.png',
         )
         require(screenshot.get('ok') and Path(screenshot['path']).is_file(), f'screenshot failed: {screenshot}')
 
-        print('OK: Notepad E2E covered window activation, paste, OCR verification, and screenshot.')
+        print('OK: Notepad E2E covered activation, paste, direct typing, workflow observation, OCR, and screenshot.')
     finally:
         proc.terminate()
         try:
