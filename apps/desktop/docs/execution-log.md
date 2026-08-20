@@ -1821,3 +1821,19 @@ Release and rollout evidence:
 - The assistant-maintained old Windows repository fast-forwarded to engine commit `3034185` and passed 117/117 root tests while preserving its three unrelated tool modifications. Its installed client upgraded to `0.8.18.0`; all 17 managed Bots received replacement PIDs, remained stable for at least 60 seconds, and the client was opened without arguments in the logged-in interactive session.
 - On the current device, the failed writing Bot had no live app-server child. Its stale activity record was cleared, the reviewed `3034185` engine files were loaded under replacement PID `8388`, and a real user-identity Feishu request completed in 19 seconds without `EPERM`, service-tier fallback, or premature app-server exit.
 - The current desktop executable remains `0.8.17.0` while this response and another writing Bot are active. A one-shot interactive scheduled watcher verifies the public installer hash, waits for every managed Bot to become idle, invokes the installed-upgrade verifier, requires replacement Bot PIDs plus 60 seconds of stability, opens the upgraded client without arguments, records the result, and unregisters itself. This avoids interrupting either active conversation.
+
+## 2026-08-20 - 0.8.19 public macOS release preparation
+
+- Confirmed the existing public `v0.8.18` Release contains exactly five Windows assets and no macOS package.
+- Confirmed the repository already has native x64/arm64 macOS build, bundled-tool preparation, checksum, and package-verification scripts.
+- The registered physical Mac is on the correct Hotmail tailnet but currently offline, so no Bot, installed application, or remote repository was changed.
+- Added an independent GitHub macOS build job and changed publication to require both Windows and macOS verification before creating the stable Release.
+- Kept macOS output unsigned and unnotarized, with the first-launch warning documented explicitly.
+- Root verification passed 117/117 tests. Desktop verification passed 193/196 tests with three expected platform skips.
+- The local Windows `0.8.19` package passed protocol-proxy smoke, staged-engine parity, packaged dependency checks and release verification. The installer is `176955021` bytes with SHA-256 `b03fcd4a641682e10106b4f3f72f4b725b4e2f3f64671c22ad632f60fd827927`.
+
+Adversarial review covered the three most likely release regressions:
+
+1. One platform could publish while the other failed. The publish job now depends on both build jobs and checks every required asset before creating the Release.
+2. A package could contain the wrong Node or Lark CLI architecture. The existing macOS verifier identifies both bundled executables with `/usr/bin/file` and requires verified x64 and arm64 application bundles.
+3. Users could mistake the public macOS package for a notarized build or expect silent in-app updates. Release documentation now states the unsigned trust model and first-launch approval flow; the existing updater continues to reject unsigned macOS automatic installation.

@@ -8,13 +8,17 @@ const workflow = fs.readFileSync(
   "utf8",
 );
 
-test("stable GitHub releases publish only verified Windows desktop assets", () => {
+test("stable GitHub releases publish verified Windows and macOS desktop assets", () => {
   assert.match(workflow, /^\s{2}build-windows:\s*$/m);
-  assert.match(workflow, /^\s{4}needs: \[build-windows\]\s*$/m);
-  assert.match(workflow, /Expected exactly five Windows release assets/);
-  assert.match(workflow, /macOS assets must not be published through the Windows stable channel/);
-  assert.doesNotMatch(workflow, /^\s{2}build-macos:\s*$/m);
-  assert.doesNotMatch(workflow, /macos-release|latest-mac\.yml|Codex-Feishu-Bridge-\*-mac-/);
+  assert.match(workflow, /^\s{2}build-macos:\s*$/m);
+  assert.match(workflow, /^\s{4}needs: \[build-windows, build-macos\]\s*$/m);
+  assert.match(workflow, /npm run dist:mac/);
+  assert.match(workflow, /CSC_IDENTITY_AUTO_DISCOVERY: "false"/);
+  assert.match(workflow, /macos-release/);
+  assert.match(workflow, /latest-mac\.yml/);
+  assert.match(workflow, /checksums-macos\.txt/);
+  assert.match(workflow, /Codex-Feishu-Bridge-\*-mac-\*\.dmg/);
+  assert.match(workflow, /Missing required release asset/);
 });
 
 test("release verification protects the packaged Codex runtime detector", () => {

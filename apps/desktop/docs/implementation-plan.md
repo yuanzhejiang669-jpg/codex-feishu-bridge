@@ -600,3 +600,11 @@ These risks are addressed with protocol versioning, active-run guards, transacti
 - Treat local state-file failures as `local_io`; never interpret them as Provider failures or retry a model turn without `service_tier`.
 - Make active-run registration, heartbeat, and cleanup best-effort after bounded persistence retries. A locked bookkeeping file must not block model startup, terminate a successful model turn, or destroy its app-server.
 - Publish the reviewed engine as Windows desktop `0.8.18`, then synchronize the current Windows device and the assistant-maintained old Windows device. macOS and the user-maintained lab device remain outside this correction.
+
+## 2026-08-20 - 0.8.19 public unsigned macOS packages
+
+- Replace the Windows-only Release contract with an atomic Windows and macOS workflow.
+- Build and verify unsigned macOS DMG and ZIP artifacts for both `arm64` and `x64` on a clean GitHub macOS runner.
+- Publish macOS artifacts only when both platform jobs pass and every required asset is present; reject unexpected files.
+- Keep Apple signing and notarization explicitly out of scope. Document the first-launch warning instead of weakening or bypassing macOS system controls.
+- Keep managed physical-Mac installation through Tailscale and SSH as an explicit maintenance path; do not restart Bots while the Mac is offline.
