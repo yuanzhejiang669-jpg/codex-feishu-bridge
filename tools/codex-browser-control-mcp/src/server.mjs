@@ -9,8 +9,11 @@ import path from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 
+import { SnapshotCache } from "./snapshot-cache.mjs";
+import { runBrowserWorkflow, toolPayload } from "./workflow.mjs";
+
 const SERVER_NAME = "codex-browser-control";
-const SERVER_VERSION = "0.6.0";
+const SERVER_VERSION = "0.7.0";
 const DEFAULT_PORT = Number(process.env.BROWSER_CONTROL_PORT || 9222);
 const DEFAULT_HOST = process.env.BROWSER_CONTROL_HOST || "127.0.0.1";
 const EXTENSION_BRIDGE_HOST = process.env.BROWSER_CONTROL_EXTENSION_HOST || "127.0.0.1";
@@ -44,6 +47,7 @@ const extensionSessions = new Map();
 const extensionPending = new Map();
 const extensionSockets = new Set();
 const playwrightSessions = new Map();
+const snapshotCache = new SnapshotCache(100);
 let activeTrace = null;
 let lastTrace = null;
 let playwrightModule = null;
@@ -201,6 +205,12 @@ function sanitizeTraceArgs(toolName, args = {}, options = {}) {
   const sanitized = sanitizeTraceValue(args, options);
   if (["browser_type", "browser_locator_type", "browser_playwright_type"].includes(toolName) && sanitized && typeof sanitized === "object" && Object.prototype.hasOwnProperty.call(sanitized, "value")) {
     sanitized.value = `[redacted typed text: ${String(args.value || "").length} chars]`;
+  }
+  if (toolName === "browser_workflow" && Array.isArray(args.steps) && Array.isArray(sanitized?.steps)) {
+    for (const [index, step] of args.steps.entries()) {
+      if (!step || typeof step.tool !== "string" || !sanitized.steps[index]) continue;
+      sanitized.steps[index].args = sanitizeTraceArgs(step.tool, step.args || {}, options);
+    }
   }
   return sanitized;
 }
@@ -747,6 +757,7 @@ class CdpClient {
     this.nextId = 1;
     this.pending = new Map();
     this.eventWaiters = new Map();
+    this.eventListeners = new Map();
     this.ws = new WebSocket(wsUrl);
     this.ready = new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error(`Timed out connecting to ${wsUrl}`)), 8000);
@@ -798,6 +809,19 @@ class CdpClient {
       if (remaining.length) this.eventWaiters.set(message.method, remaining);
       else this.eventWaiters.delete(message.method);
     }
+    if (message.method) {
+      const listeners = [
+        ...(this.eventListeners.get(message.method) || []),
+        ...(this.eventListeners.get("*") || []),
+      ];
+      for (const listener of listeners) {
+        try {
+          listener(message.params || {}, message.method);
+        } catch (error) {
+          console.error(`[${SERVER_NAME}] browser event listener failed`, error);
+        }
+      }
+    }
     collectTraceCdpEvent(this.tab, message);
   }
 
@@ -828,6 +852,18 @@ class CdpClient {
     });
   }
 
+  onEvent(method, listener) {
+    const listeners = this.eventListeners.get(method) || new Set();
+    listeners.add(listener);
+    this.eventListeners.set(method, listeners);
+    return () => {
+      const current = this.eventListeners.get(method);
+      if (!current) return;
+      current.delete(listener);
+      if (!current.size) this.eventListeners.delete(method);
+    };
+  }
+
   close() {
     try {
       this.ws.close();
@@ -850,6 +886,7 @@ class CdpClient {
       }
     }
     this.eventWaiters.clear();
+    this.eventListeners.clear();
   }
 }
 
@@ -892,6 +929,111 @@ async function withBrowser(args, callback) {
   } finally {
     cdp.close();
   }
+}
+
+function remoteObjectPreview(remote = {}) {
+  if (remote.value !== undefined) return truncateText(typeof remote.value === "string" ? remote.value : jsonText(remote.value), 500);
+  if (remote.unserializableValue != null) return String(remote.unserializableValue);
+  if (remote.description != null) return truncateText(remote.description, 500);
+  return remote.type || "undefined";
+}
+
+async function toolBrowserObserve(args = {}) {
+  const durationMs = Math.max(0, Math.min(Number(args.durationMs ?? 1000), 30000));
+  const maxEvents = Math.max(1, Math.min(Number(args.maxEvents || 200), 2000));
+  const includeConsole = args.includeConsole !== false;
+  const includeNetwork = args.includeNetwork !== false;
+  const includeSuccessfulResponses = args.includeSuccessfulResponses === true;
+
+  return withRawTab(args, async (cdp, tab) => {
+    const events = [];
+    const counts = { console: 0, exceptions: 0, requests: 0, responses: 0, failedRequests: 0, navigations: 0, dialogs: 0 };
+    let droppedEvents = 0;
+    const disposers = [];
+    const push = (event) => {
+      if (events.length < maxEvents) events.push(event);
+      else droppedEvents += 1;
+    };
+
+    if (includeConsole) {
+      disposers.push(cdp.onEvent("Runtime.consoleAPICalled", (event) => {
+        counts.console += 1;
+        push({ type: "console", level: event.type || "log", timestamp: event.timestamp, args: (event.args || []).map(remoteObjectPreview) });
+      }));
+      disposers.push(cdp.onEvent("Runtime.exceptionThrown", (event) => {
+        counts.exceptions += 1;
+        const details = event.exceptionDetails || {};
+        push({ type: "exception", timestamp: event.timestamp, text: details.text || "", description: remoteObjectPreview(details.exception || {}) });
+      }));
+      disposers.push(cdp.onEvent("Log.entryAdded", (event) => {
+        counts.console += 1;
+        const entry = event.entry || {};
+        push({ type: "log", level: entry.level || "", source: entry.source || "", text: truncateText(entry.text || "", 1000), url: entry.url || "" });
+      }));
+    }
+    if (includeNetwork) {
+      disposers.push(cdp.onEvent("Network.requestWillBeSent", () => { counts.requests += 1; }));
+      disposers.push(cdp.onEvent("Network.responseReceived", (event) => {
+        counts.responses += 1;
+        const response = event.response || {};
+        if (includeSuccessfulResponses || Number(response.status || 0) >= 400) {
+          push({ type: "response", requestId: event.requestId, status: response.status, statusText: response.statusText || "", url: response.url || "", mimeType: response.mimeType || "" });
+        }
+      }));
+      disposers.push(cdp.onEvent("Network.loadingFailed", (event) => {
+        counts.failedRequests += 1;
+        push({ type: "network_failure", requestId: event.requestId, errorText: event.errorText || "", canceled: Boolean(event.canceled), blockedReason: event.blockedReason || null });
+      }));
+    }
+    disposers.push(cdp.onEvent("Page.frameNavigated", (event) => {
+      if (event.frame?.parentId) return;
+      counts.navigations += 1;
+      push({ type: "navigation", url: event.frame?.url || "", name: event.frame?.name || "" });
+    }));
+    disposers.push(cdp.onEvent("Page.javascriptDialogOpening", (event) => {
+      counts.dialogs += 1;
+      push({ type: "dialog", dialogType: event.type || "", message: truncateText(event.message || "", 1000), url: event.url || "" });
+    }));
+
+    await cdp.send("Page.enable");
+    await cdp.send("Runtime.enable");
+    if (includeConsole) await cdp.send("Log.enable").catch(() => {});
+    if (includeNetwork) await cdp.send("Network.enable").catch(() => {});
+
+    let action = null;
+    let actionError = null;
+    const startedAt = Date.now();
+    try {
+      if (typeof args.actionScript === "string") {
+        const evaluated = await cdp.send("Runtime.evaluate", {
+          expression: `(async () => { ${args.actionScript}\n})()`,
+          awaitPromise: true,
+          returnByValue: args.returnByValue !== false,
+          userGesture: true,
+        }, Number(args.actionTimeoutMs || 15000));
+        if (evaluated.exceptionDetails) throw new Error(exceptionText(evaluated.exceptionDetails));
+        action = evaluated.result?.value ?? remoteObjectPreview(evaluated.result || {});
+      }
+      if (durationMs) await sleep(durationMs);
+    } catch (error) {
+      actionError = error.message;
+      if (durationMs) await sleep(durationMs);
+    } finally {
+      for (const dispose of disposers) dispose();
+    }
+
+    return toolResult({
+      ok: !actionError,
+      tabId: tab.id,
+      url: tab.url,
+      observedMs: Date.now() - startedAt,
+      action,
+      actionError,
+      counts,
+      droppedEvents,
+      events,
+    });
+  });
 }
 
 function wsAcceptKey(key) {
@@ -1702,6 +1844,7 @@ async function toolBrowserStart(args = {}) {
   launched.set(port, { pid: child.pid, executable, userDataDir, host });
 
   const version = await waitForDebugger({ port, host }, Number(args.timeoutMs || 15000));
+  snapshotCache.clearPrefix(`${host}:${port}:`);
   return toolResult({
     ok: true,
     started: true,
@@ -1757,6 +1900,7 @@ async function toolBrowserStop(args = {}) {
     }
   } finally {
     launched.delete(port);
+    snapshotCache.clearPrefix(`${host}:${port}:`);
     cdp.close();
   }
   return toolResult({ ok: true, host, port, closed: true });
@@ -1819,9 +1963,11 @@ async function toolBrowserActivate(args = {}) {
 
 async function toolBrowserClose(args = {}) {
   if (!args.tabId && !args.targetId) throw new Error("browser_close requires tabId");
-  const id = encodeURIComponent(String(args.tabId || args.targetId));
+  const rawId = String(args.tabId || args.targetId);
+  const id = encodeURIComponent(rawId);
   const result = await fetchText(`${debuggerBase(args)}/json/close/${id}`, {}, 5000);
-  return toolResult({ ok: true, tabId: String(args.tabId || args.targetId), result });
+  snapshotCache.clear(`${asHost(args.host)}:${asPort(args.port)}:${rawId}`);
+  return toolResult({ ok: true, tabId: rawId, result });
 }
 
 function targetSummary(target) {
@@ -2117,6 +2263,91 @@ async function toolBrowserPlaywrightStatus(args = {}) {
     error,
     sessions: [...playwrightSessions.values()].map(playwrightSessionSummary),
   });
+}
+
+async function toolBrowserBackendStatus(args = {}) {
+  const preserveLogin = args.preserveLogin !== false;
+  const allowContextChange = args.allowContextChange === true;
+  const [extension, cdp, playwright] = await Promise.all([
+    extensionBridgeDiagnostics(args).catch((error) => ({ status: "bridge_unreachable", sessionCount: 0, sessions: [], error: error.message })),
+    getVersion(args).then((version) => ({ connected: true, browser: version.Browser || null, webSocketDebuggerUrl: version.webSocketDebuggerUrl || null })).catch((error) => ({ connected: false, error: error.message })),
+    loadPlaywright().then((mod) => ({ available: true, version: mod?.version || null })).catch((error) => ({ available: false, error: error.message })),
+  ]);
+  const extensionReady = Number(extension.sessionCount || 0) > 0;
+  const playwrightActive = playwrightSessions.size > 0;
+  let preferred = null;
+  let reason = null;
+
+  if (extensionReady) {
+    preferred = "extension";
+    reason = "An extension-controlled Edge/Chrome tab is available, so the existing logged-in browser context can be preserved.";
+  } else if (preserveLogin && !allowContextChange) {
+    reason = "No extension session is connected. CDP or Playwright may use a different profile, so no automatic context-changing fallback was selected.";
+  } else if (cdp.connected) {
+    preferred = "cdp";
+    reason = "A Chrome DevTools endpoint is already connected.";
+  } else if (playwrightActive) {
+    preferred = "playwright";
+    reason = "An active Playwright session is available.";
+  } else if (playwright.available) {
+    preferred = "playwright";
+    reason = "Playwright is available but must be started before use.";
+  }
+
+  return toolResult({
+    ok: Boolean(preferred),
+    preserveLogin,
+    allowContextChange,
+    preferred,
+    reason,
+    backends: {
+      extension: {
+        ready: extensionReady,
+        status: extension.status,
+        mode: extension.mode,
+        sessionCount: extension.sessionCount || 0,
+        error: extension.error || null,
+        repairTool: extensionReady ? null : "browser_extension_repair",
+      },
+      cdp: {
+        ready: Boolean(cdp.connected),
+        host: asHost(args.host),
+        port: asPort(args.port),
+        browser: cdp.browser || null,
+        error: cdp.error || null,
+        startTool: cdp.connected ? null : "browser_start",
+      },
+      playwright: {
+        ready: playwrightActive,
+        available: playwright.available,
+        version: playwright.version || null,
+        sessionCount: playwrightSessions.size,
+        error: playwright.error || null,
+        startTool: playwrightActive ? null : "browser_playwright_start",
+      },
+    },
+  });
+}
+
+async function toolBrowserWorkflow(args = {}) {
+  const defaults = args.defaults && typeof args.defaults === "object" ? args.defaults : {};
+  const workflow = await runBrowserWorkflow(args.steps, {
+    maxSteps: args.maxSteps,
+    timeoutMs: args.timeoutMs,
+    invoke: (tool, stepArgs) => callTool(tool, { ...defaults, ...(stepArgs || {}) }),
+  });
+  let diagnostics = null;
+  if (!workflow.ok && args.diagnosticsOnError === true) {
+    try {
+      const diagnosticArgs = args.diagnostics && typeof args.diagnostics === "object"
+        ? { ...defaults, ...args.diagnostics }
+        : { ...defaults, includeVisual: false, includeAccessibility: false };
+      diagnostics = toolPayload(await toolBrowserPageDiagnostics(diagnosticArgs));
+    } catch (error) {
+      diagnostics = { ok: false, error: error.message };
+    }
+  }
+  return toolResult({ ...workflow, diagnostics });
 }
 
 async function toolBrowserPlaywrightStart(args = {}) {
@@ -3396,6 +3627,19 @@ function snapshotExpression(maxTextLength) {
 async function toolBrowserSnapshot(args = {}) {
   return withTab(args, async (cdp, tab) => {
     const snapshot = await evaluateValue(cdp, snapshotExpression(args.maxTextLength), Number(args.timeoutMs || 15000));
+    const cacheKey = String(args.cacheKey || `${asHost(args.host)}:${asPort(args.port)}:${tab.id}`);
+    if (args.resetCache) snapshotCache.clear(cacheKey);
+    if (args.incremental) {
+      const delta = snapshotCache.compare(cacheKey, snapshot, { maxTextLength: args.maxDeltaTextLength });
+      return toolResult({
+        ok: true,
+        tabId: tab.id,
+        incremental: true,
+        cacheKey,
+        ...delta,
+        ...(args.includeFull && !delta.baseline ? { snapshot } : {}),
+      });
+    }
     return toolResult({ tabId: tab.id, ...snapshot });
   });
 }
@@ -3953,6 +4197,66 @@ const tools = [
     },
   },
   {
+    name: "browser_backend_status",
+    description: "Inspect extension, CDP, and Playwright availability and recommend a backend without silently changing browser login context.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        host: commonTabProperties.host,
+        port: commonTabProperties.port,
+        preserveLogin: { type: "boolean", description: "Prefer the existing logged-in extension session. Defaults to true." },
+        allowContextChange: { type: "boolean", description: "Allow recommending a different-profile CDP or Playwright backend when no extension session exists. Defaults to false." },
+      },
+    },
+  },
+  {
+    name: "browser_workflow",
+    description: "Run an ordered multi-tool browser workflow in one MCP call. Steps may use any existing browser backend and reference earlier results with $0.data.path.",
+    inputSchema: {
+      type: "object",
+      required: ["steps"],
+      properties: {
+        defaults: { type: "object", description: "Arguments such as port, tabId, or sessionId merged into every step." },
+        steps: {
+          type: "array",
+          minItems: 1,
+          maxItems: 50,
+          items: {
+            type: "object",
+            required: ["tool"],
+            properties: {
+              tool: { type: "string", description: "Existing Browser Control tool name." },
+              args: { type: "object" },
+              continueOnError: { type: "boolean", description: "Continue after this step returns an error. Defaults to false." },
+            },
+          },
+        },
+        maxSteps: { type: "number", description: "Maximum accepted steps. Defaults to 25, hard limit 50." },
+        timeoutMs: { type: "number", description: "Overall workflow timeout checked between steps. Defaults to 120000." },
+        diagnosticsOnError: { type: "boolean", description: "Run lightweight page diagnostics only after a failed step. Defaults to false." },
+        diagnostics: { type: "object", description: "Optional browser_page_diagnostics arguments used after failure." },
+      },
+    },
+  },
+  {
+    name: "browser_observe",
+    description: "Observe console, JavaScript exceptions, failed HTTP responses, navigation, and dialogs around an optional page-side action without slowing normal browser tools.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ...commonTabProperties,
+        actionScript: { type: "string", description: "Optional page-side JavaScript executed after event listeners are armed." },
+        actionTimeoutMs: { type: "number" },
+        returnByValue: { type: "boolean" },
+        durationMs: { type: "number", description: "Observation window after the action. Defaults to 1000, maximum 30000." },
+        maxEvents: { type: "number", description: "Maximum returned event records. Defaults to 200." },
+        includeConsole: { type: "boolean", description: "Include console and JavaScript exceptions. Defaults to true." },
+        includeNetwork: { type: "boolean", description: "Include network failures and HTTP errors. Defaults to true." },
+        includeSuccessfulResponses: { type: "boolean", description: "Also return successful network responses. Defaults to false." },
+      },
+    },
+  },
+  {
     name: "browser_start",
     description: "Start a visible Chrome/Edge instance with local CDP enabled, or report the existing debugger if already running.",
     inputSchema: {
@@ -4289,12 +4593,17 @@ const tools = [
   },
   {
     name: "browser_snapshot",
-    description: "Read page title, URL, visible text, and common interactive elements.",
+    description: "Read page title, URL, visible text, and common interactive elements, optionally returning only changes since the previous snapshot.",
     inputSchema: {
       type: "object",
       properties: {
         ...commonTabProperties,
         maxTextLength: { type: "number", description: "Maximum visible text length. Defaults to 20000." },
+        incremental: { type: "boolean", description: "Return a baseline once, then only text and element changes for this tab." },
+        cacheKey: { type: "string", description: "Optional stable cache key. Defaults to host, port, and tab id." },
+        resetCache: { type: "boolean", description: "Forget the previous snapshot for this cache key before reading." },
+        maxDeltaTextLength: { type: "number", description: "Maximum inserted text returned by an incremental snapshot. Defaults to 6000." },
+        includeFull: { type: "boolean", description: "Also include the full snapshot when an incremental update changed. Defaults to false." },
         timeoutMs: { type: "number" },
       },
     },
@@ -4820,6 +5129,9 @@ async function callToolInner(name, args) {
     case "browser_trace_status": return toolBrowserTraceStatus(args);
     case "browser_trace_stop": return toolBrowserTraceStop(args);
     case "browser_trace_export": return toolBrowserTraceExport(args);
+    case "browser_backend_status": return toolBrowserBackendStatus(args);
+    case "browser_workflow": return toolBrowserWorkflow(args);
+    case "browser_observe": return toolBrowserObserve(args);
     case "browser_start": return toolBrowserStart(args);
     case "browser_status": return toolBrowserStatus(args);
     case "browser_stop": return toolBrowserStop(args);

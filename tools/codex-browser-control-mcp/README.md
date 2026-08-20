@@ -5,9 +5,13 @@ Independent MCP server for controlling local Chrome or Edge through Chrome DevTo
 ## What It Provides
 
 - CDP browser lifecycle: `browser_start`, `browser_status`, `browser_stop`.
+- Backend routing visibility: `browser_backend_status` reports extension, CDP, and Playwright readiness without silently changing login context.
+- Low-latency composition: `browser_workflow` runs ordered calls to existing tools in one MCP round trip and supports references such as `$0.data.tabId`.
+- On-demand event diagnostics: `browser_observe` captures console output, JavaScript exceptions, HTTP errors, failed requests, navigation, and dialogs around an optional action.
 - Tab management: `browser_list_tabs`, `browser_open`, `browser_activate`, `browser_close`.
 - Page actions: `browser_click`, `browser_type`, `browser_scroll`, `browser_wait_for`.
 - Inspection: `browser_snapshot`, `browser_scan`, `browser_screenshot`.
+- Incremental inspection: `browser_snapshot` can cache a per-tab baseline and return only subsequent text and element changes.
 - Advanced CDP: `browser_eval`, `browser_cdp`, `browser_cdp_batch`, `browser_cookies`.
 - Trace/replay diagnostics: `browser_trace_start`, `browser_trace_status`, `browser_trace_stop`, `browser_trace_export`.
 - Workflow reliability helpers: `browser_wait_for_new_tab`, `browser_dialog`, `browser_set_download_behavior`, `browser_wait_for_download`, `browser_grant_permissions`, `browser_reset_permissions`.
@@ -94,6 +98,35 @@ Use the high-level helpers instead of hand-writing raw CDP commands when a workf
 - `browser_set_download_behavior` configures the download directory and download event reporting.
 - `browser_wait_for_download` waits for the next matching download to complete and returns the saved path.
 - `browser_grant_permissions` and `browser_reset_permissions` wrap common browser permission setup and cleanup.
+
+### Backend selection without losing login state
+
+Use `browser_backend_status` before a workflow when the available browser context is uncertain. With its default `preserveLogin: true`, it prefers a connected extension-controlled Edge/Chrome tab. If no extension session exists, it reports CDP and Playwright readiness but does not pretend that switching to a different profile would preserve the current login.
+
+This is routing information rather than an operation gate. Existing extension, raw CDP, JavaScript, cookie, upload, download, and submission capabilities remain available without added confirmation steps.
+
+### One-round-trip workflows
+
+`browser_workflow` reduces agent and Bridge latency by executing existing tools sequentially inside one MCP request:
+
+```json
+{
+  "defaults": { "port": 9222, "tabId": "page-id" },
+  "steps": [
+    { "tool": "browser_locator_type", "args": { "label": "Name", "value": "Codex", "clear": true } },
+    { "tool": "browser_locator_click", "args": { "role": "button", "name": "Run" } },
+    { "tool": "browser_eval", "args": { "script": "document.title" } }
+  ]
+}
+```
+
+Steps stop on the first error unless that step sets `continueOnError: true`. Later arguments may reference prior step results, for example `$0.data.tabId`. Set `diagnosticsOnError: true` only when automatic post-failure page diagnostics are worth the extra work; normal workflows do not pay that cost.
+
+### On-demand observation and incremental snapshots
+
+Use `browser_observe` when an action appears successful but the page does not produce the expected result. Event listeners are armed before `actionScript`, so short-lived console errors, failed requests, navigation, and dialogs are not missed. Ordinary click and type tools do not enable this observation automatically and retain their existing latency.
+
+Set `incremental: true` on `browser_snapshot` to receive a full baseline on the first call and compact text/element changes thereafter. Use `resetCache: true` to start a new baseline or `includeFull: true` when both the delta and complete current snapshot are needed.
 
 ## Visual Verification
 

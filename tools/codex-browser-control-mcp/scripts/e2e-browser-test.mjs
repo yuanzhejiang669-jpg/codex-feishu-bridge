@@ -104,18 +104,47 @@ try {
     timeoutMs: 10000,
   });
 
-  await rpc.tool("browser_type", {
+  const baseline = await rpc.tool("browser_snapshot", {
     port: browserPort,
     tabId: opened.tabId,
-    selector: "#name",
-    value: "Codex",
-    clear: true,
+    incremental: true,
+    resetCache: true,
   });
-  await rpc.tool("browser_click", {
+  if (!baseline.baseline || !baseline.snapshot?.elements?.length) {
+    throw new Error("incremental browser_snapshot did not return an initial baseline");
+  }
+
+  const workflow = await rpc.tool("browser_workflow", {
+    defaults: { port: browserPort, tabId: opened.tabId },
+    steps: [
+      { tool: "browser_type", args: { selector: "#name", value: "Codex", clear: true } },
+      { tool: "browser_click", args: { selector: "#go" } },
+      { tool: "browser_eval", args: { script: "({ value: document.querySelector('#name').value, clicked: document.body.dataset.clicked })" } },
+    ],
+  });
+  if (!workflow.ok || workflow.completedSteps !== 3 || workflow.results?.[2]?.data?.result?.value?.clicked !== "yes") {
+    throw new Error(`browser_workflow returned unexpected results: ${JSON.stringify(workflow)}`);
+  }
+
+  const observed = await rpc.tool("browser_observe", {
     port: browserPort,
     tabId: opened.tabId,
-    selector: "#go",
+    actionScript: "console.error('e2e-observed-error'); document.body.dataset.observed='yes'; return location.href;",
+    durationMs: 100,
   });
+  if (!observed.ok || observed.counts?.console < 1 || !observed.events?.some((event) => event.type === "console")) {
+    throw new Error(`browser_observe did not capture the console event: ${JSON.stringify(observed)}`);
+  }
+
+  const delta = await rpc.tool("browser_snapshot", {
+    port: browserPort,
+    tabId: opened.tabId,
+    incremental: true,
+  });
+  if (delta.baseline || !delta.changed || (!delta.text?.changed && !delta.counts?.added && !delta.counts?.removed && !delta.counts?.changed)) {
+    throw new Error(`incremental browser_snapshot did not report page changes: ${JSON.stringify(delta)}`);
+  }
+
   const evaluated = await rpc.tool("browser_eval", {
     port: browserPort,
     tabId: opened.tabId,

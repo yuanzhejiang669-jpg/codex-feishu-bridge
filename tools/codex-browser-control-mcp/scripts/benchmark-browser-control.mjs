@@ -195,7 +195,7 @@ try {
     if (initialized.serverInfo?.name !== "codex-browser-control") throw new Error("Unexpected serverInfo");
     const listed = await rpc.request("tools/list", {});
     const names = listed.tools.map((tool) => tool.name);
-    for (const required of ["browser_page_diagnostics", "browser_visual_compare", "browser_wait_for_download", "browser_playwright_status"]) {
+    for (const required of ["browser_backend_status", "browser_workflow", "browser_observe", "browser_page_diagnostics", "browser_visual_compare", "browser_wait_for_download", "browser_playwright_status"]) {
       if (!names.includes(required)) throw new Error(`Missing ${required}`);
     }
     return { toolCount: names.length };
@@ -238,6 +238,41 @@ try {
       throw new Error(`Unexpected page state: ${JSON.stringify(state.result?.value)}`);
     }
     return { candidateCount: found.locator.candidates?.length || 0, status: state.result.value.status };
+  });
+
+  await run("multi-step workflow", "workflow", async () => {
+    const workflow = await rpc.tool("browser_workflow", {
+      defaults: { port: browserPort, tabId },
+      steps: [
+        { tool: "browser_locator_type", args: { label: "Name", value: "Workflow", clear: true } },
+        { tool: "browser_locator_click", args: { role: "button", name: "Run" } },
+        { tool: "browser_eval", args: { script: "document.getElementById('status').textContent" } },
+      ],
+    });
+    if (!workflow.ok || workflow.completedSteps !== 3 || !String(workflow.results?.[2]?.data?.result?.value || "").includes("Workflow")) {
+      throw new Error(`Workflow did not complete: ${JSON.stringify(workflow)}`);
+    }
+    return { durationMs: workflow.durationMs, completedSteps: workflow.completedSteps };
+  });
+
+  await run("incremental snapshot", "snapshot", async () => {
+    const baseline = await rpc.tool("browser_snapshot", { port: browserPort, tabId, incremental: true, resetCache: true });
+    if (!baseline.baseline) throw new Error("Initial snapshot was not a baseline");
+    await rpc.tool("browser_eval", { port: browserPort, tabId, script: "document.getElementById('status').textContent='Snapshot changed'" });
+    const delta = await rpc.tool("browser_snapshot", { port: browserPort, tabId, incremental: true });
+    if (delta.baseline || !delta.changed || !delta.text?.changed) throw new Error(`Snapshot delta missing: ${JSON.stringify(delta)}`);
+    return { insertedLength: delta.text.insertedLength, elementChanges: delta.counts };
+  });
+
+  await run("console and navigation observation", "observation", async () => {
+    const observed = await rpc.tool("browser_observe", {
+      port: browserPort,
+      tabId,
+      actionScript: "console.warn('benchmark-observed'); return document.title;",
+      durationMs: 100,
+    });
+    if (!observed.ok || observed.counts?.console < 1) throw new Error(`Observation missing console event: ${JSON.stringify(observed)}`);
+    return { counts: observed.counts, eventCount: observed.events.length };
   });
 
   await run("accessibility snapshot", "accessibility", async () => {
@@ -374,7 +409,7 @@ const failed = tests.length - passed;
 const durationMs = tests.reduce((sum, test) => sum + test.durationMs, 0);
 const averageLatencyMs = tests.length ? Math.round(durationMs / tests.length) : 0;
 const capabilities = [...new Set(tests.filter((test) => test.ok).map((test) => test.capability))].sort();
-const expectedCapabilities = ["accessibility", "diagnostics", "dialogs", "downloads", "lifecycle", "locator", "permissions", "playwright", "protocol", "tabs", "trace", "visual"];
+const expectedCapabilities = ["accessibility", "diagnostics", "dialogs", "downloads", "lifecycle", "locator", "observation", "permissions", "playwright", "protocol", "snapshot", "tabs", "trace", "visual", "workflow"];
 const coverageRatio = capabilities.length / expectedCapabilities.length;
 const passRatio = tests.length ? passed / tests.length : 0;
 const score = Math.round(((passRatio * 0.82 + coverageRatio * 0.18) * 10) * 10) / 10;

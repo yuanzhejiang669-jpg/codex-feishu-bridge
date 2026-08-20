@@ -75,6 +75,9 @@ try {
     "browser_trace_status",
     "browser_trace_stop",
     "browser_trace_export",
+    "browser_backend_status",
+    "browser_workflow",
+    "browser_observe",
     "browser_start",
     "browser_status",
     "browser_stop",
@@ -133,6 +136,32 @@ try {
     throw new Error("browser_playwright_status did not return a stable status payload");
   }
 
+  const backendStatus = await request("tools/call", {
+    name: "browser_backend_status",
+    arguments: { port: 65530 },
+  });
+  const backendStatusJson = JSON.parse(backendStatus.content?.[0]?.text || "{}");
+  if (!backendStatusJson.backends?.extension || !backendStatusJson.backends?.cdp || !backendStatusJson.backends?.playwright) {
+    throw new Error("browser_backend_status did not report all three backends");
+  }
+  if (backendStatusJson.preferred !== null || !backendStatusJson.preserveLogin) {
+    throw new Error("browser_backend_status silently recommended a context-changing fallback");
+  }
+
+  const workflow = await request("tools/call", {
+    name: "browser_workflow",
+    arguments: {
+      steps: [
+        { tool: "browser_status", args: { port: 65530 } },
+        { tool: "browser_status", args: { port: "$0.data.port" } },
+      ],
+    },
+  });
+  const workflowJson = JSON.parse(workflow.content?.[0]?.text || "{}");
+  if (!workflowJson.ok || workflowJson.completedSteps !== 2 || workflowJson.results?.[1]?.data?.port !== 65530) {
+    throw new Error(`browser_workflow did not resolve and execute step references: ${JSON.stringify(workflowJson)}`);
+  }
+
   const rejectedTracePath = await request("tools/call", {
     name: "browser_trace_start",
     arguments: { path: rejectedPackageOutput },
@@ -164,8 +193,13 @@ try {
 
   await request("tools/call", { name: "browser_status", arguments: { port: 65529 } });
   const typedSecret = "TRACE_TYPED_SECRET_47d164";
+  const workflowTypedSecret = "TRACE_WORKFLOW_TYPED_SECRET_f2cb19";
   const scriptSecret = "TRACE_SCRIPT_SECRET_c42b93";
   await request("tools/call", { name: "browser_playwright_type", arguments: { value: typedSecret, selector: "input" } });
+  await request("tools/call", {
+    name: "browser_workflow",
+    arguments: { steps: [{ tool: "browser_type", args: { selector: "input", value: workflowTypedSecret } }] },
+  });
   await request("tools/call", { name: "browser_extension_execute_js", arguments: { script: `return ${JSON.stringify(scriptSecret)}` } });
 
   const traceStatus = await request("tools/call", { name: "browser_trace_status", arguments: {} });
@@ -180,14 +214,18 @@ try {
     throw new Error("browser_trace_stop did not export the trace");
   }
   const traceText = readFileSync(traceStoppedJson.exported, "utf8");
-  if (traceText.includes(typedSecret) || traceText.includes(scriptSecret) || traceText.includes('"preview"')) {
+  if (traceText.includes(typedSecret) || traceText.includes(workflowTypedSecret) || traceText.includes(scriptSecret) || traceText.includes('"preview"')) {
     throw new Error("Trace export retained typed text, script content, or a script preview");
   }
   const traceJson = JSON.parse(traceText);
   const typedStep = traceJson.steps.find((step) => step.tool === "browser_playwright_type");
+  const workflowStep = traceJson.steps.find((step) => step.tool === "browser_workflow");
   const scriptStep = traceJson.steps.find((step) => step.tool === "browser_extension_execute_js");
   if (!String(typedStep?.args?.value || "").includes("redacted typed text")) {
     throw new Error(`Playwright typed text was not explicitly redacted: ${JSON.stringify(typedStep)}`);
+  }
+  if (!String(workflowStep?.args?.steps?.[0]?.args?.value || "").includes("redacted typed text")) {
+    throw new Error(`Workflow typed text was not explicitly redacted: ${JSON.stringify(workflowStep)}`);
   }
   if (scriptStep?.args?.script?.length !== `return ${JSON.stringify(scriptSecret)}`.length || Object.keys(scriptStep.args.script).join(",") !== "length") {
     throw new Error(`Script trace metadata did not retain only length: ${JSON.stringify(scriptStep)}`);
