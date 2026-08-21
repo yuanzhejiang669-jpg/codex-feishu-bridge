@@ -238,3 +238,41 @@ test("reports a missing user identity as a capability warning", async () => {
     fs.rmSync(value.root, { recursive: true, force: true });
   }
 });
+
+test("accepts a complete Pi runtime without requiring Codex", async () => {
+  const previous = process.env.BACKUP_API_KEY;
+  process.env.BACKUP_API_KEY = "test-secret";
+  const value = fixture({ mode: "global", id: "backup-api", model: "gpt-test", envKey: "BACKUP_API_KEY" });
+  try {
+    const agentHome = path.join(value.root, "pi-home");
+    const sessionDir = path.join(agentHome, "sessions");
+    const extensionPath = path.join(value.root, "pi-capabilities.ts");
+    const capabilitiesPath = path.join(value.root, "capabilities.json");
+    const skillPath = path.join(value.root, "skills");
+    for (const target of [path.join(agentHome, "models.json"), path.join(agentHome, "settings.json"), extensionPath, capabilitiesPath]) {
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(target, "{}\n");
+    }
+    fs.mkdirSync(skillPath, { recursive: true });
+    fs.mkdirSync(sessionDir, { recursive: true });
+    const configPath = path.join(value.botRoot, "bot.json");
+    const bot = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    Object.assign(bot, { engine: "pi", agentHome, sessionDir, piRuntime: { extensionPath, capabilitiesPath, skillPaths: [skillPath] } });
+    fs.writeFileSync(configPath, JSON.stringify(bot));
+    const result = await checkBotReadiness("assistant-1", {
+      dataRoot: value.root,
+      larkCliPath: "lark-cli.exe",
+      codexAvailable: false,
+      engineAvailable: true,
+      runtimeBots: [],
+      runLarkCli: successfulCli,
+    });
+    assert.equal(result.readyToStart, true);
+    assert.equal(result.checks.find((item) => item.id === "agentRuntime").status, "good");
+    assert.equal(result.checks.some((item) => item.id === "codex"), false);
+  } finally {
+    if (previous == null) delete process.env.BACKUP_API_KEY;
+    else process.env.BACKUP_API_KEY = previous;
+    fs.rmSync(value.root, { recursive: true, force: true });
+  }
+});

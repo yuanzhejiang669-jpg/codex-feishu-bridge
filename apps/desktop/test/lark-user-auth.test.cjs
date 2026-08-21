@@ -3,7 +3,12 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
-const { authorizeLarkUser, parseJsonOutput } = require("../src/main/services/lark-user-auth.cjs");
+const {
+  authorizeLarkUser,
+  beginLarkUserAuthorization,
+  completeLarkUserAuthorization,
+  parseJsonOutput,
+} = require("../src/main/services/lark-user-auth.cjs");
 const { DEFAULT_PERMISSION_POLICY } = require("../src/main/services/permission-policy.cjs");
 
 function fixture() {
@@ -82,4 +87,35 @@ test("rejects unmanaged Bot names and incomplete user authorization", async () =
 
 test("parses JSON surrounded by lark-cli notices", () => {
   assert.deepEqual(parseJsonOutput("notice\n{\"ok\":true}\n"), { ok: true });
+});
+
+test("exposes resumable begin and complete user authorization stages", async () => {
+  const root = fixture();
+  const calls = [];
+  const options = {
+    dataRoot: root,
+    larkCliPath: "lark-cli.exe",
+    runLarkCli: async (_tool, args) => {
+      calls.push(args);
+      if (args.includes("--no-wait")) return { stdout: JSON.stringify({
+        verification_url: "https://accounts.example.test/device",
+        device_code: "one-time-code",
+        expires_in: 300,
+      }) };
+      if (args.includes("--device-code")) return { stdout: "{}" };
+      return { stdout: JSON.stringify({ identities: { user: {
+        available: true, verified: true, status: "ready", name: "Test User",
+      } } }) };
+    },
+  };
+  try {
+    const pending = await beginLarkUserAuthorization("assistant-1", options);
+    assert.equal(pending.verificationUrl, "https://accounts.example.test/device");
+    assert.equal(pending.deviceCode, "one-time-code");
+    assert.equal(pending.expiresIn, 300);
+    assert.equal(calls.length, 1);
+    const result = await completeLarkUserAuthorization("assistant-1", pending.deviceCode, options);
+    assert.equal(result.identity.verified, true);
+    assert.equal(calls.length, 3);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

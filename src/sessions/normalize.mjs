@@ -46,16 +46,22 @@ export function normalizeTokenUsageBreakdown(value) {
 
 export function normalizeContextUsage(value) {
   if (!value || typeof value !== "object") return null;
-  const usedTokens = Number(value.usedTokens);
-  const contextWindow = Number(value.contextWindow);
-  const percent = Number(value.percent);
-  if (!Number.isFinite(usedTokens) && !Number.isFinite(contextWindow) && !Number.isFinite(percent)) return null;
+  const usedTokens = optionalFiniteNumber(value.usedTokens);
+  const contextWindow = optionalFiniteNumber(value.contextWindow);
+  const percent = optionalFiniteNumber(value.percent);
+  if (usedTokens === null && contextWindow === null && percent === null) return null;
   return {
-    usedTokens: Number.isFinite(usedTokens) ? usedTokens : null,
-    contextWindow: Number.isFinite(contextWindow) && contextWindow > 0 ? contextWindow : null,
-    percent: Number.isFinite(percent) ? percent : null,
+    usedTokens,
+    contextWindow: contextWindow !== null && contextWindow > 0 ? contextWindow : null,
+    percent,
     updatedAt: Number(value.updatedAt) || Date.now(),
   };
+}
+
+function optionalFiniteNumber(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
 }
 
 export function contextUsageFromTokenUsage(value) {

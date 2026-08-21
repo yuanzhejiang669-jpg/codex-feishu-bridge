@@ -42,6 +42,8 @@ import {
   truncateCardText,
 } from "./src/feishu/cards/primitives.mjs";
 import { createPendingAttachmentStore } from "./src/attachments/pending.mjs";
+import { agentEngineLabel, normalizeAgentEngine } from "./src/agents/engine.mjs";
+import { createAgentEngineRegistry } from "./src/agents/registry.mjs";
 import { createLogger } from "./src/logging/logger.mjs";
 import {
   FAST_SERVICE_TIER,
@@ -51,6 +53,7 @@ import {
 import { AppServerClient } from "./src/codex/app-server-client.mjs";
 import { createAppServerPool } from "./src/codex/app-server-pool.mjs";
 import { createAppServerProtocol } from "./src/codex/app-server-protocol.mjs";
+import { CodexEngineAdapter } from "./src/codex/engine-adapter.mjs";
 import {
   codexRuntimeVersionLines,
   readCodexRuntimeVersionStatus,
@@ -75,6 +78,16 @@ import {
   renderRunActivityMarkdown,
 } from "./src/runtime/run-activity.mjs";
 import { createSeenEventsStore } from "./src/runtime/seen-events.mjs";
+import { buildPiRpcArguments } from "./src/pi/config.mjs";
+import { PiEngineAdapter } from "./src/pi/engine-adapter.mjs";
+import { PiRpcClient } from "./src/pi/rpc-client.mjs";
+import {
+  activePiSetupBot,
+  createPiSetupRequest,
+  mutatePiSetupState,
+  piSetupPath,
+  readPiSetupState,
+} from "./src/pi/setup-state.mjs";
 import {
   contextUsageFromTokenUsage,
   maxContextUsage,
@@ -88,6 +101,7 @@ import {
   parseDeleteSelectionSpec,
 } from "./src/sessions/delete-selection.mjs";
 import { createSessionStore } from "./src/sessions/store.mjs";
+import { normalizeEngineSessionIdentity, sessionMatchesEngine } from "./src/sessions/engine-state.mjs";
 import {
   evaluateThreadHealth,
   markThreadHealthNotified,
@@ -126,6 +140,13 @@ import modelReasoning from "./src/config/model-reasoning.cjs";
 
 const { acceptedEfforts, capabilityOutcomeLines, loadRegistry: loadReasoningRegistry, mapReasoningEffort, reviewStatus: reasoningReviewStatus } = modelReasoning;
 
+function parsePathList(value) {
+  return String(value || "")
+    .split(path.delimiter)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_TOOLS = resolveDefaultTools();
 const DEFAULT_DATA_ROOT = resolveDefaultDataRoot();
@@ -139,6 +160,7 @@ const DESKTOP_CODEX_HOME_PATH = CONFIGURED_DESKTOP_CODEX_HOME
   : "";
 
 const CONFIG = {
+  agentEngine: normalizeAgentEngine(process.env.CODEX_FEISHU_AGENT_ENGINE),
   workspace: process.env.CODEX_FEISHU_WORKSPACE || process.cwd(),
   eventKeys: EVENT_KEYS,
   eventKey: EVENT_KEYS[0] || "im.message.receive_v1",
@@ -154,6 +176,17 @@ const CONFIG = {
   appServerIdleTtlMs: parseDurationMs(process.env.CODEX_FEISHU_APP_SERVER_IDLE_TTL_MS, 15 * 60_000),
   appServerPoolSize: Number(process.env.CODEX_FEISHU_APP_SERVER_POOL_SIZE || process.env.CODEX_FEISHU_MAX_CONCURRENT || "1"),
   disableMcp: (process.env.CODEX_FEISHU_DISABLE_MCP || "0") !== "0",
+  piAgentHome: String(process.env.PI_CODING_AGENT_DIR || "").trim(),
+  piSessionDir: String(process.env.CODEX_FEISHU_PI_SESSION_DIR || "").trim(),
+  piProvider: String(process.env.CODEX_FEISHU_PI_PROVIDER || "backup-api").trim(),
+  piModel: String(process.env.CODEX_FEISHU_PI_MODEL || process.env.CODEX_FEISHU_MODEL || "").trim(),
+  piThinking: String(process.env.CODEX_FEISHU_PI_THINKING || process.env.CODEX_FEISHU_REASONING || "medium").trim(),
+  piExtensions: parsePathList(process.env.CODEX_FEISHU_PI_EXTENSIONS),
+  piSkills: parsePathList(process.env.CODEX_FEISHU_PI_SKILLS),
+  piCapabilitiesConfig: String(process.env.CODEX_FEISHU_PI_CAPABILITIES_CONFIG || "").trim(),
+  desktopDataRoot: String(process.env.CODEX_FEISHU_DESKTOP_DATA_ROOT || "").trim(),
+  piSetupProvider: String(process.env.CODEX_FEISHU_PI_SETUP_PROVIDER || "backup-api").trim(),
+  piSetupModel: String(process.env.CODEX_FEISHU_PI_SETUP_MODEL || "gpt-5.6-sol").trim(),
   maxConcurrent: Number(process.env.CODEX_FEISHU_MAX_CONCURRENT || "1"),
   maxReplyChars: Number(process.env.CODEX_FEISHU_MAX_REPLY_CHARS || "6000"),
   listLimit: Number(process.env.CODEX_FEISHU_LIST_LIMIT || "100"),
@@ -211,6 +244,7 @@ const activeRunsPath = path.join(CONFIG.stateDir, "active-runs.json");
 const pidPath = path.join(CONFIG.stateDir, "bridge.pid");
 const lockPath = path.join(CONFIG.stateDir, "bridge.lock.json");
 const stopPath = path.join(CONFIG.stateDir, "bridge.stop");
+const piSetupFilePath = CONFIG.desktopDataRoot ? piSetupPath(CONFIG.desktopDataRoot) : "";
 const larkDataTempDir = path.join(CONFIG.stateDir, "tmp");
 const formulaTempDir = path.join(CONFIG.stateDir, "tmp", "formulas");
 const eventLockScope = resolveLarkEventLockScope(CONFIG.larkProfile);
@@ -369,9 +403,18 @@ const {
   replyFallback,
   runLark,
   sendMarkdown,
+  sendImage,
   sendText,
   uploadImage,
 } = larkClient;
+let piSetupArtifactInFlight = false;
+const piSetupArtifactTimer = setInterval(() => {
+  void deliverPiSetupArtifact().catch((error) => {
+    log("WARN", "Pi setup QR delivery failed", { error: String(error?.message || error).slice(0, 1000) });
+  });
+}, 1_000);
+piSetupArtifactTimer.unref?.();
+shutdownCallbacks.add(() => clearInterval(piSetupArtifactTimer));
 const formulaImageService = createFormulaImageService({
   enabled: CONFIG.formulaRendering && CONFIG.useCards,
   browserExecutable: CONFIG.formulaBrowserBin,
@@ -487,6 +530,7 @@ const sessionStore = createSessionStore({
   normalizeSessionData,
   dedupeSessions,
   sessionListLimit,
+  isSessionCompatible: (session) => sessionMatchesEngine(session, CONFIG.agentEngine),
 });
 const {
   getChatState,
@@ -549,8 +593,36 @@ const appServerPool = createAppServerPool({
   idleTtlMs: CONFIG.appServerIdleTtlMs,
   log,
 });
+const codexEngineAdapter = new CodexEngineAdapter({
+  run: (event, session, state, onState) => runCodex(event, session, state, onState),
+  steer: (activeRun, input) => activeRun.client.request(
+    "turn/steer",
+    appServerSteerParams(activeRun.threadId, activeRun.turnId, input.event, input.userContent),
+    60_000,
+  ),
+  abort: (activeRun) => activeRun?.client?.stop(),
+  compact: (session) => compactAppServerThread(session),
+  status: (session) => ({
+    engine: "codex",
+    sessionId: session?.id || "",
+    threadId: session?.codexThreadId || "",
+    threadStatus: session?.lastThreadStatus || "",
+  }),
+  dispose: (reason) => appServerPool.closeAll(reason),
+});
+const piEngineAdapter = new PiEngineAdapter({
+  createClient: (session) => startPiRpcClient(session),
+  sessionDir: CONFIG.piSessionDir,
+  textFromEvent: (event) => appServerProtocol.userText(event, userTextFromContent(event.content)),
+  persistSession: () => saveSessions(),
+  reduceEvent: reducePiRunEvent,
+  log,
+  readyTimeoutMs: 60_000,
+  turnTimeoutMs: CONFIG.codexTimeoutMs,
+});
+const agentEngineRegistry = createAgentEngineRegistry([codexEngineAdapter, piEngineAdapter]);
 shutdownCallbacks.add(() => {
-  void appServerPool.closeAll("bridge-shutdown");
+  void agentEngineRegistry.dispose("bridge-shutdown");
 });
 
 function cleanOverride(value) {
@@ -631,6 +703,24 @@ function recordFailureStats(failure) {
 }
 
 async function resetCurrentSession(chatId) {
+  const current = getSession(chatId);
+  if (current.engine === "pi") {
+    const pending = sessionMutationWorkForChat(chatId);
+    if (pending > 0) throw new Error(`当前聊天还有 ${pending} 条正在处理或等待的消息；请等待完成，或先发送 /stop queue，再执行 /reset。`);
+    const status = await agentEngineRegistry.get("pi").status(current);
+    if (status.active) throw new Error("当前 Pi 任务仍在运行，请先发送 /stop。");
+    if (current.piSessionId || current.piSessionFile) {
+      await agentEngineRegistry.get("pi").resetSession(current);
+    }
+    current.messages = [];
+    current.piUsage = null;
+    current.piContextUsage = null;
+    current.piContextPeakUsage = null;
+    current.piCompactedAt = null;
+    current.updatedAt = Date.now();
+    saveSessions();
+    return current;
+  }
   await syncChatSessionsWithCodex(chatId);
   const session = getSession(chatId);
   session.messages = [];
@@ -648,20 +738,26 @@ async function resetCurrentSession(chatId) {
 
 function normalizeSessionData(session) {
   const now = Date.now();
+  const identity = normalizeEngineSessionIdentity(session);
+  const engine = identity.engine;
   return {
     id: session?.id || crypto.randomBytes(4).toString("hex"),
     title: session?.title || "未命名会话",
     createdAt: Number(session?.createdAt) || now,
     updatedAt: Number(session?.updatedAt) || Number(session?.createdAt) || now,
     messages: Array.isArray(session?.messages) ? session.messages : [],
-    codexThreadId: typeof session?.codexThreadId === "string" ? session.codexThreadId : "",
-    lastTokenUsage: normalizeTokenUsage(session?.lastTokenUsage),
-    lastContextUsage: normalizeContextUsage(session?.lastContextUsage),
-    lastContextPeakUsage: normalizeContextUsage(session?.lastContextPeakUsage),
-    lastCompactedAt: Number(session?.lastCompactedAt) || null,
-    lastThreadStatus: typeof session?.lastThreadStatus === "string" ? session.lastThreadStatus : "",
-    threadHealth: normalizeThreadHealth(session?.threadHealth, session?.codexThreadId),
-    lastGoal: normalizeGoal(session?.lastGoal),
+    ...identity,
+    piUsage: engine === "pi" ? normalizePiSessionUsage(session?.piUsage) : null,
+    piContextUsage: engine === "pi" ? normalizeContextUsage(session?.piContextUsage) : null,
+    piContextPeakUsage: engine === "pi" ? normalizeContextUsage(session?.piContextPeakUsage) : null,
+    piCompactedAt: engine === "pi" ? Number(session?.piCompactedAt) || null : null,
+    lastTokenUsage: engine === "codex" ? normalizeTokenUsage(session?.lastTokenUsage) : null,
+    lastContextUsage: engine === "codex" ? normalizeContextUsage(session?.lastContextUsage) : null,
+    lastContextPeakUsage: engine === "codex" ? normalizeContextUsage(session?.lastContextPeakUsage) : null,
+    lastCompactedAt: engine === "codex" ? Number(session?.lastCompactedAt) || null : null,
+    lastThreadStatus: engine === "codex" && typeof session?.lastThreadStatus === "string" ? session.lastThreadStatus : "",
+    threadHealth: engine === "codex" ? normalizeThreadHealth(session?.threadHealth, session?.codexThreadId) : null,
+    lastGoal: engine === "codex" ? normalizeGoal(session?.lastGoal) : null,
     lastFailure: normalizeFailure(session?.lastFailure),
     modelOverride: cleanOverride(session?.modelOverride),
     reasoningOverride: cleanOverride(session?.reasoningOverride),
@@ -669,6 +765,23 @@ function normalizeSessionData(session) {
     providerBundleOverride: cleanOverride(session?.providerBundleOverride),
     serviceTierOverride: cleanOverride(session?.serviceTierOverride),
   };
+}
+
+function normalizePiSessionUsage(value) {
+  if (!value || typeof value !== "object") return null;
+  return {
+    inputTokens: Number(value.inputTokens) || 0,
+    outputTokens: Number(value.outputTokens) || 0,
+    cachedInputTokens: Number(value.cachedInputTokens) || 0,
+    cacheWriteTokens: Number(value.cacheWriteTokens) || 0,
+    totalTokens: Number(value.totalTokens) || 0,
+  };
+}
+
+function piUsageSummary(value) {
+  const usage = normalizePiSessionUsage(value);
+  if (!usage?.totalTokens) return "暂无";
+  return `总计 ${formatNumber(usage.totalTokens)}（输入 ${formatNumber(usage.inputTokens)}，输出 ${formatNumber(usage.outputTokens)}，缓存读取 ${formatNumber(usage.cachedInputTokens)}）`;
 }
 
 function normalizeRenameTitle(value) {
@@ -911,6 +1024,7 @@ function ensureRunnableCurrentSession(chatId, chatState, resumeInfoByThread, rea
 }
 
 async function syncChatSessionsWithCodex(chatId, options = {}) {
+  if (CONFIG.agentEngine === "pi") return sessions.chats[chatId]?.sessions || [];
   const keepEmptyCurrent = options.keepEmptyCurrent !== false;
   const ensureRunnableCurrent = options.ensureRunnableCurrent !== false;
   if (!CONFIG.syncSessionsFromCodex) return sessions.chats[chatId]?.sessions || [];
@@ -1615,11 +1729,28 @@ async function mergedSessionEntries(chatId) {
 }
 
 async function listChatSessionsSynced(chatId) {
+  if (CONFIG.agentEngine === "pi") return listPiChatSessions(chatId);
   await syncChatSessionsWithCodex(chatId);
   const chatState = getChatState(chatId);
   chatState.sessions = dedupeSessions(chatState.sessions.map(normalizeSessionData)).slice(0, sessionListLimit());
   saveSessions();
   return await mergedSessionEntries(chatId);
+}
+
+function listPiChatSessions(chatId) {
+  const chatState = getChatState(chatId);
+  chatState.sessions = dedupeSessions(chatState.sessions.map(normalizeSessionData))
+    .filter((session) => session.engine === "pi")
+    .slice(0, sessionListLimit());
+  if (!chatState.sessions.some((session) => session.id === chatState.currentSessionId)) {
+    chatState.currentSessionId = chatState.sessions[0]?.id || "";
+  }
+  saveSessions();
+  return chatState.sessions.map((session) => ({
+    ...session,
+    _sourceChatId: chatId,
+    _isCurrent: session.id === chatState.currentSessionId,
+  }));
 }
 
 async function findSessionEntry(chatId, target) {
@@ -1631,6 +1762,9 @@ async function findSessionEntry(chatId, target) {
     : sessionsList.findIndex((item) => (
         item.id === raw
         || item.id.startsWith(raw)
+        || item.piSessionId === raw
+        || item.piSessionId?.startsWith(raw)
+        || item.piSessionFile === raw
         || item.codexThreadId === raw
         || item.codexThreadId?.startsWith(raw)
         || codexThreadLink(item.codexThreadId) === raw
@@ -1790,7 +1924,14 @@ function createSessionData(title) {
     createdAt: now,
     updatedAt: now,
     messages: [],
+    engine: CONFIG.agentEngine,
     codexThreadId: "",
+    piSessionId: "",
+    piSessionFile: "",
+    piUsage: null,
+    piContextUsage: null,
+    piContextPeakUsage: null,
+    piCompactedAt: null,
     lastTokenUsage: null,
     lastContextUsage: null,
     lastContextPeakUsage: null,
@@ -1815,6 +1956,7 @@ function appendHistory(session, role, content) {
 function createRunState(session, event, userContent) {
   const settings = effectiveSessionSettings(session);
   const startedAt = Date.now();
+  const contextMeta = engineContextMeta(session);
   return {
     blocks: [],
     footer: "thinking",
@@ -1839,11 +1981,29 @@ function createRunState(session, event, userContent) {
       inputTokens: undefined,
       outputTokens: undefined,
       model: settings.model || codexModelLabel,
-      contextUsage: session.lastContextUsage || null,
-      contextPeakUsage: session.lastContextPeakUsage || null,
-      compactedAt: session.lastCompactedAt || null,
+      ...contextMeta,
     },
   };
+}
+
+function engineContextMeta(session) {
+  if (session?.engine === "pi") {
+    return {
+      contextUsage: session.piContextUsage || null,
+      contextPeakUsage: session.piContextPeakUsage || null,
+      compactedAt: session.piCompactedAt || null,
+    };
+  }
+  return {
+    contextUsage: session?.lastContextUsage || null,
+    contextPeakUsage: session?.lastContextPeakUsage || null,
+    compactedAt: session?.lastCompactedAt || null,
+  };
+}
+
+function syncRunContextMeta(state) {
+  if (!state?.meta || !state.session) return;
+  Object.assign(state.meta, engineContextMeta(state.session));
 }
 
 function appendRunText(state, text) {
@@ -2191,6 +2351,99 @@ function reduceAppServerEvent(state, raw) {
   return false;
 }
 
+function reducePiRunEvent(state, event) {
+  if (!state || !event) return false;
+  markCodexEvent(state);
+  if (["agent_started", "turn_started"].includes(event.kind)) {
+    state.footer = "thinking";
+    markModelEvent(state, "model_thinking");
+    return true;
+  }
+  if (event.kind === "text_delta") {
+    markModelEvent(state, "model_streaming");
+    if (event.usage) applyPiUsageToRunState(state, event.usage);
+    return appendRunText(state, event.text);
+  }
+  if (["assistant_message", "turn_completed"].includes(event.kind) && event.text) {
+    closeStreamingBlocks(state);
+    const tools = state.blocks.filter((block) => block.kind === "tool");
+    state.blocks = [{ kind: "text", content: event.text, streaming: false }, ...tools];
+    state.footer = "streaming";
+    markModelEvent(state, "model_streaming");
+    return true;
+  }
+  if (event.kind === "thinking_delta") {
+    state.footer = "thinking";
+    markModelEvent(state, "model_thinking");
+    return true;
+  }
+  if (event.kind === "tool_started") {
+    const tool = {
+      id: event.id,
+      name: event.name,
+      input: safeJson(event.input),
+      output: "",
+      status: "running",
+    };
+    state.blocks.push({ kind: "tool", tool });
+    markToolStarted(state, tool);
+    return true;
+  }
+  if (["tool_updated", "tool_completed"].includes(event.kind)) {
+    const block = state.blocks.find((item) => item.kind === "tool" && item.tool?.id === event.id);
+    if (!block) return false;
+    block.tool.output = event.output || block.tool.output;
+    if (event.kind === "tool_completed") {
+      block.tool.status = event.isError ? "error" : "done";
+      markToolCompleted(state, block.tool);
+    } else {
+      markToolProgress(state, block.tool);
+    }
+    return true;
+  }
+  if (event.kind === "usage" && event.usage) {
+    applyPiUsageToRunState(state, event.usage);
+    return true;
+  }
+  if (event.kind === "compaction_started") {
+    state.footer = "compacting";
+    markModelEvent(state, "compacting");
+    return true;
+  }
+  if (event.kind === "compaction_completed") {
+    state.session.piCompactedAt = Date.now();
+    state.meta.compactedAt = state.session.piCompactedAt;
+    state.footer = "thinking";
+    markModelEvent(state, "model_thinking");
+    return true;
+  }
+  if (event.kind === "retry_started") {
+    state.footer = "waiting";
+    markRunPhase(state, "reconnecting", { connection: "recovering", retryAttempt: event.attempt });
+    return true;
+  }
+  if (event.kind === "retry_completed") {
+    state.footer = "thinking";
+    markModelEvent(state, "model_thinking");
+    return true;
+  }
+  if (event.kind === "agent_settled") {
+    closeStreamingBlocks(state);
+    markModelEvent(state, "finalizing");
+    return true;
+  }
+  return false;
+}
+
+function applyPiUsageToRunState(state, usage) {
+  const normalized = normalizePiSessionUsage(usage);
+  if (!normalized) return;
+  state.session.piUsage = normalized;
+  state.meta.inputTokens = normalized.inputTokens;
+  state.meta.outputTokens = normalized.outputTokens;
+  state.meta.totalTokens = normalized.totalTokens;
+}
+
 function markRunError(state, error) {
   const failure = classifyCodexFailure(error);
   const disconnected = /app-server\s+(?:exited|ended before)|broken pipe|write after end/i.test(errorText(error));
@@ -2247,7 +2500,7 @@ function ensureRunDone(state, finalText = "") {
     const tools = state.blocks.filter((block) => block.kind === "tool");
     state.blocks = [{ kind: "text", content: answer, streaming: false }, ...tools];
   } else if (state.blocks.length === 0) {
-    appendRunText(state, "(Codex 没有返回内容)");
+    appendRunText(state, `(${agentEngineLabel(state.session?.engine)} 没有返回内容)`);
   }
   closeStreamingBlocks(state);
   state.terminal = "done";
@@ -3131,14 +3384,15 @@ function cardTitle(state) {
     if (state.terminal === "done") return "Codex goal 已结束";
     return "Codex goal 进行中";
   }
-  if (state.terminal === "error") return state.failure?.label || "Codex 处理失败";
-  if (state.terminal === "interrupted") return "Codex 已停止";
-  if (state.terminal === "done") return "Codex 已完成";
-  if (state.footer === "recovering") return "Codex 正在续跑";
-  if (state.footer === "reconnecting") return "Codex 正在重连";
-  if (state.footer === "tool_running") return "Codex 正在执行";
-  if (state.footer === "streaming") return "Codex 正在回复";
-  return "Codex 正在思考";
+  const label = agentEngineLabel(state.session?.engine);
+  if (state.terminal === "error") return state.failure?.label || `${label} 处理失败`;
+  if (state.terminal === "interrupted") return `${label} 已停止`;
+  if (state.terminal === "done") return `${label} 已完成`;
+  if (state.footer === "recovering") return `${label} 正在续跑`;
+  if (state.footer === "reconnecting") return `${label} 正在重连`;
+  if (state.footer === "tool_running") return `${label} 正在执行`;
+  if (state.footer === "streaming") return `${label} 正在回复`;
+  return `${label} 正在思考`;
 }
 
 function cardSummary(state) {
@@ -4924,6 +5178,37 @@ function startAppServerClient({ cwd = CONFIG.workspace, label = "codex-app-serve
   }).start();
 }
 
+function startPiRpcClient(session) {
+  if (!CONFIG.piAgentHome) throw new Error("PI_CODING_AGENT_DIR is required for a Pi Bot");
+  if (!CONFIG.piSessionDir) throw new Error("CODEX_FEISHU_PI_SESSION_DIR is required for a Pi Bot");
+  if (!CONFIG.piModel) throw new Error("CODEX_FEISHU_PI_MODEL is required for a Pi Bot");
+  const entryPath = path.join(ROOT, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js");
+  const args = buildPiRpcArguments({
+    entryPath,
+    provider: CONFIG.piProvider,
+    model: CONFIG.piModel,
+    thinking: CONFIG.piThinking,
+    sessionDir: CONFIG.piSessionDir,
+    sessionFile: session?.piSessionFile || "",
+    extensionPaths: CONFIG.piExtensions,
+    skillPaths: CONFIG.piSkills,
+  });
+  return new PiRpcClient({
+    command: process.execPath,
+    args,
+    cwd: CONFIG.workspace,
+    env: {
+      ...process.env,
+      PI_CODING_AGENT_DIR: CONFIG.piAgentHome,
+      PI_SKIP_VERSION_CHECK: "1",
+      PI_TELEMETRY: "0",
+    },
+    label: `pi-rpc:${session?.id || "session"}`,
+    requestTimeoutMs: CONFIG.codexIdleTimeoutMs,
+    log,
+  });
+}
+
 function resultTextFromState(state) {
   return state.blocks
     .filter((block) => block.kind === "text")
@@ -6516,6 +6801,10 @@ function pendingEventsForChat(chatId) {
   return eventDispatcher.countForChat(chatId);
 }
 
+function sessionMutationWorkForChat(chatId) {
+  return eventDispatcher.workCountForChat(chatId);
+}
+
 function queueSummary(chatId) {
   return eventDispatcher.summary(chatId);
 }
@@ -6798,7 +7087,10 @@ async function handleEvent(rawEvent, dispatchControl = {}) {
   })();
 
   try {
-    const result = await runCodex(event, session, cardState, updateCard);
+    const result = await agentEngineRegistry.get(session.engine).run(event, session, cardState, updateCard);
+    syncRunContextMeta(cardState);
+    ensureRunDone(cardState, result.text);
+    await updateCard(cardState);
     await cardOpenPromise;
     appendHistory(session, "user", userContent || `${event.attachments?.length || 0} attachment(s)`);
     appendHistory(session, "assistant", result.text);
@@ -6820,7 +7112,7 @@ async function handleEvent(rawEvent, dispatchControl = {}) {
       markRunInterrupted(cardState);
       await updateCard(cardState);
       await cardOpenPromise;
-      log("INFO", "codex job stopped by user", { messageId, chatId });
+      log("INFO", "agent job stopped by user", { messageId, chatId, engine: session.engine });
       return;
     }
     stats.failed += 1;
@@ -6834,7 +7126,7 @@ async function handleEvent(rawEvent, dispatchControl = {}) {
         await sendMarkdown(
           chatId,
           [
-            "**Codex 处理失败**",
+            `**${agentEngineLabel(session.engine)} 处理失败**`,
             "",
             "动态卡片最终刷新失败，以下是错误兜底：",
             "",
@@ -6897,14 +7189,21 @@ async function handleCommand(event, command) {
 
   switch (command.name) {
     case "/help":
-      await sendMarkdown(chatId, helpMarkdown(), "help", messageId);
+      await sendMarkdown(chatId, helpMarkdown(getSession(chatId)), "help", messageId);
       return;
     case "/status":
       await sendMarkdown(chatId, await statusMarkdown(chatId), "status", messageId);
       return;
     case "/new": {
+      if (CONFIG.agentEngine === "pi") {
+        const pending = sessionMutationWorkForChat(chatId);
+        if (pending > 0) {
+          await sendText(chatId, `当前聊天还有 ${pending} 条正在处理或等待的消息；请等待完成，或先发送 /stop queue，再执行 /new。`, "new-busy", messageId);
+          return;
+        }
+      }
       const session = resetSession(chatId, command.rest || "新会话");
-      await sendText(chatId, `已创建 Codex 会话 (${session.id})`, "new", messageId);
+      await sendText(chatId, `已创建 ${agentEngineLabel(session.engine)} 会话 (${session.id})`, "new", messageId);
       return;
     }
     case "/how":
@@ -6915,15 +7214,22 @@ async function handleCommand(event, command) {
       await sendMarkdown(chatId, await contextMarkdown(chatId), "context", messageId);
       return;
     case "/goal":
+      if (await handlePiPrivateCommand(chatId, "/goal", messageId)) return;
       await handleGoalCommand(chatId, command.rest, messageId);
       return;
     case "/provider":
+      if (await handlePiPrivateCommand(chatId, "/provider", messageId)) return;
       await handleProviderCommand(chatId, command.rest, messageId);
       return;
+    case "/pi":
+      await handlePiSetupCommand(chatId, command.rest, messageId);
+      return;
     case "/model":
+      if (await handlePiPrivateCommand(chatId, "/model", messageId)) return;
       await handleModelCommand(chatId, command.rest, messageId);
       return;
     case "/fast":
+      if (await handlePiPrivateCommand(chatId, "/fast", messageId)) return;
       await handleFastCommand(chatId, command.rest, messageId);
       return;
     case "/compact":
@@ -6964,13 +7270,17 @@ async function handleCommand(event, command) {
       await handleRenameCommand(chatId, command.rest, messageId);
       return;
     case "/reset": {
-      const session = await resetCurrentSession(chatId);
-      await sendText(
-        chatId,
-        `已清空当前 Codex 会话上下文：${session.title} (${session.id})。下一条普通消息会在当前会话里从空白上下文开始。`,
-        "reset",
-        messageId,
-      );
+      try {
+        const session = await resetCurrentSession(chatId);
+        await sendText(
+          chatId,
+          `已清空当前 ${agentEngineLabel(session.engine)} 会话上下文：${session.title} (${session.id})。下一条普通消息会在当前会话里从空白上下文开始。`,
+          "reset",
+          messageId,
+        );
+      } catch (error) {
+        await sendText(chatId, String(error?.message || error), "reset-error", messageId);
+      }
       return;
     }
     default:
@@ -6978,17 +7288,60 @@ async function handleCommand(event, command) {
   }
 }
 
+async function handlePiPrivateCommand(chatId, command, messageId) {
+  const session = getSession(chatId);
+  if (session.engine !== "pi") return false;
+  const descriptions = {
+    "/goal": "Pi 没有 Codex 原生 Goal API。请直接发送任务，运行中可用 `/steer` 补充。",
+    "/provider": `当前 Pi Provider 固定为 \`${CONFIG.piProvider}\`，Bot 运行期间不通过 Codex provider 配置切换。`,
+    "/model": `当前 Pi 模型固定为 \`${CONFIG.piProvider}/${CONFIG.piModel}\`，thinking 为 \`${CONFIG.piThinking}\`。`,
+    "/fast": "Fast 是 Codex 私有速度档，Pi 没有对应能力。",
+  };
+  await sendMarkdown(
+    chatId,
+    [`**Pi 命令说明**`, "", descriptions[command] || `Pi 不支持 ${command}。`].join("\n"),
+    "pi-command-boundary",
+    messageId,
+  );
+  return true;
+}
+
 async function handleSwitchCommand(chatId, target, messageId) {
   if (!target) {
     await sendText(chatId, "用法：/switch <序号或ID>。先发送 /sessions 查看可切换的会话。", "switch-usage", messageId);
     return;
   }
-  await syncChatSessionsWithCodex(chatId);
+  if (CONFIG.agentEngine === "pi") {
+    const pending = sessionMutationWorkForChat(chatId);
+    if (pending > 0) {
+      await sendText(chatId, `当前聊天还有 ${pending} 条正在处理或等待的消息；请等待完成，或先发送 /stop queue，再执行 /switch。`, "switch-busy", messageId);
+      return;
+    }
+  }
   const match = await findSessionEntry(chatId, target);
   if (!match) {
     await sendText(chatId, "没有找到这个会话。发送 /sessions 查看可切换的会话。", "switch-miss", messageId);
     return;
   }
+  if (match.entry.engine === "pi") {
+    const chatState = getChatState(chatId);
+    const session = chatState.sessions.find((item) => item.id === match.entry.id);
+    if (!session) {
+      await sendText(chatId, "这个 Pi 会话已不存在，请重新发送 /list。", "switch-miss", messageId);
+      return;
+    }
+    chatState.currentSessionId = session.id;
+    session.updatedAt = Date.now();
+    saveSessions();
+    await sendText(
+      chatId,
+      `已切换到 Pi 会话：${session.title || "未命名会话"} (${session.id})${session.piSessionId ? ` · ${session.piSessionId}` : ""}`,
+      "switch",
+      messageId,
+    );
+    return;
+  }
+  await syncChatSessionsWithCodex(chatId);
   if (!threadEntryIsRunnable(match.entry)) {
     await sendMarkdown(
       chatId,
@@ -7032,6 +7385,10 @@ async function handleRenameCommand(chatId, rest, messageId) {
   const parsed = parseRenameCommand(rest);
   if (!parsed.title) {
     await sendText(chatId, "用法：/rename 新标题；或 /rename <list序号> 新标题。", "rename-usage", messageId);
+    return;
+  }
+  if (CONFIG.agentEngine === "pi") {
+    await handlePiRenameCommand(chatId, parsed, messageId);
     return;
   }
 
@@ -7095,6 +7452,47 @@ async function handleRenameCommand(chatId, rest, messageId) {
       "",
       `已更新：${changedParts.length ? changedParts.join("、") : "仅确认标题，无可写入位置变化"}`,
     ].join("\n"),
+    "rename",
+    messageId,
+  );
+}
+
+async function handlePiRenameCommand(chatId, parsed, messageId) {
+  const match = parsed.target ? await findSessionEntry(chatId, parsed.target) : null;
+  if (parsed.target && !match) {
+    await sendText(chatId, "没有找到这个 Pi 会话。先发送 /list 查看序号。", "rename-miss", messageId);
+    return;
+  }
+  const chatState = getChatState(chatId);
+  const sessionId = match?.entry?.id || chatState.currentSessionId;
+  const session = chatState.sessions.find((item) => item.id === sessionId && item.engine === "pi");
+  if (!session) {
+    await sendText(chatId, "没有找到这个 Pi 会话。", "rename-miss", messageId);
+    return;
+  }
+  const oldTitle = session.title || "";
+  let nativeRenamed = false;
+  let nativeError = "";
+  try {
+    nativeRenamed = Boolean((await agentEngineRegistry.get("pi").renameSession(session, parsed.title))?.renamed);
+  } catch (error) {
+    nativeError = String(error?.message || error).slice(0, 500);
+  }
+  session.title = parsed.title;
+  session.updatedAt = Date.now();
+  saveSessions();
+  await sendMarkdown(
+    chatId,
+    [
+      "**Pi 会话已改名**",
+      "",
+      `原标题：${oldTitle || "未命名会话"}`,
+      `新标题：${parsed.title}`,
+      `Bridge session：\`${session.id}\``,
+      `Pi session：${session.piSessionId ? `\`${session.piSessionId}\`` : "尚未创建"}`,
+      nativeRenamed ? "Pi JSONL session name：已同步" : session.piSessionId || session.piSessionFile ? "Pi JSONL session name：同步失败，Bridge 标题已更新" : "Pi JSONL session name：等待首次消息后创建",
+      nativeError ? `\n\`\`\`\n${nativeError}\n\`\`\`` : "",
+    ].filter(Boolean).join("\n"),
     "rename",
     messageId,
   );
@@ -7300,9 +7698,140 @@ function pendingDeleteItems(pending) {
   return [];
 }
 
+async function handlePiDeleteCommand(chatId, target, messageId) {
+  const pendingCount = sessionMutationWorkForChat(chatId);
+  if (pendingCount > 0) {
+    await sendText(chatId, `当前聊天还有 ${pendingCount} 条正在处理或等待的消息；请等待完成，或先发送 /stop queue，再执行 /delete。`, "delete-queued", messageId);
+    return;
+  }
+  const selection = parseDeleteSelectionSpec(target);
+  if (selection.error) {
+    await sendText(chatId, selection.error, "delete-selection-error", messageId);
+    return;
+  }
+  const list = listPiChatSessions(chatId);
+  let selected = [];
+  if (selection.indexes) {
+    const invalid = selection.indexes.filter((index) => index < 1 || index > list.length);
+    if (invalid.length) {
+      await sendText(chatId, `这些序号超出 Pi 会话列表范围：${invalid.join("、")}`, "delete-precheck-error", messageId);
+      return;
+    }
+    selected = selection.indexes.map((index) => ({ entry: list[index - 1], index }));
+  } else {
+    const match = await findSessionEntry(chatId, selection.target);
+    if (!match) {
+      await sendText(chatId, "没有找到这个 Pi 会话。发送 /list 查看可删除会话。", "delete-miss", messageId);
+      return;
+    }
+    selected = [match];
+  }
+  const busy = [];
+  for (const item of selected) {
+    if ((await agentEngineRegistry.get("pi").status(item.entry)).active) busy.push(item.index);
+  }
+  if (busy.length) {
+    await sendText(chatId, `这些 Pi 会话正在运行中：${busy.join("、")}。请先 /stop 或等待完成。`, "delete-busy", messageId);
+    return;
+  }
+  const items = selected.map(({ entry, index }) => ({
+    index,
+    engine: "pi",
+    sessionId: entry.id,
+    piSessionId: entry.piSessionId || "",
+    sessionFile: entry.piSessionFile || "",
+    title: entry.title || "",
+    isCurrent: Boolean(entry._isCurrent),
+  }));
+  const confirmText = compressIndexes(items.map((item) => item.index));
+  const expiresAt = Date.now() + CONFIG.deleteConfirmTtlMs;
+  cleanupPendingDeleteConfirmations();
+  pendingDeleteConfirmations.set(deleteConfirmationKey(chatId, confirmText), {
+    engine: "pi",
+    chatId,
+    index: confirmText,
+    items,
+    createdAt: Date.now(),
+    expiresAt,
+  });
+  await sendMarkdown(
+    chatId,
+    [
+      "**Pi 会话删除确认**",
+      "",
+      "确认后会移除当前聊天中的 Bridge session，并删除对应 Pi JSONL。不会读取或删除任何 Codex thread。",
+      "",
+      ...items.map((item) => `${item.index}. ${item.title || "未命名会话"} (${item.sessionId}) · Pi session ${item.piSessionId || "尚未创建"}${item.isCurrent ? " · 当前" : ""}`),
+      "",
+      `确认有效期：${formatTime(expiresAt)}`,
+      `确认删除请输入：\`/confirm delete ${confirmText}\``,
+    ].join("\n"),
+    "delete-preview",
+    messageId,
+  );
+}
+
+async function confirmPiSessionDeletion(chatId, pending, items, key, messageId) {
+  const chatState = getChatState(chatId);
+  const successes = [];
+  const failures = [];
+  const pendingCount = sessionMutationWorkForChat(chatId);
+  if (pendingCount > 0) {
+    await sendText(chatId, `当前聊天还有 ${pendingCount} 条正在处理或等待的消息；请等待完成，或先发送 /stop queue，再重新确认删除。`, "confirm-busy", messageId);
+    return;
+  }
+  for (const item of items) {
+    const session = chatState.sessions.find((candidate) => candidate.id === item.sessionId && candidate.engine === "pi");
+    if (!session) {
+      failures.push({ item, error: new Error("Bridge session 已不存在") });
+      continue;
+    }
+    try {
+      if ((await agentEngineRegistry.get("pi").status(session)).active) {
+        throw new Error("Pi 会话正在运行中");
+      }
+      const result = await agentEngineRegistry.get("pi").deleteSession(session, {
+        beforeDelete: () => {
+          const previousSessions = [...chatState.sessions];
+          const previousCurrentSessionId = chatState.currentSessionId;
+          chatState.sessions = chatState.sessions.filter((candidate) => candidate.id !== session.id);
+          if (chatState.currentSessionId === session.id) chatState.currentSessionId = chatState.sessions[0]?.id || "";
+          try {
+            saveSessions();
+          } catch (error) {
+            chatState.sessions = previousSessions;
+            chatState.currentSessionId = previousCurrentSessionId;
+            throw error;
+          }
+        },
+      });
+      successes.push({ item, result });
+    } catch (error) {
+      failures.push({ item, error });
+    }
+  }
+  pendingDeleteConfirmations.delete(key);
+  if (!chatState.sessions.some((session) => session.engine === "pi")) getSession(chatId);
+  await sendMarkdown(
+    chatId,
+    [
+      failures.length ? "**Pi 会话删除部分完成**" : "**Pi 会话删除完成**",
+      "",
+      ...successes.map(({ item, result }) => `- 已删除 ${item.index}. ${item.title || "未命名会话"} (${item.sessionId}) · JSONL ${result.deleted ? "已删除" : result.missing ? "原本不存在" : "未删除"}`),
+      ...failures.map(({ item, error }) => `- 删除失败 ${item.index}. ${item.title || "未命名会话"}：${String(error?.message || error).slice(0, 500)}`),
+    ].join("\n"),
+    failures.length ? "delete-error" : "delete-done",
+    messageId,
+  );
+}
+
 async function handleDeleteCommand(chatId, target, messageId) {
   if (!target) {
     await sendText(chatId, "用法：/delete <序号或ID>、/delete 1 2 3、/delete 1-18、/delete 3-7 8-12。先发送 /list 查看会话；删除需要二次确认。", "delete-usage", messageId);
+    return;
+  }
+  if (CONFIG.agentEngine === "pi") {
+    await handlePiDeleteCommand(chatId, target, messageId);
     return;
   }
 
@@ -7434,6 +7963,10 @@ async function handleConfirmCommand(chatId, rest, messageId) {
   if (!items.length) {
     pendingDeleteConfirmations.delete(key);
     await sendText(chatId, "删除确认内容为空或损坏。请重新发送 /delete。", "confirm-miss", messageId);
+    return;
+  }
+  if (pending.engine === "pi") {
+    await confirmPiSessionDeletion(chatId, pending, items, key, messageId);
     return;
   }
 
@@ -8097,6 +8630,190 @@ function runtimeCommandErrorMarkdown(title, error) {
   ].join("\n");
 }
 
+function piSetupStatusMarkdown(state) {
+  if (!state) return "当前没有 Pi Agent 注册批次。发送 `/pi setup` 开始。";
+  const lines = [
+    `**Pi Agent 注册批次 · ${state.status}**`,
+    "",
+    `批次：${state.batchId}`,
+    `协调 Bot：${state.coordinator?.botName || "-"}`,
+    `Provider：${state.provider?.id || "-"} / ${state.provider?.model || "-"}`,
+    "",
+    ...(state.bots || []).map((bot) => {
+      const current = bot.name === state.currentBotName ? " ← 当前" : "";
+      const error = bot.error ? ` · ${bot.error}` : "";
+      return `- ${bot.label}：${bot.stage}${current}${error}`;
+    }),
+  ];
+  return lines.join("\n");
+}
+
+async function handlePiSetupCommand(chatId, rest, messageId) {
+  const action = String(rest || "").trim().toLowerCase();
+  if (!piSetupFilePath) {
+    await sendText(chatId, "当前 Bridge 未由 Desktop 管理，无法启动 Pi 批量注册。", "pi-setup-unavailable", messageId);
+    return;
+  }
+  if (!action || action === "help") {
+    await sendMarkdown(chatId, [
+      "**Pi Agent 注册命令**", "",
+      "- `/pi setup`：创建并启动固定五 Bot 批次",
+      "- `/pi setup status`：查看进度",
+      "- `/pi setup resend`：重发当前二维码或重试当前失败阶段",
+      "- `/pi setup skip`：跳过当前 Bot",
+      "- `/pi setup cancel`：取消后续注册",
+    ].join("\n"), "pi-setup-help", messageId);
+    return;
+  }
+  const parts = action.split(/\s+/);
+  if (parts[0] !== "setup") {
+    await sendText(chatId, "用法：/pi setup [status|resend|skip|cancel]", "pi-setup-usage", messageId);
+    return;
+  }
+  const operation = parts[1] || "start";
+  const current = readPiSetupState(piSetupFilePath);
+  const instanceName = process.env.CODEX_FEISHU_INSTANCE_NAME || "default";
+  if (operation === "status") {
+    await sendMarkdown(chatId, piSetupStatusMarkdown(current), "pi-setup-status", messageId);
+    return;
+  }
+  if (operation === "start") {
+    if (CONFIG.agentEngine !== "codex") {
+      await sendText(chatId, "Pi 注册批次必须由当前在线 Codex Bot 协调。", "pi-setup-engine", messageId);
+      return;
+    }
+    if (current) {
+      await sendMarkdown(chatId, piSetupStatusMarkdown(current), "pi-setup-existing", messageId);
+      return;
+    }
+    const request = createPiSetupRequest({
+      conversationId: chatId,
+      coordinatorBotName: instanceName,
+      coordinatorProfile: CONFIG.larkProfile,
+      providerId: CONFIG.piSetupProvider,
+      model: CONFIG.piSetupModel,
+    });
+    let created = false;
+    await mutatePiSetupState(piSetupFilePath, (state) => {
+      if (state) return state;
+      created = true;
+      return request;
+    });
+    const latest = readPiSetupState(piSetupFilePath);
+    await sendMarkdown(chatId, piSetupStatusMarkdown(latest), created ? "pi-setup-created" : "pi-setup-existing", messageId);
+    return;
+  }
+  if (!current || !["requested", "active"].includes(current.status)) {
+    await sendText(chatId, "当前没有可操作的 Pi 注册批次。", "pi-setup-none", messageId);
+    return;
+  }
+  if (current.conversationId !== chatId) {
+    await sendText(chatId, "该 Pi 注册批次属于另一个 conversation，已拒绝操作。", "pi-setup-conversation", messageId);
+    return;
+  }
+  if (current.coordinator?.botName !== instanceName || CONFIG.agentEngine !== "codex") {
+    await sendText(chatId, "只有创建该批次的 Codex Bot 可以执行此操作。", "pi-setup-coordinator", messageId);
+    return;
+  }
+  if (operation === "cancel") {
+    await mutatePiSetupState(piSetupFilePath, (state) => {
+      state.control.cancelRequestedAt = new Date().toISOString();
+      return state;
+    });
+    await sendText(chatId, "已请求取消 Pi 注册批次；已创建的 Bot 和应用不会删除。", "pi-setup-cancel", messageId);
+    return;
+  }
+  if (operation === "skip") {
+    await mutatePiSetupState(piSetupFilePath, (state) => {
+      const bot = activePiSetupBot(state);
+      if (!bot) return state;
+      if (bot.qrArtifact?.path) fs.rmSync(bot.qrArtifact.path, { force: true });
+      state.control.skipRequestedAt = new Date().toISOString();
+      bot.qrArtifact = null;
+      bot.stage = "SKIPPED";
+      bot.error = "用户跳过";
+      bot.completedAt = new Date().toISOString();
+      const next = state.bots.find((item) => !["READY", "SKIPPED"].includes(item.stage));
+      state.currentBotName = next?.name || "";
+      if (!next) state.status = "complete";
+      return state;
+    });
+    await sendMarkdown(chatId, piSetupStatusMarkdown(readPiSetupState(piSetupFilePath)), "pi-setup-skip", messageId);
+    return;
+  }
+  if (operation === "resend") {
+    await mutatePiSetupState(piSetupFilePath, (state) => {
+      const bot = activePiSetupBot(state);
+      if (!bot) return state;
+      state.control.resendRequestedAt = new Date().toISOString();
+      if (bot.qrArtifact?.imageKey || bot.qrArtifact?.path) {
+        bot.qrArtifact.sentAt = "";
+      } else if (bot.stage === "FAILED") {
+        bot.stage = bot.retryStage || (bot.appId ? "PROFILE_CREATED" : "PENDING");
+        bot.error = "";
+      } else if (/QR_(?:READY|SENT)$/.test(bot.stage)) {
+        bot.stage = bot.appId ? "PROFILE_CREATED" : "PENDING";
+        bot.qrArtifact = null;
+      }
+      return state;
+    });
+    await sendText(chatId, "已请求重发当前二维码或重试当前阶段。", "pi-setup-resend", messageId);
+    return;
+  }
+  await sendText(chatId, "用法：/pi setup [status|resend|skip|cancel]", "pi-setup-usage", messageId);
+}
+
+async function deliverPiSetupArtifact() {
+  if (piSetupArtifactInFlight || !piSetupFilePath) return;
+  const state = readPiSetupState(piSetupFilePath);
+  const instanceName = process.env.CODEX_FEISHU_INSTANCE_NAME || "default";
+  if (!state || state.coordinator?.botName !== instanceName || state.status !== "active") return;
+  const bot = activePiSetupBot(state);
+  const artifact = bot?.qrArtifact;
+  if (!artifact || artifact.sentAt || (!artifact.path && !artifact.imageKey)) return;
+  piSetupArtifactInFlight = true;
+  try {
+    if (artifact.expiresAt && Date.parse(artifact.expiresAt) <= Date.now() && !artifact.imageKey) {
+      if (artifact.path) fs.rmSync(artifact.path, { force: true });
+      await mutatePiSetupState(piSetupFilePath, (next) => {
+        const target = next.bots.find((item) => item.name === bot.name);
+        if (target?.qrArtifact?.idempotencyKey !== artifact.idempotencyKey) return next;
+        target.stage = "FAILED";
+        target.retryStage = artifact.kind === "app" ? "PENDING" : "PROFILE_CREATED";
+        target.error = "二维码已过期，请发送 /pi setup resend";
+        target.qrArtifact = null;
+        return next;
+      });
+      return;
+    }
+    let imageKey = artifact.imageKey || "";
+    if (!imageKey) {
+      imageKey = await uploadImage(artifact.path, { attempts: 2 });
+      fs.rmSync(artifact.path, { force: true });
+    }
+    const latest = readPiSetupState(piSetupFilePath);
+    const latestBot = latest?.bots?.find((item) => item.name === bot.name);
+    if (latest?.status !== "active"
+      || latest.currentBotName !== bot.name
+      || latestBot?.qrArtifact?.idempotencyKey !== artifact.idempotencyKey) return;
+    const stageLabel = artifact.kind === "app" ? "应用注册二维码" : "用户授权二维码";
+    const expiry = artifact.expiresAt ? `\n有效期至：${new Date(artifact.expiresAt).toLocaleString("zh-CN", { hour12: false })}` : "";
+    await sendText(state.conversationId, `${bot.label}（${bot.index}/5）\n阶段：${stageLabel}${expiry}`, `${artifact.idempotencyKey}-label`, state.batchId);
+    await sendImage(state.conversationId, imageKey, artifact.idempotencyKey, state.batchId);
+    await mutatePiSetupState(piSetupFilePath, (next) => {
+      const target = next.bots.find((item) => item.name === bot.name);
+      if (target?.qrArtifact?.idempotencyKey !== artifact.idempotencyKey) return next;
+      target.qrArtifact.path = "";
+      target.qrArtifact.imageKey = imageKey;
+      target.qrArtifact.sentAt = new Date().toISOString();
+      target.stage = artifact.kind === "app" ? "APP_QR_SENT" : "USER_AUTH_QR_SENT";
+      return next;
+    });
+  } finally {
+    piSetupArtifactInFlight = false;
+  }
+}
+
 function stopClearMode(rest) {
   const text = String(rest || "").trim().toLowerCase();
   if (!text) return "";
@@ -8120,6 +8837,20 @@ async function clearQueueCommand(chatId, rest, messageId) {
 
 async function stopCurrentJob(chatId, messageId, { clearMode = "" } = {}) {
   const cleared = clearMode ? clearPendingEventsForChat(chatId, { all: clearMode === "all" }) : 0;
+  const session = getSession(chatId);
+  if (session.engine === "pi") {
+    try {
+      await agentEngineRegistry.get(session.engine).abort(session);
+      await sendText(chatId, `已请求 Pi 停止当前任务。${clearMode ? `已清理等待队列 ${cleared} 条。` : ""}`, "stop", messageId);
+    } catch (error) {
+      if (error?.kind === "not_active" || /no active turn/i.test(String(error?.message || error))) {
+        await sendText(chatId, `当前没有运行中的 Pi 任务。${clearMode ? `已清理等待队列 ${cleared} 条。` : ""}`, "stop-none", messageId);
+        return;
+      }
+      throw error;
+    }
+    return;
+  }
   const job = activeCodexJobs.get(chatId);
   if (!job) {
     try {
@@ -8271,6 +9002,25 @@ async function handleSteerCommand(event, rest, messageId) {
     return;
   }
 
+  const session = getSession(chatId);
+  if (session.engine === "pi") {
+    const steerAttachments = [...takePendingAttachments(chatId), ...directAttachments];
+    event.attachments = steerAttachments;
+    try {
+      await agentEngineRegistry.get(session.engine).steer(session, { event, userContent, message: userContent });
+      appendHistory(session, "user", userContent || `${steerAttachments.length} attachment(s)`);
+      saveSessions();
+      await sendText(chatId, `已将补充指令${steerAttachments.length ? `（含${formatAttachmentCounts(steerAttachments)}）` : ""}追加到当前 Pi 任务。`, "steer-done", messageId);
+    } catch (error) {
+      if (steerAttachments.length) addPendingAttachments(chatId, steerAttachments);
+      const detail = error?.kind === "not_active"
+        ? "当前没有正在运行的 Pi 任务，未追加任何内容。"
+        : `追加 Pi 指令失败：${String(error?.message || error).slice(0, 500)}`;
+      await sendText(chatId, detail + (steerAttachments.length ? " 附件已暂存，可在下一次 /steer 中重试。" : ""), "steer-error", messageId);
+    }
+    return;
+  }
+
   const job = activeCodexJobs.get(chatId);
   if (!job) {
     if (directAttachments.length) addPendingAttachments(chatId, directAttachments);
@@ -8369,8 +9119,26 @@ async function handleSteerCommand(event, rest, messageId) {
 }
 
 async function handleCompactCommand(chatId, messageId) {
-  await syncChatSessionsWithCodex(chatId);
   const session = getSession(chatId);
+  if (session.engine === "pi") {
+    const adapter = agentEngineRegistry.get(session.engine);
+    const status = await adapter.status(session);
+    if (status.active) {
+      await sendText(chatId, "当前 Pi 任务还在运行，等这一轮结束后再发送 /compact。", "compact-busy", messageId);
+      return;
+    }
+    await sendText(chatId, "开始压缩当前 Pi session。", "compact-start", messageId);
+    try {
+      await adapter.compact(session);
+      saveSessions();
+      await sendText(chatId, "Pi session 上下文压缩完成。", "compact-done", messageId);
+    } catch (error) {
+      log("ERROR", "Pi session compaction failed", { chatId, error: String(error?.message || error).slice(0, 1000) });
+      await sendText(chatId, runtimeCommandErrorMarkdown("Pi session 压缩失败", error), "compact-error", messageId);
+    }
+    return;
+  }
+  await syncChatSessionsWithCodex(chatId);
   const job = activeCodexJobs.get(chatId);
   if (job) {
     await sendText(chatId, "当前 Codex 任务还在运行，等这一轮结束后再发送 /compact。", "compact-busy", messageId);
@@ -8426,7 +9194,28 @@ async function handleCompactCommand(chatId, messageId) {
   }
 }
 
-function helpMarkdown() {
+function helpMarkdown(session = null) {
+  if (session?.engine === "pi") {
+    return [
+      "**Pi Bot 命令**",
+      "",
+      "`/status` — 查看 Pi RPC、session、usage、Provider、Skills 和 Extensions",
+      "`/new [标题]` — 创建新的独立 Pi 会话",
+      "`/now` / `/how` — 查看当前 Pi 运行状态",
+      "`/context` — 查看当前 Pi session、上下文窗口和压缩状态",
+      "`/compact` — 压缩当前 Pi session",
+      "`/steer <补充内容>` — 补充当前正在执行的 Pi 任务",
+      "`/stop [queue|all]` — 停止当前任务，并可清理等待队列",
+      "`/queue` / `/clearqueue [all]` — 查看或清理等待队列",
+      "`/list` / `/sessions` — 只列当前聊天的 Pi 会话",
+      "`/switch <序号或ID>` — 切换当前聊天中的 Pi 会话",
+      "`/rename 新标题` / `/rename <序号> 新标题` — 修改 Bridge 与 Pi session 名称",
+      "`/delete <序号或ID>` — 二次确认后删除 Bridge session 和对应 Pi JSONL",
+      "`/reset` — 将当前 Bridge session 切换到新的空白 Pi JSONL",
+      "",
+      "Pi 不使用 Codex Goal、Fast、Codex provider 配置或 Codex Desktop thread。",
+    ].join("\n");
+  }
   return [
     "**Codex Bot 命令**",
     "",
@@ -8509,6 +9298,8 @@ function goalMarkdown(session, goal, title = "Codex goal") {
 }
 
 async function statusMarkdown(chatId) {
+  const currentSession = getSession(chatId);
+  if (currentSession.engine === "pi") return piStatusMarkdown(chatId, currentSession);
   await syncChatSessionsWithCodex(chatId);
   const session = getSession(chatId);
   const [eventStatus, authStatus, codexRuntimeStatus, threadInfo] = await Promise.all([
@@ -8546,6 +9337,49 @@ async function statusMarkdown(chatId) {
     `设置：${settingsSummary(session)}`,
     `运行模式：\`${CONFIG.runMode}\` · 沙箱：\`${CONFIG.codexSandbox}\` · MCP：${CONFIG.disableMcp ? "禁用" : "启用"}`,
     `超时：总时长 ${durationConfigLabel(CONFIG.codexTimeoutMs)} · 无进展 ${durationConfigLabel(CONFIG.codexIdleTimeoutMs)}`,
+  ].join("\n");
+}
+
+async function piStatusMarkdown(chatId, session) {
+  const [eventStatus, authStatus, engineStatus] = await Promise.all([
+    readEventStatus(),
+    readAuthSummary(),
+    agentEngineRegistry.get("pi").status(session).catch((error) => ({
+      running: false,
+      active: false,
+      error: String(error?.message || error),
+    })),
+  ]);
+  const usage = normalizePiSessionUsage(session.piUsage);
+  const usageSummary = usage?.totalTokens
+    ? `总计 ${formatNumber(usage.totalTokens)}（输入 ${formatNumber(usage.inputTokens)}，输出 ${formatNumber(usage.outputTokens)}，缓存读取 ${formatNumber(usage.cachedInputTokens)}）`
+    : "暂无";
+  const rpcSummary = engineStatus.error
+    ? `异常：${shorten(engineStatus.error, 240)}`
+    : engineStatus.running
+      ? `running${engineStatus.active ? "，正在执行" : "，空闲"}`
+      : "尚未创建（发送普通消息后启动）";
+  return [
+    "**Pi Agent Feishu Bot 状态**",
+    "",
+    `桥接进程：PID ${process.pid}，已运行 ${formatDuration(Date.now() - stats.startedAt)}`,
+    `飞书事件：${eventStatus}`,
+    `用户授权：${authStatus}`,
+    `当前聊天绑定：${session.title || "未命名会话"} (${session.id})`,
+    `Pi RPC：${rpcSummary}`,
+    `Pi session：${session.piSessionId ? `\`${session.piSessionId}\`` : "未创建"}`,
+    `Session 文件：${session.piSessionFile ? `\`${session.piSessionFile}\`` : "未创建"}`,
+    `Usage：${usageSummary}`,
+    `最近压缩：${session.piCompactedAt ? formatTime(session.piCompactedAt) : "无"}`,
+    `队列：${queueSummary(chatId)}`,
+    `最近失败：${session.lastFailure ? `${session.lastFailure.label} (${formatTime(session.lastFailure.at)})` : "无"}`,
+    `失败统计：${failureStatsSummary()}`,
+    "",
+    `工作区：\`${CONFIG.workspace}\``,
+    `Pi Agent Home：\`${CONFIG.piAgentHome}\``,
+    `Pi session 目录：\`${CONFIG.piSessionDir}\``,
+    `Provider：\`${CONFIG.piProvider}\` · model：\`${CONFIG.piModel}\` · thinking：\`${CONFIG.piThinking}\``,
+    `Extensions：${CONFIG.piExtensions.length} · Skills 根：${CONFIG.piSkills.length} · Capabilities：${CONFIG.piCapabilitiesConfig ? "已配置" : "未配置"}`,
   ].join("\n");
 }
 
@@ -8610,8 +9444,23 @@ function contextStatusBlock(session) {
 }
 
 async function contextMarkdown(chatId) {
-  await syncChatSessionsWithCodex(chatId);
   const session = getSession(chatId);
+  if (session.engine === "pi") {
+    const context = renderContextUsage(session.piContextUsage, "当前窗口") || "当前窗口：暂无统计";
+    const peak = renderContextUsage(session.piContextPeakUsage, "曾达");
+    return [
+      "**Pi 会话上下文**",
+      "",
+      `Bridge session：${session.title || "未命名会话"} (${session.id})`,
+      `Pi session：${session.piSessionId ? `\`${session.piSessionId}\`` : "尚未创建"}`,
+      `JSONL：${session.piSessionFile ? `\`${session.piSessionFile}\`` : "尚未创建"}`,
+      context,
+      peak && isContextUsageHigher(session.piContextPeakUsage, session.piContextUsage) ? peak : "",
+      `累计 usage：${piUsageSummary(session.piUsage)}`,
+      `上次压缩：${session.piCompactedAt ? formatTime(session.piCompactedAt) : "无记录"}`,
+    ].filter(Boolean).join("\n");
+  }
+  await syncChatSessionsWithCodex(chatId);
   const lines = [
     "**Codex 会话上下文**",
     "",
@@ -8659,8 +9508,24 @@ async function readAuthSummary() {
 }
 
 async function nowMarkdown(chatId) {
-  await syncChatSessionsWithCodex(chatId);
   const session = getSession(chatId);
+  if (session.engine === "pi") {
+    const engineStatus = await agentEngineRegistry.get("pi").status(session).catch(() => ({ running: false, active: false }));
+    return [
+      "**Pi Bot 当前状态**",
+      "",
+      `工作区：\`${CONFIG.workspace}\``,
+      `Bridge session：${session.title || "未命名会话"} (${session.id})`,
+      `Pi session：${session.piSessionId ? `\`${session.piSessionId}\`` : "尚未创建"}`,
+      `Pi RPC：${engineStatus.running ? engineStatus.active ? "运行中" : "空闲" : "尚未启动"}`,
+      `上下文：${renderContextUsage(session.piContextUsage, "当前窗口") || "暂无统计"}`,
+      `累计 usage：${piUsageSummary(session.piUsage)}`,
+      `队列：${queueSummary(chatId)}`,
+      `Provider：\`${CONFIG.piProvider}\` · model：\`${CONFIG.piModel}\` · thinking：\`${CONFIG.piThinking}\``,
+      `Skills 根：${CONFIG.piSkills.length} · Extensions：${CONFIG.piExtensions.length}`,
+    ].join("\n");
+  }
+  await syncChatSessionsWithCodex(chatId);
   const job = activeCodexJobs.get(chatId);
   return [
     "**Codex Bot 状态**",
@@ -8715,6 +9580,7 @@ function visibleSessionItemsForListMode(list, mode) {
 }
 
 async function sessionsMarkdown(chatId, rest = "") {
+  if (CONFIG.agentEngine === "pi") return piSessionsMarkdown(chatId);
   const fullList = await listChatSessionsSynced(chatId);
   const mode = parseSessionsListMode(rest);
   const visibleItems = visibleSessionItemsForListMode(fullList, mode);
@@ -8760,6 +9626,23 @@ async function sessionsMarkdown(chatId, rest = "") {
     lines.push("");
   }
   lines.push("使用 `/switch <序号或ID>` 切换会话；使用 `/rename 新标题` 或 `/rename <序号> 新标题` 改名；使用 `/delete <序号或ID>`、`/delete 1 2 3`、`/delete 1-18`、`/delete 3-7 8-12` 删除会话；删除需按预览里的 `/confirm delete <序号或区间>` 确认；使用 `/new [标题]` 创建新会话。");
+  return lines.join("\n");
+}
+
+function piSessionsMarkdown(chatId) {
+  const list = listPiChatSessions(chatId);
+  const lines = [`**Pi 会话列表（${list.length} 个）**`, ""];
+  for (const [offset, session] of list.entries()) {
+    lines.push(
+      `${offset + 1}. ${session.title || "未命名会话"} (${session.id})${session._isCurrent ? " ← 当前" : ""}`,
+      `   Pi session：${session.piSessionId || "尚未创建"} · JSONL：${session.piSessionFile || "尚未创建"} · 最近对话：${formatTime(session.updatedAt)} · ${session.messages.length} 条`,
+    );
+  }
+  lines.push(
+    "",
+    "使用 `/switch <序号或ID>` 切换；`/rename [序号] 新标题` 改名；`/delete <序号或ID>` 删除；`/new [标题]` 新建。",
+    "此列表只读取当前 Pi Bot、当前聊天的 Bridge sessions，不扫描 Codex Home 或其他 Bot。",
+  );
   return lines.join("\n");
 }
 

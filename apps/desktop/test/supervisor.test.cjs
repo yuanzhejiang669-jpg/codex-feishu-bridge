@@ -24,6 +24,19 @@ const {
   stopManagedBotAndDisableAutoStart,
 } = require("../src/main/services/supervisor.cjs");
 
+const windowsStartScript = fs.readFileSync(
+  path.resolve(__dirname, "..", "..", "..", "start-codex-feishu-bridge.ps1"),
+  "utf8",
+);
+
+test("Windows launcher persists Pi runtime fields inside Save-LaunchConfig", () => {
+  const saveBlock = windowsStartScript.match(/function Save-LaunchConfig \{[\s\S]*?\n\}/)?.[0] || "";
+  const importBlock = windowsStartScript.match(/function Import-UserEnvIfMissing \{[\s\S]*?\n\}/)?.[0] || "";
+  assert.match(saveBlock, /\$payload\["piAgentHome"\]/);
+  assert.match(saveBlock, /\$payload\["piSkills"\]/);
+  assert.doesNotMatch(importBlock, /\$payload/);
+});
+
 test("finishes a successful PowerShell command when its process exits without waiting for inherited pipes", async () => {
   const child = new EventEmitter();
   child.stdout = new PassThrough();
@@ -414,6 +427,97 @@ test("injects a DPAPI-backed Provider key only into the managed Bot child enviro
   } finally {
     fs.rmSync(value.root, { recursive: true, force: true });
   }
+});
+
+test("builds the complete Pi child environment without placing the key in runtime metadata", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cfb-pi-supervisor-env-"));
+  try {
+    const bot = {
+      engine: "pi", agentHome: path.join(root, "agent"), sessionDir: path.join(root, "sessions"),
+      provider: { id: "backup-api", model: "gpt-5.6-sol", reasoning: "high", envKey: "BACKUP_API_KEY" },
+      piRuntime: {
+        extensionPath: path.join(root, "extension.ts"),
+        capabilitiesPath: path.join(root, "capabilities.json"),
+        skillPaths: [path.join(root, "codex-skills"), path.join(root, "agent-skills")],
+      },
+    };
+    bot.piRuntime.skillPaths.forEach((target) => fs.mkdirSync(target, { recursive: true }));
+    const environment = processEnvironment({
+      dataRoot: path.join(root, "data"), localAppData: path.join(root, "local"),
+      nodePath: path.join(root, "node.exe"), larkCliPath: path.join(root, "lark-cli.exe"),
+      platform: "win32", environment: { BACKUP_API_KEY: "pi-provider-secret" },
+    }, bot);
+    assert.equal(environment.CODEX_FEISHU_AGENT_ENGINE, "pi");
+    assert.equal(environment.CODEX_FEISHU_DESKTOP_DATA_ROOT, path.join(root, "data"));
+    assert.equal(environment.PI_CODING_AGENT_DIR, bot.agentHome);
+    assert.equal(environment.CODEX_FEISHU_PI_SESSION_DIR, bot.sessionDir);
+    assert.equal(environment.CODEX_FEISHU_PI_PROVIDER, "backup-api");
+    assert.equal(environment.CODEX_FEISHU_PI_MODEL, "gpt-5.6-sol");
+    assert.equal(environment.CODEX_FEISHU_PI_THINKING, "high");
+    assert.equal(environment.CODEX_FEISHU_PI_EXTENSIONS, bot.piRuntime.extensionPath);
+    assert.equal(environment.CODEX_FEISHU_PI_SKILLS, bot.piRuntime.skillPaths.join(path.delimiter));
+    assert.equal(environment.CODEX_FEISHU_PI_CAPABILITIES_CONFIG, bot.piRuntime.capabilitiesPath);
+    assert.equal(environment.BACKUP_API_KEY, "pi-provider-secret");
+    assert.throws(() => processEnvironment({
+      dataRoot: path.join(root, "data"), localAppData: path.join(root, "local"),
+      nodePath: path.join(root, "node.exe"), larkCliPath: path.join(root, "lark-cli.exe"),
+      platform: "win32", environment: { BACKUP_API_KEY: "" },
+    }, bot), /Pi Provider 密钥不可用/);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("starts a Pi Bot without a Codex runtime and records only public Pi launch metadata", async () => {
+  const value = fixture();
+  try {
+    const engineRoot = path.join(value.root, "engine");
+    const toolsRoot = path.join(value.root, "tools");
+    const larkCliPath = path.join(toolsRoot, "lark-cli");
+    const bridgeEntry = path.join(engineRoot, "bridge-fixture.cjs");
+    const agentHome = path.join(value.root, "pi-home");
+    const sessionDir = path.join(agentHome, "sessions");
+    const extensionPath = path.join(engineRoot, "extensions", "pi-capabilities.ts");
+    const capabilitiesPath = path.join(value.root, "pi-general", "capabilities.json");
+    const skillPath = path.join(value.root, "skills");
+    for (const target of [larkCliPath, bridgeEntry, path.join(agentHome, "models.json"), path.join(agentHome, "settings.json"), extensionPath, capabilitiesPath]) {
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(target, target === bridgeEntry ? [
+        'const fs = require("node:fs");',
+        'const path = require("node:path");',
+        'const state = process.env.CODEX_FEISHU_STATE_DIR;',
+        'fs.writeFileSync(path.join(state, "bridge.pid"), String(process.pid));',
+        'const timer = setInterval(() => { if (fs.existsSync(path.join(state, "bridge.stop"))) { clearInterval(timer); process.exit(0); } }, 50);',
+      ].join("\n") : "{}\n", "utf8");
+    }
+    fs.mkdirSync(sessionDir, { recursive: true });
+    fs.mkdirSync(skillPath, { recursive: true });
+    const configPath = path.join(value.dataRoot, "managed-bots", "assistant-1", "bot.json");
+    const bot = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    Object.assign(bot, {
+      engine: "pi", agentHome, sessionDir,
+      configurationSpace: { id: "pi-general", home: path.dirname(capabilitiesPath) },
+      provider: { id: "backup-api", model: "gpt-5.6-sol", reasoning: "medium", envKey: "BACKUP_API_KEY" },
+      piRuntime: { extensionPath, capabilitiesPath, skillPaths: [skillPath] },
+    });
+    fs.writeFileSync(configPath, JSON.stringify(bot), "utf8");
+    const options = {
+      dataRoot: value.dataRoot, localAppData: value.localAppData, engineRoot, bridgeEntry,
+      nodePath: process.execPath, larkCliPath, codexPath: "", codexAvailable: false,
+      defaultCodexHome: path.join(value.root, "codex-home"),
+      platform: process.platform === "win32" ? "linux" : "darwin",
+      larkProfileHome: path.join(value.root, ".cfb-lark-profile"),
+      environment: { BACKUP_API_KEY: "pi-provider-secret" },
+    };
+    const started = await startManagedBot("assistant-1", options);
+    const launchPath = path.join(started.runtimeRoot, "state", "launch-config.json");
+    const launchText = fs.readFileSync(launchPath, "utf8");
+    const launch = JSON.parse(launchText);
+    assert.equal(started.online, true);
+    assert.equal(launch.engine, "pi");
+    assert.equal(launch.piAgentHome, agentHome);
+    assert.equal(launch.piSessionDir, sessionDir);
+    assert.equal(launchText.includes("pi-provider-secret"), false);
+    await stopManagedBot("assistant-1", options);
+  } finally { fs.rmSync(value.root, { recursive: true, force: true }); }
 });
 
 test("refreshes macOS Provider keys from launchctl for every Bot start", () => {

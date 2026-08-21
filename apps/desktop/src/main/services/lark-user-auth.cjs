@@ -27,7 +27,7 @@ function publicUserIdentity(status) {
   };
 }
 
-async function authorizeLarkUser(name, options) {
+async function beginLarkUserAuthorization(name, options) {
   const bot = managedBot(name, options.dataRoot);
   const runCli = options.runLarkCli || runLarkCli;
   const profileHome = path.join(options.dataRoot, "profile-home");
@@ -46,11 +46,24 @@ async function authorizeLarkUser(name, options) {
   ).trim();
   const deviceCode = String(authorization?.device_code || "").trim();
   if (!verificationUrl || !deviceCode) throw new Error("飞书未返回有效的用户授权地址");
-  if (typeof options.openExternal !== "function") throw new Error("客户端无法打开飞书用户授权页面");
-  await options.openExternal(verificationUrl);
+  return {
+    name: bot.name,
+    profile: bot.profile,
+    verificationUrl,
+    deviceCode,
+    expiresIn: Number(authorization?.expires_in || authorization?.expire_in || 0),
+  };
+}
+
+async function completeLarkUserAuthorization(name, deviceCode, options) {
+  const bot = managedBot(name, options.dataRoot);
+  const code = String(deviceCode || "").trim();
+  if (!code) throw new Error("飞书用户授权 device code 为空");
+  const runCli = options.runLarkCli || runLarkCli;
+  const profileHome = path.join(options.dataRoot, "profile-home");
 
   await runCli(options.larkCliPath, [
-    "auth", "login", "--device-code", deviceCode, "--json", "--profile", bot.profile,
+    "auth", "login", "--device-code", code, "--json", "--profile", bot.profile,
   ], { profileHome, timeoutMs: options.timeoutMs || 10 * 60_000 });
 
   const result = await runCli(options.larkCliPath, [
@@ -68,8 +81,17 @@ async function authorizeLarkUser(name, options) {
   };
 }
 
+async function authorizeLarkUser(name, options) {
+  const authorization = await beginLarkUserAuthorization(name, options);
+  if (typeof options.openExternal !== "function") throw new Error("客户端无法打开飞书用户授权页面");
+  await options.openExternal(authorization.verificationUrl);
+  return completeLarkUserAuthorization(authorization.name, authorization.deviceCode, options);
+}
+
 module.exports = {
   authorizeLarkUser,
+  beginLarkUserAuthorization,
+  completeLarkUserAuthorization,
   parseJsonOutput,
   publicUserIdentity,
 };

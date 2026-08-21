@@ -91,6 +91,30 @@ function providerCheck(bot, currentProvider = {}, codexLoginState = "unknown") {
   };
 }
 
+function agentRuntimeCheck(bot, options) {
+  if (bot.engine === "pi") {
+    const skillPaths = bot.piRuntime?.skillPaths || [];
+    const required = [
+      bot.agentHome,
+      bot.sessionDir,
+      bot.agentHome && path.join(bot.agentHome, "models.json"),
+      bot.agentHome && path.join(bot.agentHome, "settings.json"),
+      bot.piRuntime?.extensionPath,
+      bot.piRuntime?.capabilitiesPath,
+      ...skillPaths,
+    ];
+    return localCheck(
+      "agentRuntime", "Pi 运行时", skillPaths.length > 0 && required.every((target) => target && fs.existsSync(target)),
+      "Pi Agent Home、session、模型和能力配置完整",
+      "Pi Agent Home、session、模型或能力配置不完整",
+    );
+  }
+  return localCheck(
+    "agentRuntime", "Codex 运行时", Boolean(options.codexAvailable),
+    "已检测到可用 Codex 运行时", "未检测到可用 Codex 运行时",
+  );
+}
+
 function localCheck(id, label, available, goodDetail, badDetail) {
   return {
     id,
@@ -173,13 +197,7 @@ async function checkBotReadiness(name, options) {
         : `Bridge 将监听 ${REQUIRED_EVENT_KEYS.join(", ")}；需要在飞书发送真实消息完成验证`,
     },
     providerCheck(bot, options.currentProvider, options.codexLoginState),
-    localCheck(
-      "codex",
-      "Codex 运行时",
-      Boolean(options.codexAvailable),
-      "已检测到可用 Codex 运行时",
-      "未检测到可用 Codex 运行时",
-    ),
+    agentRuntimeCheck(bot, options),
     localCheck(
       "engine",
       "客户端引擎",

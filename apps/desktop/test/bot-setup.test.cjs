@@ -22,9 +22,20 @@ test("normalizes a Bot and generates its default workspace", () => {
     const result = normalizeBotInput({ name: "assistant-1", label: "Assistant 1" }, { workspaceRoot: root });
     assert.equal(result.profile, "assistant-1");
     assert.equal(result.workspace, path.join(root, "feishu-bridge-assistant-1"));
+    assert.equal(result.engine, "codex");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("defaults old managed Bot records to the Codex engine", () => {
+  const root = temporaryRoot();
+  const configRoot = path.join(root, "managed-bots", "legacy");
+  fs.mkdirSync(configRoot, { recursive: true });
+  fs.writeFileSync(path.join(configRoot, "bot.json"), JSON.stringify({ name: "legacy" }));
+  try {
+    assert.equal(readManagedBots(root)[0].engine, "codex");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
 test("rejects unsafe Bot identifiers and existing names", () => {
@@ -261,5 +272,86 @@ test("creates an isolated Bot from a saved global Provider without copying its k
     assert.match(botText, /"mode": "global"/);
     assert.match(codexText, /model_provider = "company"/);
     assert.equal(`${botText}${codexText}`.includes("global-secret"), false);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("creates an isolated Pi runtime without persisting Provider or Feishu secrets", async () => {
+  const root = temporaryRoot();
+  const sourceCodexHome = path.join(root, "source-codex");
+  const engineRoot = path.resolve(__dirname, "..", "..", "..");
+  const skillRoots = [path.join(root, "codex-skills"), path.join(root, "agent-skills")];
+  fs.mkdirSync(sourceCodexHome, { recursive: true });
+  skillRoots.forEach((target) => fs.mkdirSync(target, { recursive: true }));
+  fs.writeFileSync(path.join(sourceCodexHome, "config.toml"), [
+    "[model_providers.backup-api]",
+    'name = "Backup API"',
+    'base_url = "https://backup.example.test/v1"',
+    'wire_api = "responses"',
+    'env_key = "BACKUP_API_KEY"',
+    "",
+  ].join("\n"));
+  try {
+    const result = await createManagedBot({
+      name: "pi-agent-01",
+      engine: "pi",
+      provider: { mode: "global", id: "backup-api", model: "gpt-5.6-sol" },
+    }, { appId: "cli_test123", appSecret: "feishu-secret" }, {
+      dataRoot: path.join(root, "data"),
+      workspaceRoot: path.join(root, "workspaces"),
+      piAgentHomeRoot: path.join(root, "pi-homes"),
+      piConfigurationSpaceRoot: path.join(root, "pi-spaces"),
+      sourceCodexHome,
+      engineRoot,
+      piSkillRoots: skillRoots,
+      mcpDataRoot: path.join(root, "mcp-data"),
+      mineruRoot: path.join(root, "mineru"),
+      env: { BACKUP_API_KEY: "provider-secret" },
+      existingNames: [],
+      larkCliPath: "lark-cli.exe",
+      runLarkCli: async (_tool, args) => ({ stdout: args.includes("list") ? "[]" : "", stderr: "" }),
+    });
+    const botText = fs.readFileSync(result.configPath, "utf8");
+    const modelsText = fs.readFileSync(path.join(result.agentHome, "models.json"), "utf8");
+    const capabilitiesText = fs.readFileSync(result.piRuntime.capabilitiesPath, "utf8");
+    assert.equal(result.engine, "pi");
+    assert.equal(result.configurationSpace.id, "pi-general");
+    assert.equal(result.sessionDir, path.join(result.agentHome, "sessions"));
+    assert.deepEqual(result.piRuntime.skillPaths, skillRoots);
+    assert.match(modelsText, /\$BACKUP_API_KEY/);
+    assert.match(modelsText, /openai-responses/);
+    assert.equal(`${botText}${modelsText}${capabilitiesText}`.includes("provider-secret"), false);
+    assert.equal(`${botText}${modelsText}${capabilitiesText}`.includes("feishu-secret"), false);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("rolls back Pi runtime and restores the shared capability config after failure", async () => {
+  const root = temporaryRoot();
+  const sourceCodexHome = path.join(root, "source-codex");
+  const spaceRoot = path.join(root, "pi-spaces");
+  const capabilityPath = path.join(spaceRoot, "pi-general", "capabilities.json");
+  fs.mkdirSync(sourceCodexHome, { recursive: true });
+    fs.mkdirSync(path.dirname(capabilityPath), { recursive: true });
+  const skillRoot = path.join(root, "skills");
+  fs.mkdirSync(skillRoot, { recursive: true });
+  fs.writeFileSync(path.join(sourceCodexHome, "config.toml"), [
+    "[model_providers.backup-api]",
+    'base_url = "https://backup.example.test/v1"',
+    'wire_api = "responses"',
+    'env_key = "BACKUP_API_KEY"',
+  ].join("\n"));
+  fs.writeFileSync(capabilityPath, '{"existing":true}\n');
+  try {
+    await assert.rejects(() => createManagedBot({
+      name: "pi-agent-failed", engine: "pi",
+      provider: { mode: "global", id: "backup-api", model: "gpt-test" },
+    }, { appId: "cli_test123", appSecret: "secret" }, {
+      dataRoot: path.join(root, "data"), workspaceRoot: path.join(root, "workspaces"),
+      piAgentHomeRoot: path.join(root, "pi-homes"), piConfigurationSpaceRoot: spaceRoot,
+      sourceCodexHome, engineRoot: path.join(root, "missing-engine"), piSkillRoots: [skillRoot],
+      env: { BACKUP_API_KEY: "provider-secret" }, existingNames: [], larkCliPath: "lark-cli.exe",
+      runLarkCli: async (_tool, args) => ({ stdout: args.includes("list") ? "[]" : "", stderr: "" }),
+    }));
+    assert.equal(fs.existsSync(path.join(root, "pi-homes", "pi-agent-failed")), false);
+    assert.equal(fs.readFileSync(capabilityPath, "utf8"), '{"existing":true}\n');
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

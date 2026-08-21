@@ -108,12 +108,22 @@ function Save-LaunchConfig {
   )
 
   $payload = [ordered]@{
+    engine = if ($env:CODEX_FEISHU_AGENT_ENGINE) { $env:CODEX_FEISHU_AGENT_ENGINE } else { "codex" }
     instance = if ($InstanceName) { $InstanceName } else { "default" }
     workspace = $WorkspacePath
     larkProfile = $Profile
     codexHome = $CodexHomePath
     desktopCodexHome = $DesktopCodexHomePath
     updatedAt = (Get-Date).ToString("o")
+  }
+  if ($payload.engine -eq "pi") {
+    $payload["piAgentHome"] = $env:PI_CODING_AGENT_DIR
+    $payload["piSessionDir"] = $env:CODEX_FEISHU_PI_SESSION_DIR
+    $payload["piProvider"] = $env:CODEX_FEISHU_PI_PROVIDER
+    $payload["piModel"] = $env:CODEX_FEISHU_PI_MODEL
+    $payload["piExtensions"] = $env:CODEX_FEISHU_PI_EXTENSIONS
+    $payload["piSkills"] = $env:CODEX_FEISHU_PI_SKILLS
+    $payload["piCapabilitiesConfig"] = $env:CODEX_FEISHU_PI_CAPABILITIES_CONFIG
   }
   $payload | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $launchConfigFile -Encoding UTF8
 }

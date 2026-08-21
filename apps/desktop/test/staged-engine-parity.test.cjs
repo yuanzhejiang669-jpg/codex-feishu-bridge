@@ -31,3 +31,19 @@ test("staged desktop Bridge engine includes formula runtime dependencies", () =>
     );
   }
 });
+
+test("staged desktop Bridge engine includes the Pi runtime and capability extension", () => {
+  const engineRoot = path.resolve(__dirname, "..", "generated", "engine");
+  for (const relativePath of [
+    "extensions/pi-capabilities.ts",
+    "node_modules/@earendil-works/pi-coding-agent/package.json",
+    "src/pi/engine-adapter.mjs",
+    "src/pi/setup-state.mjs",
+  ]) {
+    assert.equal(
+      fs.existsSync(path.join(engineRoot, relativePath)),
+      true,
+      `staged Pi runtime item is missing: ${relativePath}`,
+    );
+  }
+});

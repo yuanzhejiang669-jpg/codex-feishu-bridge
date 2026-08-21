@@ -30,7 +30,7 @@ const files = [
   "watch-codex-feishu-bridge.ps1",
 ];
 
-const directories = ["config", "control-panel", "scripts", "src"];
+const directories = ["config", "control-panel", "extensions", "scripts", "src"];
 
 function assertInside(parent, child) {
   const relative = path.relative(parent, child);

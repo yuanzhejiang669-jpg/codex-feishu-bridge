@@ -2,7 +2,9 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { pathToFileURL } = require("node:url");
 const { execFile } = require("node:child_process");
+const TOML = require("smol-toml");
 const { publicPermissionPolicy } = require("./permission-policy.cjs");
 const { prepareProviderConfiguration } = require("./provider-setup.cjs");
 
@@ -48,7 +50,13 @@ function resolveBotCreationTarget(raw = {}, options = {}) {
   };
 }
 
-function normalizeBotInput(raw = {}, { workspaceRoot, codexHomeRoot, defaultCodexHome } = {}) {
+function normalizeBotInput(raw = {}, {
+  workspaceRoot,
+  codexHomeRoot,
+  defaultCodexHome,
+  piAgentHomeRoot,
+  piConfigurationSpaceRoot,
+} = {}) {
   const name = String(raw.name || "").trim();
   if (!NAME_PATTERN.test(name)) {
     throw new Error("Bot 标识只能包含字母、数字、点、下划线和连字符，长度为 1-64 个字符");
@@ -60,12 +68,20 @@ function normalizeBotInput(raw = {}, { workspaceRoot, codexHomeRoot, defaultCode
   const root = path.resolve(workspaceRoot || path.join(os.homedir(), "Documents", "Codex", "workspaces"));
   const workspace = path.resolve(String(raw.workspace || "").trim() || path.join(root, `feishu-bridge-${name}`));
   if (workspace === path.parse(workspace).root) throw new Error("工作空间不能是磁盘根目录");
-  const codexHomeMode = String(raw.codexHomeMode || "shared").trim().toLowerCase();
+  const engine = String(raw.engine || "codex").trim().toLowerCase();
+  if (!new Set(["codex", "pi"]).has(engine)) throw new Error("Agent 引擎无效");
+  const codexHomeMode = engine === "pi" ? "shared" : String(raw.codexHomeMode || "shared").trim().toLowerCase();
   if (!new Set(["shared", "isolated"]).has(codexHomeMode)) throw new Error("Codex Home 模式无效");
   const codexHome = codexHomeMode === "isolated"
     ? path.resolve(String(raw.codexHome || "").trim() || path.join(codexHomeRoot || root, name))
     : path.resolve(String(raw.codexHome || "").trim() || defaultCodexHome || path.join(os.homedir(), ".codex"));
+  const agentHome = path.resolve(piAgentHomeRoot || path.join(os.homedir(), "Documents", "Codex", "pi-homes"), name);
+  const configurationSpaceHome = path.resolve(
+    piConfigurationSpaceRoot || path.join(os.homedir(), "Documents", "Codex", "pi-spaces"),
+    "pi-general",
+  );
   return {
+    engine,
     name,
     profile,
     label: String(raw.label || name).trim().slice(0, 100) || name,
@@ -73,6 +89,14 @@ function normalizeBotInput(raw = {}, { workspaceRoot, codexHomeRoot, defaultCode
     workspace,
     codexHome,
     codexHomeMode,
+    ...(engine === "pi" ? {
+      agentHome,
+      sessionDir: path.join(agentHome, "sessions"),
+      configurationSpace: {
+        id: "pi-general",
+        home: configurationSpaceHome,
+      },
+    } : {}),
   };
 }
 
@@ -84,7 +108,8 @@ function readManagedBots(dataRoot) {
       .map((entry) => {
         try {
           const configPath = path.join(botsRoot, entry.name, "bot.json");
-          return { ...JSON.parse(fs.readFileSync(configPath, "utf8")), configPath };
+          const parsed = JSON.parse(fs.readFileSync(configPath, "utf8"));
+          return { ...parsed, engine: String(parsed.engine || "codex").toLowerCase(), configPath };
         } catch {
           return null;
         }
@@ -108,6 +133,9 @@ function previewBot(raw, options) {
     paths: {
       workspace: bot.workspace,
       codexHome: bot.codexHome,
+      agentHome: bot.agentHome || "",
+      sessionDir: bot.sessionDir || "",
+      configurationSpace: bot.configurationSpace || null,
       botConfig: path.join(options.dataRoot, "managed-bots", bot.name, "bot.json"),
       profileHome: path.join(options.dataRoot, "profile-home"),
       runtimeRoot: options.runtimeLocalAppData
@@ -183,6 +211,13 @@ async function createManagedBot(raw, credentials, options) {
   const profileHome = path.join(options.dataRoot, "profile-home");
   const workspaceExisted = fs.existsSync(preview.bot.workspace);
   const codexHomeExisted = fs.existsSync(preview.bot.codexHome);
+  const agentHomeExisted = preview.bot.agentHome ? fs.existsSync(preview.bot.agentHome) : false;
+  const capabilitiesPath = preview.bot.configurationSpace
+    ? path.join(preview.bot.configurationSpace.home, "capabilities.json")
+    : "";
+  const capabilitiesBefore = capabilitiesPath && fs.existsSync(capabilitiesPath)
+    ? fs.readFileSync(capabilitiesPath)
+    : null;
   let profileAdded = false;
   let providerPlan = null;
   fs.mkdirSync(transactionRoot, { recursive: true });
@@ -191,7 +226,9 @@ async function createManagedBot(raw, credentials, options) {
     fs.mkdirSync(preview.bot.workspace, { recursive: true });
     fs.mkdirSync(preview.bot.codexHome, { recursive: true });
     fs.mkdirSync(profileHome, { recursive: true });
-    if (resolved.target?.mode !== "space") {
+    if (preview.bot.engine === "pi") {
+      providerPlan = { publicConfig: resolvePiProvider(resolved.input.provider, options), commit() {}, rollback() {} };
+    } else if (resolved.target?.mode !== "space") {
       providerPlan = prepareProviderConfiguration(preview.bot, resolved.input.provider, {
         transactionRoot,
         encryptSecret: options.encryptSecret,
@@ -206,7 +243,7 @@ async function createManagedBot(raw, credentials, options) {
     profileAdded = true;
 
     const config = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       ...preview.bot,
       ...(resolved.target?.provider ? { provider: resolved.target.provider } : {}),
       ...(providerPlan ? { provider: providerPlan.publicConfig } : {}),
@@ -217,6 +254,7 @@ async function createManagedBot(raw, credentials, options) {
       createdAt: new Date().toISOString(),
       state: "configured",
     };
+    if (config.engine === "pi") await preparePiRuntime(config, options);
     fs.writeFileSync(path.join(transactionRoot, "bot.json"), `${JSON.stringify(config, null, 2)}\n`, "utf8");
     providerPlan?.commit();
     fs.mkdirSync(path.dirname(finalRoot), { recursive: true });
@@ -246,8 +284,70 @@ async function createManagedBot(raw, credentials, options) {
         // Never remove a non-empty Codex Home during rollback.
       }
     }
+    if (preview.bot.agentHome && !agentHomeExisted) fs.rmSync(preview.bot.agentHome, { recursive: true, force: true });
+    if (capabilitiesPath) {
+      if (capabilitiesBefore) fs.writeFileSync(capabilitiesPath, capabilitiesBefore);
+      else fs.rmSync(capabilitiesPath, { force: true });
+    }
     throw error;
   }
+}
+
+function resolvePiProvider(raw, options) {
+  if (String(raw?.mode || "global") !== "global") throw new Error("Pi Bot 目前必须使用已保存的全局 Provider");
+  const id = String(raw?.id || "").trim();
+  const model = String(raw?.model || "").trim();
+  if (!id || !model) throw new Error("Pi Bot 必须选择 Provider 和模型");
+  const configPath = path.join(options.sourceCodexHome, "config.toml");
+  const source = TOML.parse(fs.readFileSync(configPath, "utf8").replace(/^\uFEFF/, ""));
+  const definition = source.model_providers?.[id];
+  if (!definition) throw new Error(`全局 Provider 不存在：${id}`);
+  const envKey = String(definition.env_key || "").trim();
+  if (!envKey || !(options.env || process.env)[envKey]) throw new Error(`Provider 环境变量不可用：${envKey || "未配置"}`);
+  return {
+    mode: "global", id, model, envKey,
+    name: String(definition.name || id),
+    baseUrl: String(definition.base_url || ""),
+    wireApi: String(definition.wire_api || "responses"),
+    reasoning: String(raw.reasoning || "medium"),
+    credentialStorage: "windows-user-environment",
+  };
+}
+
+async function preparePiRuntime(bot, options) {
+  const configModule = await import(pathToFileURL(path.join(options.engineRoot, "src", "pi", "config.mjs")).href);
+  const capabilitiesModule = await import(pathToFileURL(path.join(options.engineRoot, "src", "pi", "capabilities", "config.mjs")).href);
+  fs.mkdirSync(bot.sessionDir, { recursive: true });
+  fs.mkdirSync(bot.configurationSpace.home, { recursive: true });
+  const skillPaths = [...new Set((options.piSkillRoots || []).map((item) => path.resolve(item)))]
+    .filter((item) => fs.existsSync(item) && fs.statSync(item).isDirectory());
+  if (!skillPaths.length) throw new Error("Pi Skills 权威源不可用");
+  configModule.writePiRuntimeConfig({
+    directories: { modelsPath: path.join(bot.agentHome, "models.json"), settingsPath: path.join(bot.agentHome, "settings.json") },
+    provider: {
+      id: bot.provider.id,
+      name: bot.provider.name,
+      baseUrl: bot.provider.baseUrl,
+      envKey: bot.provider.envKey,
+      wireApi: bot.provider.wireApi,
+      model: bot.provider.model,
+      reasoning: true,
+      input: ["text", "image"],
+    },
+  });
+  const capabilitiesPath = path.join(bot.configurationSpace.home, "capabilities.json");
+  capabilitiesModule.writePiCapabilitiesConfig(capabilitiesPath, capabilitiesModule.createPiCapabilitiesConfig({
+    bridgeRoot: options.engineRoot,
+    mineruRoot: options.mineruRoot || path.join(os.homedir(), "Documents", "Codex", "tools", "mineru"),
+    nodePath: options.nodePath,
+    pythonPath: options.pythonPath || "C:/Program Files/Python311/python.exe",
+    mcpDataRoot: options.mcpDataRoot || path.join(os.homedir(), "Documents", "Codex", "mcp-data"),
+  }));
+  bot.piRuntime = {
+    capabilitiesPath,
+    extensionPath: path.join(options.engineRoot, "extensions", "pi-capabilities.ts"),
+    skillPaths,
+  };
 }
 
 module.exports = {

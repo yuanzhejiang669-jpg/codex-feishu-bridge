@@ -27,7 +27,7 @@ async function registerBotWithQr(raw, options, onProgress = () => {}) {
   options.setAbort?.(() => abort.abort());
 
   try {
-    onProgress({ stage: "requesting", message: "正在请求飞书注册二维码" });
+    await onProgress({ stage: "requesting", message: "正在请求飞书注册二维码" });
     const result = await registerApp({
       source: "codex",
       signal: abort.signal,
@@ -39,7 +39,7 @@ async function registerBotWithQr(raw, options, onProgress = () => {}) {
           margin: 2,
           errorCorrectionLevel: "M",
         });
-        onProgress({
+        await onProgress({
           stage: "qr-ready",
           message: "请使用飞书扫描二维码并完成授权",
           qrDataUrl: dataUrl,
@@ -56,14 +56,14 @@ async function registerBotWithQr(raw, options, onProgress = () => {}) {
     const appId = String(result?.client_id || result?.appId || "").trim();
     const appSecret = String(result?.client_secret || result?.appSecret || "").trim();
     if (!appId || !appSecret) throw new Error("飞书注册完成，但没有返回应用凭据");
-    onProgress({ stage: "saving", message: "授权完成，正在保存 Bot 配置" });
+    await onProgress({ stage: "saving", message: "授权完成，正在保存 Bot 配置" });
     let bot;
     try {
       bot = await createBot({ ...raw, ...preview.bot, provider: raw.provider }, { appId, appSecret }, options);
     } catch (error) {
       throw new Error(`飞书应用已创建，但本地 Bot 配置保存失败：${error.message}`);
     }
-    onProgress({ stage: "complete", message: "Bot 配置已创建" });
+    await onProgress({ stage: "complete", message: "Bot 配置已创建" });
     return bot;
   } catch (error) {
     if (abort.signal.aborted) throw new Error("飞书扫码注册已取消或超时");

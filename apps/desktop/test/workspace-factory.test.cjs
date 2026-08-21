@@ -27,6 +27,9 @@ function fixture() {
     dataRoot: path.join(root, "data"),
     workspaceRoot: path.join(root, "workspaces"),
     codexHomeRoot: path.join(root, "homes"),
+    defaultCodexHome: sourceCodexHome,
+    piAgentHomeRoot: path.join(root, "pi-homes"),
+    piConfigurationSpaceRoot: path.join(root, "pi-spaces"),
     sourceCodexHome,
     existingNames: [],
     env: { COMPANY_API_KEY: "secret" },
@@ -58,6 +61,57 @@ test("previews one or many Bots sharing one isolated Codex Home", () => {
     assert.equal(preview.factory.reasoning, "medium");
     assert.equal(previewWorkspaceFactory({ ...input(1), reasoning: "minimal" }, value).factory.reasoning, "minimal");
     assert.throws(() => previewWorkspaceFactory({ ...input(1), reasoning: "super" }, value), /推理强度/);
+  } finally { fs.rmSync(value.root, { recursive: true, force: true }); }
+});
+
+test("enforces the fixed five-Bot Pi Agent preset with isolated runtime directories", () => {
+  const value = fixture();
+  try {
+    const preview = previewWorkspaceFactory({
+      engine: "pi", count: 2, baseIndex: 9, namePattern: "ignored-{index}",
+      providerId: "company", model: "gpt-test",
+    }, value);
+    assert.equal(preview.available, true);
+    assert.equal(preview.factory.engine, "pi");
+    assert.equal(preview.factory.configurationSpace.id, "pi-general");
+    assert.deepEqual(preview.bots.map((bot) => bot.name), [
+      "pi-agent-01", "pi-agent-02", "pi-agent-03", "pi-agent-04", "pi-agent-05",
+    ]);
+    assert.deepEqual(preview.bots.map((bot) => bot.label), [
+      "Pi Agent 01", "Pi Agent 02", "Pi Agent 03", "Pi Agent 04", "Pi Agent 05",
+    ]);
+    assert.equal(new Set(preview.bots.map((bot) => bot.workspace)).size, 5);
+    assert.equal(new Set(preview.bots.map((bot) => bot.agentHome)).size, 5);
+    assert.equal(new Set(preview.bots.map((bot) => bot.sessionDir)).size, 5);
+    assert.equal(new Set(preview.bots.map((bot) => bot.configurationSpace.home)).size, 1);
+  } finally { fs.rmSync(value.root, { recursive: true, force: true }); }
+});
+
+test("creates a secret-free Pi registration queue without creating a Codex space", async () => {
+  const value = fixture();
+  try {
+    const state = createWorkspaceFactoryQueue({ engine: "pi", providerId: "company", model: "gpt-test" }, value);
+    assert.equal(state.bots.length, 5);
+    assert.equal(state.bots.every((bot) => bot.engine === "pi"), true);
+    assert.equal(fs.existsSync(path.join(value.codexHomeRoot, "codex-space-pi-general")), false);
+    const queueFile = path.join(value.dataRoot, "workspace-factory.json");
+    assert.equal(fs.readFileSync(queueFile, "utf8").includes("secret"), false);
+    let registrationInput;
+    await registerFactoryBot("pi-agent-01", {
+      dataRoot: value.dataRoot,
+      registrationOptions: {},
+      registerBot: async (bot) => {
+        registrationInput = bot;
+        const configPath = path.join(value.dataRoot, bot.name, "bot.json");
+        fs.mkdirSync(path.dirname(configPath), { recursive: true });
+        fs.writeFileSync(configPath, JSON.stringify(bot));
+        return { ...bot, configPath };
+      },
+    });
+    assert.equal(registrationInput.engine, "pi");
+    assert.equal(registrationInput.provider.mode, "global");
+    assert.equal(registrationInput.provider.envKey, "COMPANY_API_KEY");
+    assert.equal(JSON.stringify(registrationInput).includes("secret"), false);
   } finally { fs.rmSync(value.root, { recursive: true, force: true }); }
 });
 
@@ -180,6 +234,32 @@ test("registers queued Bots one at a time and persists progress", async () => {
     const botConfig = JSON.parse(fs.readFileSync(path.join(value.dataRoot, "codex-assistant-1-writing", "bot.json")));
     assert.equal(botConfig.provider.mode, "global");
     assert.equal(JSON.stringify(botConfig).includes("secret"), false);
+  } finally { fs.rmSync(value.root, { recursive: true, force: true }); }
+});
+
+test("retries a failed queued Bot only when explicitly requested", async () => {
+  const value = fixture();
+  try {
+    createWorkspaceFactoryQueue({ engine: "pi", providerId: "company", model: "gpt-test" }, value);
+    const failedOptions = {
+      dataRoot: value.dataRoot,
+      registrationOptions: {},
+      registerBot: async () => { throw new Error("temporary network failure"); },
+    };
+    await assert.rejects(registerFactoryBot("pi-agent-01", failedOptions), /temporary network failure/);
+    await assert.rejects(registerFactoryBot("pi-agent-01", failedOptions), /Bot 当前不能创建：failed/);
+
+    const retried = await registerFactoryBot("pi-agent-01", {
+      ...failedOptions,
+      retryFailed: true,
+      registerBot: async (bot) => {
+        const configPath = path.join(value.dataRoot, bot.name, "bot.json");
+        fs.mkdirSync(path.dirname(configPath), { recursive: true });
+        fs.writeFileSync(configPath, JSON.stringify(bot));
+        return { ...bot, configPath };
+      },
+    });
+    assert.equal(retried.bots[0].status, "created");
   } finally { fs.rmSync(value.root, { recursive: true, force: true }); }
 });
 

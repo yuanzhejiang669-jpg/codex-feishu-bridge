@@ -14,6 +14,10 @@ const elements = {
   tableBody: document.querySelector("#bot-table-body"),
   botList: document.querySelector("#bot-list"),
   botsViewCount: document.querySelector("#bots-view-count"),
+  piSetupPanel: document.querySelector("#pi-setup-panel"),
+  piSetupStatus: document.querySelector("#pi-setup-status"),
+  piSetupSummary: document.querySelector("#pi-setup-summary"),
+  piSetupList: document.querySelector("#pi-setup-list"),
   systemPaths: document.querySelector("#system-paths"),
   engineStatus: document.querySelector("#engine-status"),
   engineDetails: document.querySelector("#engine-details"),
@@ -115,6 +119,7 @@ const elements = {
   previewBotPaths: document.querySelector("#preview-bot-paths-button"),
   botPathPreview: document.querySelector("#bot-path-preview"),
   botConfigurationTarget: document.querySelector("#bot-configuration-target"),
+  botEngine: document.querySelector("#bot-engine"),
   botSpaceTargetField: document.querySelector("#bot-space-target-field"),
   botSpaceTarget: document.querySelector("#bot-space-target"),
   botConfigurationSummary: document.querySelector("#bot-configuration-summary"),
@@ -312,7 +317,7 @@ function renderBots(bridge, setup = {}) {
     return `
     <div class="bot-row">
       <label class="bot-selector" title="选择 ${escapeHtml(bot.label || bot.name)}"><input class="managed-bot-selection" data-bot-name="${escapeHtml(bot.name)}" type="checkbox" aria-label="选择 ${escapeHtml(bot.label || bot.name)}" ${selectedManagedBotNames.has(bot.name) ? "checked" : ""}></label>
-      <strong>${escapeHtml(bot.label || bot.name)}<small>客户端管理</small></strong>
+      <strong>${escapeHtml(bot.label || bot.name)}<small>${escapeHtml((bot.engine || "codex").toUpperCase())} · 客户端管理</small></strong>
       <span><span class="${badgeClass(stateKind)}" title="${escapeHtml(recovery?.lastError || "")}">${stateLabel}</span></span>
       <span>${bot.activeRunCount} 个任务</span>
       <span class="path-text">${escapeHtml(bot.workspace)}</span>
@@ -342,6 +347,57 @@ function renderBots(bridge, setup = {}) {
     ? spaces.map((space, index) => `<tr><td><strong>${escapeHtml(space.spaceName)}</strong><small>${space.bots.length} 个 Bot</small></td><td>${escapeHtml(space.bots.map((bot) => bot.workspace).join("；"))}</td><td title="${escapeHtml(space.codexHome)}">${escapeHtml(space.codexHome)}</td><td><button class="link-button danger-link managed-space-remove" data-space-index="${index}" type="button">删除空间</button></td></tr>`).join("")
       + otherWorkspaces.map((instance) => `<tr><td>${escapeHtml(instance.name)}</td><td title="${escapeHtml(instance.workspace)}">${escapeHtml(instance.workspace)}</td><td title="${escapeHtml(instance.codexHome)}">${escapeHtml(instance.codexHome)}</td><td><span class="section-meta">只读</span></td></tr>`).join("")
     : '<tr><td colspan="4" class="empty-row">未发现工作空间</td></tr>';
+}
+
+function renderPiSetup(setup = {}) {
+  const batch = setup.piSetup;
+  if (!batch) {
+    elements.piSetupPanel.classList.add("hidden");
+    return;
+  }
+  elements.piSetupPanel.classList.remove("hidden");
+  const statusLabels = {
+    requested: "等待启动",
+    active: "进行中",
+    complete: "已完成",
+    cancelled: "已取消",
+    error: "状态异常",
+  };
+  const stageLabels = {
+    PENDING: "等待应用注册",
+    APP_QR_REQUESTING: "正在申请应用二维码",
+    APP_QR_READY: "应用二维码待发送",
+    APP_QR_SENT: "等待应用扫码",
+    APP_REGISTERED: "应用已注册",
+    PROFILE_CREATED: "Profile 已创建",
+    USER_AUTH_QR_REQUESTING: "正在申请授权二维码",
+    USER_AUTH_QR_READY: "授权二维码待发送",
+    USER_AUTH_QR_SENT: "等待用户授权",
+    USER_AUTHORIZED: "用户已授权",
+    PERMISSIONS_VERIFIED: "权限已验证",
+    READY: "已就绪",
+    FAILED: "失败",
+    SKIPPED: "已跳过",
+  };
+  const status = statusLabels[batch.status] || batch.status || "未知";
+  const statusKind = batch.status === "complete" ? "good" : batch.status === "error" ? "bad" : batch.status === "active" ? "warn" : "neutral";
+  elements.piSetupStatus.className = badgeClass(statusKind);
+  elements.piSetupStatus.textContent = status;
+  elements.piSetupSummary.textContent = batch.error
+    || `${batch.coordinator?.botName || "-"} · ${batch.provider?.id || "-"} / ${batch.provider?.model || "-"}`;
+  elements.piSetupList.innerHTML = (batch.bots || []).map((bot) => {
+    const isCurrent = bot.name === batch.currentBotName;
+    const permissions = bot.permissionVerification
+      ? `${bot.permissionVerification.grantedTotal || 0}/${bot.permissionVerification.expectedTotal || 0} 权限`
+      : "权限待验证";
+    const online = bot.readiness ? (bot.readiness.online ? "Bridge 在线" : "Bridge 待联机") : "readiness 待验证";
+    return `<div class="factory-queue-row">
+      <span><strong>${escapeHtml(bot.label || bot.name)}</strong><small>${escapeHtml(bot.name)}</small></span>
+      <span><strong>${escapeHtml(stageLabels[bot.stage] || bot.stage || "未知")}</strong><small>${escapeHtml(bot.error || (isCurrent ? "当前处理" : ""))}</small></span>
+      <span>${escapeHtml(permissions)}</span>
+      <span>${escapeHtml(online)}</span>
+    </div>`;
+  }).join("");
 }
 
 function selectedLegacyAdoptionNames() {
@@ -834,6 +890,7 @@ function render(currentState) {
   elements.setupMode.textContent = sandbox ? "开发沙箱" : "已安装客户端";
   elements.botFormMode.textContent = sandbox ? "仅写入开发沙箱" : "写入客户端独立数据";
   renderBots(currentState.bridge, currentState.setup);
+  renderPiSetup(currentState.setup);
   renderEngine(currentState.engine);
   renderCompatibility(currentState.compatibility);
   renderCapabilities(currentState.capabilities, currentState.setup);
@@ -954,6 +1011,21 @@ function suggestedSpaceBot(group) {
 }
 
 function updateBotConfigurationTarget(resetNames = true) {
+  if (elements.botEngine.value === "pi") {
+    elements.botConfigurationTarget.value = "global";
+    elements.botConfigurationTarget.disabled = true;
+    elements.botSpaceTargetField.classList.add("hidden");
+    elements.botSpaceTarget.required = false;
+    elements.botProviderSection.classList.remove("hidden");
+    elements.providerMode.value = "global";
+    elements.providerMode.disabled = true;
+    updateBotProviderMode();
+    elements.botConfigurationSummary.textContent = "Pi Bot 创建后固定使用 Pi engine，并使用独立 Agent Home 与 session directory。";
+    elements.botPathPreview.classList.add("hidden");
+    return;
+  }
+  elements.botConfigurationTarget.disabled = false;
+  elements.providerMode.disabled = false;
   const mode = elements.botConfigurationTarget.value;
   const isSpace = mode === "space";
   const groups = isolatedSpaceGroups(state?.setup || {}, { spacesOnly: true });
@@ -991,6 +1063,7 @@ function botInput() {
   const data = new FormData(elements.botForm);
   return {
     name: text(data.get("name"), ""),
+    engine: text(data.get("engine"), "codex"),
     label: text(data.get("label"), ""),
     workspace: text(data.get("workspace"), ""),
     brand: text(data.get("brand"), "feishu"),
@@ -1072,6 +1145,7 @@ function resetBotDialog() {
   elements.registrationQr.removeAttribute("src");
   elements.registrationQr.classList.add("hidden");
   elements.botConfigurationTarget.value = "global";
+  elements.botEngine.value = "codex";
   elements.botSpaceTarget.value = "";
   elements.providerMode.value = "current";
   const catalog = state?.providerCatalog || {};
@@ -1593,6 +1667,14 @@ elements.workspaceFactoryForm.addEventListener("input", () => {
     elements.workspaceFactoryForm.elements.model.value,
   );
 });
+elements.workspaceFactoryForm.elements.engine.addEventListener("change", () => {
+  const pi = elements.workspaceFactoryForm.elements.engine.value === "pi";
+  document.querySelectorAll("[data-codex-factory]").forEach((field) => {
+    field.classList.toggle("hidden", pi);
+    field.querySelectorAll("input, select").forEach((input) => { input.disabled = pi; });
+  });
+  elements.workspaceAgentsPaths.classList.toggle("hidden", pi);
+});
 elements.workspaceFactoryPreviewButton.addEventListener("click", async () => {
   if (!elements.workspaceFactoryForm.reportValidity()) return;
   elements.workspaceFactoryPreviewButton.disabled = true;
@@ -1605,7 +1687,10 @@ elements.workspaceFactoryPreviewButton.addEventListener("click", async () => {
       : result.factory.initializeAgents
       ? `<div class="path-summary"><span>AGENTS.md 来源</span><code>${escapeHtml(result.factory.agentsSource)}</code><span>目标</span><code>${escapeHtml(result.factory.agentsTarget)}</code></div>`
       : '<span>不初始化空间 AGENTS.md</span>';
-    elements.workspaceFactoryPreview.innerHTML = `<strong>${result.bots.length} 个 Bot · 共享 Codex Home</strong><span>${escapeHtml(result.factory.codexHome)}</span>${agents}<div class="factory-preview-list">${result.bots.map((bot) => `<div><span>${escapeHtml(bot.label)}</span><code>${escapeHtml(bot.name)}</code><small>${escapeHtml(bot.conflicts.join("；") || "可创建")}</small></div>`).join("")}</div>`;
+    const runtimeSummary = result.factory.engine === "pi"
+      ? `<strong>固定 ${result.bots.length} 个 Pi Bot · 共享 pi-general</strong><span>${escapeHtml(result.factory.configurationSpace.home)}</span>`
+      : `<strong>${result.bots.length} 个 Bot · 共享 Codex Home</strong><span>${escapeHtml(result.factory.codexHome)}</span>${agents}`;
+    elements.workspaceFactoryPreview.innerHTML = `${runtimeSummary}<div class="factory-preview-list">${result.bots.map((bot) => `<div><span>${escapeHtml(bot.label)}</span><code>${escapeHtml(bot.name)}</code><small>${escapeHtml(bot.conflicts.join("；") || "可创建")}</small></div>`).join("")}</div>`;
     elements.workspaceFactoryPreview.className = `operation-result ${conflicts.length ? "bad" : "good"}`;
     elements.workspaceFactoryQueueButton.disabled = conflicts.length > 0;
   } catch (error) {
@@ -1680,6 +1765,7 @@ document.querySelector("#provider-model").addEventListener("input", updateBotRea
 elements.botGlobalReasoning.addEventListener("change", updateBotReasoningControls);
 elements.providerReasoning.addEventListener("change", updateBotReasoningControls);
 elements.botConfigurationTarget.addEventListener("change", () => updateBotConfigurationTarget(true));
+elements.botEngine.addEventListener("change", () => updateBotConfigurationTarget(true));
 elements.botSpaceTarget.addEventListener("change", () => updateBotConfigurationTarget(true));
 elements.customProviderFields.addEventListener("input", () => { elements.providerTestStatus.textContent = ""; });
 elements.previewBotPaths.addEventListener("click", async () => {
@@ -1687,8 +1773,10 @@ elements.previewBotPaths.addEventListener("click", async () => {
   try {
     const preview = await window.bridgeDesktop.previewBot(botInput());
     elements.botPathPreview.innerHTML = detailRows([
+      ["Agent 引擎", preview.bot.engine === "pi" ? "Pi" : "Codex"],
       ["工作空间", preview.paths.workspace],
-      ["Codex Home", preview.paths.codexHome],
+      [preview.bot.engine === "pi" ? "Pi Agent Home" : "Codex Home", preview.bot.engine === "pi" ? preview.paths.agentHome : preview.paths.codexHome],
+      ...(preview.bot.engine === "pi" ? [["Pi session 目录", preview.paths.sessionDir], ["配置空间", preview.paths.configurationSpace?.home || ""]] : []),
       ["Bot 配置", preview.paths.botConfig],
       ["Profile 数据", preview.paths.profileHome],
       ["运行目录", preview.paths.runtimeRoot],

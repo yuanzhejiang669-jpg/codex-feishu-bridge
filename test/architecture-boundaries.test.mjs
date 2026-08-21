@@ -548,6 +548,25 @@ test("event dispatcher clear is idempotent and all mode includes cross-chat pref
   assert.equal(thirdCommitted, false);
 });
 
+test("event dispatcher exposes in-flight work for session mutation guards", async () => {
+  let release;
+  const blocker = new Promise((resolve) => { release = resolve; });
+  const dispatcher = createEventDispatcher({
+    maxConcurrent: 1,
+    chatIdOf: (event) => event.chatId,
+    messageIdOf: (event) => event.messageId,
+    handleEvent: async () => blocker,
+  });
+  dispatcher.enqueue({ chatId: "chat-a", messageId: "active" });
+  dispatcher.enqueue({ chatId: "chat-a", messageId: "queued" });
+  await waitFor(() => dispatcher.activeJobs === 1);
+  assert.equal(dispatcher.countForChat("chat-a"), 1);
+  assert.equal(dispatcher.workCountForChat("chat-a"), 2);
+  release();
+  await waitFor(() => dispatcher.activeJobs === 0);
+  assert.equal(dispatcher.workCountForChat("chat-a"), 0);
+});
+
 test("run watchdog distinguishes idle timeout and supports progress touches", async () => {
   let reason = "";
   const watchdog = createRunWatchdog("test run", (value) => {
@@ -675,6 +694,145 @@ test("explicit steer stays out of the ordinary queue and never starts a replacem
   assert.match(bridgeSource, /`\/steer <补充内容>`/);
 });
 
+test("Pi control commands route through the engine registry without entering Codex job maps", () => {
+  const bridgeSource = fs.readFileSync(new URL("../codex-feishu-bridge.mjs", import.meta.url), "utf8");
+  const stopStart = bridgeSource.indexOf("async function stopCurrentJob(");
+  const steerStart = bridgeSource.indexOf("async function handleSteerCommand(", stopStart);
+  const compactStart = bridgeSource.indexOf("async function handleCompactCommand(", steerStart);
+  const helpStart = bridgeSource.indexOf("async function handleHelpCommand(", compactStart);
+  const stopSource = bridgeSource.slice(stopStart, steerStart);
+  const steerSource = bridgeSource.slice(steerStart, compactStart);
+  const compactSource = bridgeSource.slice(compactStart, helpStart);
+
+  assert.match(stopSource, /session\.engine === "pi"[\s\S]*agentEngineRegistry\.get\(session\.engine\)\.abort\(session\)/);
+  assert.match(steerSource, /session\.engine === "pi"[\s\S]*agentEngineRegistry\.get\(session\.engine\)\.steer\(session/);
+  assert.match(compactSource, /session\.engine === "pi"[\s\S]*adapter\.status\(session\)[\s\S]*adapter\.compact\(session\)/);
+  assert.match(stopSource, /activeCodexJobs\.get\(chatId\)/);
+  assert.match(steerSource, /activeCodexJobs\.get\(chatId\)/);
+});
+
+test("Pi status avoids Codex runtime fields and reports the Pi adapter configuration", () => {
+  const bridgeSource = fs.readFileSync(new URL("../codex-feishu-bridge.mjs", import.meta.url), "utf8");
+  const statusSource = bridgeSource.slice(
+    bridgeSource.indexOf("async function statusMarkdown"),
+    bridgeSource.indexOf("function failureStatsSummary"),
+  );
+  assert.match(statusSource, /currentSession\.engine === "pi"[\s\S]*piStatusMarkdown/);
+  assert.match(statusSource, /agentEngineRegistry\.get\("pi"\)\.status\(session\)/);
+  assert.match(statusSource, /Pi Agent Home[\s\S]*CONFIG\.piProvider[\s\S]*CONFIG\.piModel/);
+  const piStatusSource = statusSource.slice(statusSource.indexOf("async function piStatusMarkdown"));
+  assert.doesNotMatch(piStatusSource, /readCodexRuntimeVersionStatus|syncChatSessionsWithCodex|Codex Home|Codex CLI/);
+});
+
+test("common engine completion finalizes cards and uses the session engine label", () => {
+  const bridgeSource = fs.readFileSync(new URL("../codex-feishu-bridge.mjs", import.meta.url), "utf8");
+  const dispatchOffset = bridgeSource.indexOf("const result = await agentEngineRegistry.get(session.engine).run");
+  const completionSource = bridgeSource.slice(dispatchOffset, bridgeSource.indexOf("appendHistory(session, \"user\"", dispatchOffset));
+  assert.match(completionSource, /syncRunContextMeta\(cardState\)[\s\S]*ensureRunDone\(cardState, result\.text\)[\s\S]*await updateCard\(cardState\)[\s\S]*await cardOpenPromise/);
+  const titleSource = bridgeSource.slice(bridgeSource.indexOf("function cardTitle"), bridgeSource.indexOf("function cardSummary"));
+  assert.match(titleSource, /agentEngineLabel\(state\.session\?\.engine\)/);
+  assert.match(titleSource, /`\$\{label\} 已完成`/);
+  assert.doesNotMatch(titleSource.slice(titleSource.indexOf("const label")), /Codex 正在回复|Codex 已完成/);
+});
+
+test("Pi completion cards use Pi context and compaction metadata", () => {
+  const bridgeSource = fs.readFileSync(new URL("../codex-feishu-bridge.mjs", import.meta.url), "utf8");
+  const metaStart = bridgeSource.indexOf("function engineContextMeta(");
+  const metaEnd = bridgeSource.indexOf("function appendRunText(", metaStart);
+  const metaSource = bridgeSource.slice(metaStart, metaEnd);
+  assert.ok(metaStart >= 0 && metaEnd > metaStart);
+  assert.match(metaSource, /session\?\.engine === "pi"/);
+  assert.match(metaSource, /session\.piContextUsage/);
+  assert.match(metaSource, /session\.piContextPeakUsage/);
+  assert.match(metaSource, /session\.piCompactedAt/);
+});
+
+test("Pi session commands never scan or mutate Codex thread inventory", () => {
+  const bridgeSource = fs.readFileSync(new URL("../codex-feishu-bridge.mjs", import.meta.url), "utf8");
+  const listStart = bridgeSource.indexOf("async function listChatSessionsSynced(");
+  const listEnd = bridgeSource.indexOf("async function findSessionEntry(", listStart);
+  const listSource = bridgeSource.slice(listStart, listEnd);
+  assert.match(listSource, /CONFIG\.agentEngine === "pi"\) return listPiChatSessions\(chatId\)/);
+  assert.ok(listSource.indexOf("listPiChatSessions(chatId)") < listSource.indexOf("syncChatSessionsWithCodex(chatId)"));
+
+  const sessionsStart = bridgeSource.indexOf("async function sessionsMarkdown(");
+  const sessionsEnd = bridgeSource.indexOf("function piSessionsMarkdown(", sessionsStart);
+  const sessionsSource = bridgeSource.slice(sessionsStart, sessionsEnd);
+  assert.match(sessionsSource, /CONFIG\.agentEngine === "pi"\) return piSessionsMarkdown\(chatId\)/);
+
+  const resetStart = bridgeSource.indexOf("async function resetCurrentSession(");
+  const resetEnd = bridgeSource.indexOf("function normalizeSessionData(", resetStart);
+  const resetSource = bridgeSource.slice(resetStart, resetEnd);
+  assert.match(resetSource, /current\.engine === "pi"[\s\S]*\.resetSession\(current\)/);
+
+  const deleteStart = bridgeSource.indexOf("async function handleDeleteCommand(");
+  const deleteEnd = bridgeSource.indexOf("async function handleConfirmCommand(", deleteStart);
+  const deleteSource = bridgeSource.slice(deleteStart, deleteEnd);
+  assert.match(deleteSource, /CONFIG\.agentEngine === "pi"[\s\S]*handlePiDeleteCommand/);
+});
+
+test("Pi rejects Codex-private commands before their Codex handlers run", () => {
+  const bridgeSource = fs.readFileSync(new URL("../codex-feishu-bridge.mjs", import.meta.url), "utf8");
+  const commandStart = bridgeSource.indexOf("async function handleCommand(");
+  const commandEnd = bridgeSource.indexOf("async function handlePiPrivateCommand(", commandStart);
+  const commandSource = bridgeSource.slice(commandStart, commandEnd);
+  for (const [command, handler] of [
+    ["/goal", "handleGoalCommand"],
+    ["/provider", "handleProviderCommand"],
+    ["/model", "handleModelCommand"],
+    ["/fast", "handleFastCommand"],
+  ]) {
+    const offset = commandSource.indexOf(`case "${command}"`);
+    const nextCase = commandSource.indexOf("case \"/", offset + 8);
+    const block = commandSource.slice(offset, nextCase >= 0 ? nextCase : commandSource.length);
+    assert.match(block, /handlePiPrivateCommand/);
+    assert.ok(block.indexOf("handlePiPrivateCommand") < block.indexOf(handler));
+  }
+});
+
+test("Pi reset and delete reject queued messages and persist unlinking before deleting JSONL", () => {
+  const bridgeSource = fs.readFileSync(new URL("../codex-feishu-bridge.mjs", import.meta.url), "utf8");
+  const resetSource = bridgeSource.slice(
+    bridgeSource.indexOf("async function resetCurrentSession("),
+    bridgeSource.indexOf("function normalizeSessionData("),
+  );
+  assert.match(resetSource, /sessionMutationWorkForChat\(chatId\)[\s\S]*\/stop queue[\s\S]*resetSession\(current\)/);
+
+  const previewSource = bridgeSource.slice(
+    bridgeSource.indexOf("async function handlePiDeleteCommand("),
+    bridgeSource.indexOf("async function confirmPiSessionDeletion("),
+  );
+  assert.match(previewSource, /sessionMutationWorkForChat\(chatId\)[\s\S]*\/stop queue/);
+
+  const confirmSource = bridgeSource.slice(
+    bridgeSource.indexOf("async function confirmPiSessionDeletion("),
+    bridgeSource.indexOf("async function handleDeleteCommand("),
+  );
+  assert.match(confirmSource, /sessionMutationWorkForChat\(chatId\)[\s\S]*\/stop queue/);
+  assert.match(confirmSource, /\.deleteSession\(session, \{[\s\S]*beforeDelete: \(\) => \{[\s\S]*saveSessions\(\)/);
+  assert.match(confirmSource, /catch \(error\) \{[\s\S]*chatState\.sessions = previousSessions[\s\S]*throw error/);
+});
+
+test("Pi setup commands are coordinator-bound, create atomically, and suppress stale QR delivery", () => {
+  const bridgeSource = fs.readFileSync(new URL("../codex-feishu-bridge.mjs", import.meta.url), "utf8");
+  const commandStart = bridgeSource.indexOf("async function handlePiSetupCommand(");
+  const deliveryStart = bridgeSource.indexOf("async function deliverPiSetupArtifact(", commandStart);
+  const deliveryEnd = bridgeSource.indexOf("function stopClearMode(", deliveryStart);
+  const commandSource = bridgeSource.slice(commandStart, deliveryStart);
+  const deliverySource = bridgeSource.slice(deliveryStart, deliveryEnd);
+
+  assert.ok(commandStart >= 0 && deliveryStart > commandStart && deliveryEnd > deliveryStart);
+  assert.match(bridgeSource, /case "\/pi":[\s\S]*handlePiSetupCommand/);
+  assert.match(commandSource, /CONFIG\.agentEngine !== "codex"/);
+  assert.match(commandSource, /current\.coordinator\?\.botName !== instanceName/);
+  assert.match(commandSource, /current\.conversationId !== chatId/);
+  assert.match(commandSource, /mutatePiSetupState\(piSetupFilePath, \(state\) => \{[\s\S]*if \(state\) return state;[\s\S]*return request;/);
+  assert.match(deliverySource, /uploadImage\(artifact\.path/);
+  assert.match(deliverySource, /latest\?\.status !== "active"[\s\S]*latest\.currentBotName !== bot\.name[\s\S]*idempotencyKey !== artifact\.idempotencyKey/);
+  assert.match(deliverySource, /sendImage\(state\.conversationId, imageKey, artifact\.idempotencyKey/);
+  assert.match(deliverySource, /fs\.rmSync\(artifact\.path, \{ force: true \}\)/);
+});
+
 test("pending attachments are deduplicated when a failed steer is retried", () => {
   const store = createPendingAttachmentStore({
     maxPendingAttachments: 12,
@@ -695,23 +853,23 @@ test("pending attachments are deduplicated when a failed steer is retried", () =
   assert.deepEqual(store.take("chat_1").map((item) => item.fileKey), ["img_1"]);
 });
 
-test("ordinary messages start Codex without awaiting CardKit and use the warm app-server pool", () => {
+test("ordinary messages dispatch through the engine registry without awaiting CardKit and Codex uses the warm pool", () => {
   const bridgeSource = fs.readFileSync(new URL("../codex-feishu-bridge.mjs", import.meta.url), "utf8");
   const handlerStart = bridgeSource.indexOf("async function handleEvent(");
   const handlerEnd = bridgeSource.indexOf("function cleanupClearedDownloads(", handlerStart);
   const handlerSource = bridgeSource.slice(handlerStart, handlerEnd);
   const activeRunIndex = handlerSource.indexOf("recordActiveRunSafely({", handlerSource.indexOf("const cardState ="));
   const cardPromiseIndex = handlerSource.indexOf("const cardOpenPromise =");
-  const runCodexIndex = handlerSource.indexOf("const result = await runCodex(");
-  const awaitCardIndex = handlerSource.indexOf("await cardOpenPromise;", runCodexIndex);
+  const engineRunIndex = handlerSource.indexOf("const result = await agentEngineRegistry.get(session.engine).run(");
+  const awaitCardIndex = handlerSource.indexOf("await cardOpenPromise;", engineRunIndex);
   const runStart = bridgeSource.indexOf("async function runCodexAppServer(");
   const runEnd = bridgeSource.indexOf("async function runCodex(", runStart);
   const runSource = bridgeSource.slice(runStart, runEnd);
 
   assert.ok(activeRunIndex >= 0);
   assert.ok(cardPromiseIndex > activeRunIndex);
-  assert.ok(runCodexIndex > cardPromiseIndex);
-  assert.ok(awaitCardIndex > runCodexIndex);
+  assert.ok(engineRunIndex > cardPromiseIndex);
+  assert.ok(awaitCardIndex > engineRunIndex);
   assert.match(runSource, /appServerPool\.acquire/);
   assert.match(runSource, /lease\.ensureInitialized/);
   assert.match(runSource, /lease\.release/);

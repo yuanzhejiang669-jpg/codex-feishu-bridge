@@ -88,6 +88,11 @@
           <div class="section-heading"><h2>全部 Bot</h2><span id="bots-view-count" class="section-meta"></span></div>
           <div id="bot-list" class="bot-list"></div>
         </section>
+        <section id="pi-setup-panel" class="content-section hidden">
+          <div class="section-heading"><h2>Pi Agent 注册批次</h2><span id="pi-setup-status" class="badge neutral"></span></div>
+          <p id="pi-setup-summary" class="readiness-summary"></p>
+          <div id="pi-setup-list" class="factory-queue"></div>
+        </section>
         <section id="bot-readiness-panel" class="content-section hidden">
           <div class="section-heading"><h2 id="bot-readiness-title">运行准备检查</h2><span id="bot-readiness-status" class="badge neutral">未检查</span></div>
           <p id="bot-readiness-summary" class="readiness-summary"></p>
@@ -115,19 +120,20 @@
         <section id="workspace-factory-editor" class="content-section hidden">
           <div class="section-heading"><h2>空间 Bot 创建方案</h2><span class="section-meta">1-16 个 Bot</span></div>
           <form id="workspace-factory-form" class="form-grid">
-            <label><span>空间名称</span><input name="spaceName" required value="写作"></label>
-            <label><span>空间 slug</span><input name="slug" required value="writing" pattern="[a-z0-9][a-z0-9-]*"></label>
-            <label><span>Bot 数量</span><input name="count" required type="number" min="1" max="16" value="1"></label>
-            <label><span>起始序号</span><input name="baseIndex" required type="number" min="1" max="999" value="1"></label>
-            <label><span>Bot 标识模板</span><input name="namePattern" required value="codex-assistant-{index}-{slug}"></label>
-            <label><span>飞书显示名模板</span><input name="labelPattern" required value="Codex助手{index}-{space}"></label>
+            <label><span>Agent 引擎</span><select name="engine"><option value="codex">Codex</option><option value="pi">Pi · 固定五 Bot</option></select></label>
+            <label data-codex-factory><span>空间名称</span><input name="spaceName" required value="写作"></label>
+            <label data-codex-factory><span>空间 slug</span><input name="slug" required value="writing" pattern="[a-z0-9][a-z0-9-]*"></label>
+            <label data-codex-factory><span>Bot 数量</span><input name="count" required type="number" min="1" max="16" value="1"></label>
+            <label data-codex-factory><span>起始序号</span><input name="baseIndex" required type="number" min="1" max="999" value="1"></label>
+            <label data-codex-factory><span>Bot 标识模板</span><input name="namePattern" required value="codex-assistant-{index}-{slug}"></label>
+            <label data-codex-factory><span>飞书显示名模板</span><input name="labelPattern" required value="Codex助手{index}-{space}"></label>
             <label><span>全局 Provider</span><select name="providerId" required><option value="">请选择</option></select></label>
             <label><span>模型</span><input name="model" required placeholder="例如 gpt-5.6-sol"></label>
             <label><span>推理强度</span><select name="reasoning"><option value="medium">medium</option></select><small id="workspace-reasoning-hint"></small></label>
             <label><span>平台</span><select name="brand"><option value="feishu">飞书</option><option value="lark">Lark</option></select></label>
-            <label class="form-wide"><span>共享 Codex Home 目录名</span><input name="codexHomeName" placeholder="默认 codex-space-{slug}"></label>
-            <label class="form-wide checkbox-field"><input name="reuseExistingHome" type="checkbox"><span>复用已纳入客户端管理的现有 Codex Home（不改写配置、AGENTS.md、Skills 或 MCP）</span></label>
-            <label class="form-wide checkbox-field"><input name="initializeAgents" type="checkbox" checked><span>从全局配置初始化空间 AGENTS.md</span></label>
+            <label class="form-wide" data-codex-factory><span>共享 Codex Home 目录名</span><input name="codexHomeName" placeholder="默认 codex-space-{slug}"></label>
+            <label class="form-wide checkbox-field" data-codex-factory><input name="reuseExistingHome" type="checkbox"><span>复用已纳入客户端管理的现有 Codex Home（不改写配置、AGENTS.md、Skills 或 MCP）</span></label>
+            <label class="form-wide checkbox-field" data-codex-factory><input name="initializeAgents" type="checkbox" checked><span>从全局配置初始化空间 AGENTS.md</span></label>
             <div id="workspace-agents-paths" class="form-wide path-summary"></div>
             <div class="form-wide inline-actions">
               <button id="workspace-factory-preview-button" class="secondary-button" type="button">生成预览</button>
@@ -305,6 +311,7 @@
       </div>
       <div id="bot-form-error" class="error-band hidden" role="alert"></div>
       <div class="form-grid">
+        <label class="form-wide"><span>Agent 引擎</span><select id="bot-engine" name="engine"><option value="codex">Codex</option><option value="pi">Pi</option></select></label>
         <label class="form-wide"><span>配置归属</span><select id="bot-configuration-target" name="configurationTarget"><option value="global">普通 Bot · 使用全局 Codex 配置</option><option value="space">补充到已有空间</option></select></label>
         <label id="bot-space-target-field" class="form-wide hidden"><span>目标空间</span><select id="bot-space-target" name="spaceSourceName"><option value="">请选择已有空间</option></select></label>
         <p id="bot-configuration-summary" class="form-wide form-note"></p>

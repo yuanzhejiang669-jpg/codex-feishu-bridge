@@ -58,37 +58,43 @@ function sourceProvider(sourceCodexHome, providerId, env = process.env) {
 
 function renderPattern(pattern, index, values) {
   return String(pattern)
+    .replaceAll("{index2}", String(index).padStart(2, "0"))
     .replaceAll("{index}", String(index))
     .replaceAll("{slug}", values.slug)
     .replaceAll("{space}", values.spaceName);
 }
 
 function normalizeFactory(raw = {}, options = {}) {
-  const spaceName = String(raw.spaceName || "").trim().slice(0, 80);
+  const engine = String(raw.engine || "codex").trim().toLowerCase();
+  if (!new Set(["codex", "pi"]).has(engine)) throw new Error("Agent 引擎无效");
+  const piPreset = engine === "pi";
+  const spaceName = String(piPreset ? "pi-general" : raw.spaceName || "").trim().slice(0, 80);
   if (!spaceName) throw new Error("空间名称不能为空");
-  const slug = String(raw.slug || "").trim().toLowerCase();
+  const slug = String(piPreset ? "pi-general" : raw.slug || "").trim().toLowerCase();
   if (!SLUG_PATTERN.test(slug)) throw new Error("空间 slug 只能包含小写字母、数字和短横线");
-  const count = Number(raw.count);
-  const baseIndex = Number(raw.baseIndex);
+  const count = piPreset ? 5 : Number(raw.count);
+  const baseIndex = piPreset ? 1 : Number(raw.baseIndex);
   if (!Number.isInteger(count) || count < 1 || count > 16) throw new Error("Bot 数量必须是 1-16 的整数");
   if (!Number.isInteger(baseIndex) || baseIndex < 1 || baseIndex > 999) throw new Error("起始序号必须是 1-999 的整数");
-  const namePattern = String(raw.namePattern || `codex-assistant-{index}-${slug}`).trim();
-  const labelPattern = String(raw.labelPattern || `Codex助手{index}-${spaceName}`).trim();
-  if (!namePattern.includes("{index}") || !labelPattern.includes("{index}")) throw new Error("Bot 标识和显示名称模板必须包含 {index}");
+  const namePattern = String(piPreset ? "pi-agent-{index2}" : raw.namePattern || `codex-assistant-{index}-${slug}`).trim();
+  const labelPattern = String(piPreset ? "Pi Agent {index2}" : raw.labelPattern || `Codex助手{index}-${spaceName}`).trim();
+  if (!/\{index2?\}/.test(namePattern) || !/\{index2?\}/.test(labelPattern)) throw new Error("Bot 标识和显示名称模板必须包含 {index} 或 {index2}");
   const providerId = String(raw.providerId || "").trim();
   const model = String(raw.model || "").trim();
   if (!providerId || !model) throw new Error("请选择 Provider 并填写模型");
   const codexHomeName = String(raw.codexHomeName || `codex-space-${slug}`).trim();
   if (!NAME_PATTERN.test(codexHomeName)) throw new Error("Codex Home 目录名格式无效");
-  const initializeAgents = raw.initializeAgents === true
-    || new Set(["1", "true", "on", "yes"]).has(String(raw.initializeAgents || "").trim().toLowerCase());
-  const reuseExistingHome = raw.reuseExistingHome === true
-    || new Set(["1", "true", "on", "yes"]).has(String(raw.reuseExistingHome || "").trim().toLowerCase());
-  const codexHome = path.resolve(options.codexHomeRoot, codexHomeName);
+  const initializeAgents = !piPreset && (raw.initializeAgents === true
+    || new Set(["1", "true", "on", "yes"]).has(String(raw.initializeAgents || "").trim().toLowerCase()));
+  const reuseExistingHome = !piPreset && (raw.reuseExistingHome === true
+    || new Set(["1", "true", "on", "yes"]).has(String(raw.reuseExistingHome || "").trim().toLowerCase()));
+  const codexHome = piPreset
+    ? path.resolve(options.defaultCodexHome || options.sourceCodexHome)
+    : path.resolve(options.codexHomeRoot, codexHomeName);
   const reasoning = normalizeReasoningEffort(raw.reasoning);
   const reasoningPlan = resolveReasoningSelection({ provider: providerId, model, effort: reasoning });
   return {
-    spaceName, slug, count, baseIndex, namePattern, labelPattern, providerId, model,
+    engine, piPreset, spaceName, slug, count, baseIndex, namePattern, labelPattern, providerId, model,
     reasoning,
     reasoningPlan,
     brand: String(raw.brand || "feishu").trim().toLowerCase(),
@@ -97,6 +103,12 @@ function normalizeFactory(raw = {}, options = {}) {
     reuseExistingHome,
     agentsSource: path.join(options.sourceCodexHome, "AGENTS.md"),
     agentsTarget: path.join(codexHome, "AGENTS.md"),
+    ...(piPreset ? {
+      configurationSpace: {
+        id: "pi-general",
+        home: path.resolve(options.piConfigurationSpaceRoot, "pi-general"),
+      },
+    } : {}),
   };
 }
 
@@ -117,6 +129,7 @@ function previewWorkspaceFactory(raw, options) {
     if (known.has(name)) conflicts.push("Bot 标识已存在");
     if (fs.existsSync(workspace)) conflicts.push("工作空间已存在");
     bots.push({
+      engine: factory.engine,
       index,
       name,
       profile: name,
@@ -124,15 +137,22 @@ function previewWorkspaceFactory(raw, options) {
       brand: factory.brand,
       workspace,
       codexHome: factory.codexHome,
-      codexHomeMode: "isolated",
+      codexHomeMode: factory.piPreset ? "shared" : "isolated",
+      ...(factory.piPreset ? {
+        agentHome: path.resolve(options.piAgentHomeRoot, name),
+        sessionDir: path.resolve(options.piAgentHomeRoot, name, "sessions"),
+        configurationSpace: factory.configurationSpace,
+      } : {}),
       conflicts,
     });
   }
-  const configExists = fs.existsSync(path.join(factory.codexHome, "config.toml"));
+  const configExists = !factory.piPreset && fs.existsSync(path.join(factory.codexHome, "config.toml"));
   const trustedHomes = new Set((options.trustedCodexHomes || []).map((item) => path.resolve(item).toLowerCase()));
   const reusable = factory.reuseExistingHome && configExists
     && trustedHomes.has(path.resolve(factory.codexHome).toLowerCase());
-  if (factory.reuseExistingHome && !reusable) {
+  if (factory.piPreset) {
+    // Pi Bots share only the authoritative pi-general capability configuration.
+  } else if (factory.reuseExistingHome && !reusable) {
     bots.forEach((bot) => bot.conflicts.push("只能复用已纳入客户端管理且包含 config.toml 的 Codex Home"));
   } else if (configExists && !reusable) {
     bots.forEach((bot) => bot.conflicts.push("空间 Codex Home 已存在"));
@@ -156,12 +176,14 @@ function createWorkspaceFactoryQueue(raw, options) {
   const provider = sourceProvider(options.sourceCodexHome, preview.factory.providerId, options.env);
   const configPath = path.join(preview.factory.codexHome, "config.toml");
   const queueFile = queuePath(options.dataRoot);
-  const codexHomeExisted = fs.existsSync(preview.factory.codexHome);
+  const codexHomeExisted = preview.factory.piPreset || fs.existsSync(preview.factory.codexHome);
   const agentsTargetExisted = fs.existsSync(preview.factory.agentsTarget);
   const configExisted = fs.existsSync(configPath);
   try {
-    fs.mkdirSync(preview.factory.codexHome, { recursive: true });
-    if (preview.factory.reusingExistingHome) {
+    if (!preview.factory.piPreset) fs.mkdirSync(preview.factory.codexHome, { recursive: true });
+    if (preview.factory.piPreset) {
+      // Pi runtime configuration is created transactionally after each app registration.
+    } else if (preview.factory.reusingExistingHome) {
       const existing = TOML.parse(fs.readFileSync(configPath, "utf8").replace(/^\uFEFF/, ""));
       if (!existing.model_providers?.[preview.factory.providerId]) {
         throw new Error(`现有空间未包含所选 Provider：${preview.factory.providerId}`);
@@ -209,8 +231,8 @@ function createWorkspaceFactoryQueue(raw, options) {
     return state;
   } catch (error) {
     fs.rmSync(queueFile, { force: true });
-    if (!configExisted) fs.rmSync(configPath, { force: true });
-    if (!agentsTargetExisted) fs.rmSync(preview.factory.agentsTarget, { force: true });
+    if (!preview.factory.piPreset && !configExisted) fs.rmSync(configPath, { force: true });
+    if (!preview.factory.piPreset && !agentsTargetExisted) fs.rmSync(preview.factory.agentsTarget, { force: true });
     if (!codexHomeExisted) {
       try { if (fs.readdirSync(preview.factory.codexHome).length === 0) fs.rmdirSync(preview.factory.codexHome); } catch {}
     }
@@ -222,15 +244,16 @@ async function registerFactoryBot(name, options, onProgress = () => {}) {
   const state = readQueue(options.dataRoot);
   const bot = state.bots?.find((item) => item.name === name);
   if (!bot) throw new Error(`创建队列中找不到 Bot：${name}`);
-  if (bot.status !== "pending") throw new Error(`Bot 当前不能创建：${bot.status}`);
+  const retryingFailedBot = bot.status === "failed" && options.retryFailed === true;
+  if (bot.status !== "pending" && !retryingFailedBot) throw new Error(`Bot 当前不能创建：${bot.status}`);
   bot.status = "registering";
   bot.error = "";
   state.updatedAt = new Date().toISOString();
   atomicWrite(queuePath(options.dataRoot), `${JSON.stringify(state, null, 2)}\n`);
   try {
-    const created = await options.registerBot(bot, options.registrationOptions, (progress) => {
-      onProgress({ ...progress, botName: bot.name, botLabel: bot.label });
-    });
+    const created = await options.registerBot({ ...bot, provider: state.factory.providerReference }, options.registrationOptions, (progress) => (
+      onProgress({ ...progress, botName: bot.name, botLabel: bot.label })
+    ));
     const createdConfig = JSON.parse(fs.readFileSync(created.configPath, "utf8"));
     createdConfig.provider = state.factory.providerReference;
     createdConfig.workspaceFactory = { spaceName: state.factory.spaceName, slug: state.factory.slug };

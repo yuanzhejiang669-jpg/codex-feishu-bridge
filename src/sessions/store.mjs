@@ -8,6 +8,7 @@ export function createSessionStore({
   normalizeSessionData,
   dedupeSessions,
   sessionListLimit,
+  isSessionCompatible = () => true,
 } = {}) {
   const sessions = loadSessions(sessionsPath);
 
@@ -18,8 +19,9 @@ export function createSessionStore({
   function getSession(chatId) {
     const chatState = getChatState(chatId);
     let session = chatState.sessions.find((item) => item.id === chatState.currentSessionId);
+    if (session && !isSessionCompatible(session)) session = null;
     if (!session) {
-      session = chatState.sessions[0] || createSessionData("默认会话");
+      session = chatState.sessions.find(isSessionCompatible) || createSessionData("默认会话");
       if (!chatState.sessions.includes(session)) chatState.sessions.unshift(session);
       chatState.currentSessionId = session.id;
       saveSessions();

@@ -69,6 +69,17 @@ export function createLarkClient({
     }
   }
 
+  async function sendImage(chatId, imageKey, idempotencySuffix, baseId = chatId) {
+    const key = String(imageKey || "").trim();
+    if (!key) throw new Error("Feishu image key is required");
+    const result = await runLark([
+      "im", "+messages-send", "--as", "bot", "--chat-id", chatId,
+      "--image", key,
+      "--idempotency-key", idempotencyKey(baseId, `${idempotencySuffix}-image`),
+    ]);
+    if (result.code !== 0) throw new Error(`lark-cli image send failed (${result.code}): ${result.stderr || result.stdout}`);
+  }
+
   async function replyFallback(messageId, text, idempotencySuffix) {
     const chunks = splitText(text, maxReplyChars);
     for (let i = 0; i < chunks.length; i += 1) {
@@ -179,6 +190,7 @@ export function createLarkClient({
     replyFallback,
     runLark,
     sendMarkdown,
+    sendImage,
     sendText,
     uploadImage,
   };

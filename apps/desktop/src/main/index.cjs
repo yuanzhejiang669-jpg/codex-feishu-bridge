@@ -2,6 +2,7 @@ const { app, BrowserWindow, clipboard, ipcMain, Menu, nativeImage, safeStorage, 
 const { autoUpdater } = require("electron-updater");
 const fs = require("node:fs");
 const path = require("node:path");
+const { pathToFileURL } = require("node:url");
 const { inspectCodex } = require("./services/environment.cjs");
 const { discoverBridge } = require("./services/bridge-discovery.cjs");
 const { inspectCapabilities, inspectCapabilityHomes } = require("./services/capabilities.cjs");
@@ -9,7 +10,12 @@ const { inspectEngine } = require("./services/engine.cjs");
 const { collectKnownPaths, isKnownPath } = require("./services/known-paths.cjs");
 const { createManagedBot, previewBot, readManagedBots, runLarkCli } = require("./services/bot-setup.cjs");
 const { registerBotWithQr } = require("./services/feishu-registration.cjs");
-const { authorizeLarkUser } = require("./services/lark-user-auth.cjs");
+const {
+  authorizeLarkUser,
+  beginLarkUserAuthorization,
+  completeLarkUserAuthorization,
+} = require("./services/lark-user-auth.cjs");
+const { createPiSetupCoordinator } = require("./services/pi-setup-coordinator.cjs");
 const {
   inspectManagedBots,
   runPowerShell,
@@ -110,6 +116,7 @@ let desktopSettings = { launchAtLogin: false, closeToTray: true, error: "" };
 const desktopStartup = createDesktopStartup(app);
 let providerCredentialStore = null;
 let batchRestartInFlight = false;
+let piSetupCoordinator = null;
 
 async function initializeMacProviderCredentialStore() {
   if (process.platform !== "darwin") return;
@@ -202,6 +209,14 @@ function setupOptions() {
     codexHomeRoot: codexHomeRoot(),
     defaultCodexHome: path.join(app.getPath("home"), ".codex"),
     sourceCodexHome: path.join(app.getPath("home"), ".codex"),
+    piAgentHomeRoot: path.join(app.getPath("documents"), "Codex", "pi-homes"),
+    piConfigurationSpaceRoot: path.join(app.getPath("documents"), "Codex", "pi-spaces"),
+    piSkillRoots: [
+      path.join(app.getPath("home"), ".codex", "skills"),
+      path.join(app.getPath("home"), ".agents", "skills"),
+    ],
+    engineRoot: currentState?.engine?.engineRoot || "",
+    env: process.env,
     runtimeLocalAppData: runtimeLocalAppData(),
     larkCliPath: currentState?.engine?.larkCliPath || "",
     existingNames: currentState?.bridge?.instances?.map((item) => item.name) || [],
@@ -225,6 +240,7 @@ function supervisorOptions() {
     platform: process.platform,
     defaultCodexHome: path.join(app.getPath("home"), ".codex"),
     codexAvailable: Boolean(currentState?.codex?.runtimeFound),
+    environment: process.env,
     decryptSecret: (value) => {
       if (!safeStorage.isEncryptionAvailable()) throw new Error("系统安全存储暂不可用");
       return safeStorage.decryptString(value);
@@ -278,6 +294,9 @@ function workspaceFactoryOptions() {
     workspaceRoot: workspaceRoot(),
     codexHomeRoot: codexHomeRoot(),
     sourceCodexHome: path.join(app.getPath("home"), ".codex"),
+    defaultCodexHome: path.join(app.getPath("home"), ".codex"),
+    piAgentHomeRoot: path.join(app.getPath("documents"), "Codex", "pi-homes"),
+    piConfigurationSpaceRoot: path.join(app.getPath("documents"), "Codex", "pi-spaces"),
     existingNames: currentState?.bridge?.instances?.map((item) => item.name) || [],
     trustedCodexHomes: readTrustedCodexHomes(managedDataRoot()).map((item) => item.codexHome),
   };
@@ -411,6 +430,26 @@ async function initializeDesktopRuntime(initialStatePromise) {
     readUserEnvironmentVariable: providerCredentialStore?.read || readUserEnvironmentVariable,
     resolveModelCapabilities,
   });
+  const piSetupStateModule = path.join(currentState.engine.engineRoot, "src", "pi", "setup-state.mjs");
+  if (fs.existsSync(piSetupStateModule)) {
+    piSetupCoordinator = createPiSetupCoordinator({
+      dataRoot: managedDataRoot(),
+      stateModuleUrl: pathToFileURL(piSetupStateModule).href,
+      createQueue: (input) => createWorkspaceFactoryQueue(input, workspaceFactoryOptions()),
+      registrationOptions: () => setupOptions(),
+      registerBot: registerBotWithQr,
+      registerFactoryBot,
+      readManagedBots: () => inspectManagedBots(managedDataRoot(), runtimeLocalAppData()),
+      beginUserAuthorization: (name) => beginLarkUserAuthorization(name, readinessOptions()),
+      completeUserAuthorization: (name, deviceCode) => completeLarkUserAuthorization(name, deviceCode, readinessOptions()),
+      checkReadiness: async (name) => {
+        await loadState();
+        return checkBotReadiness(name, readinessOptions());
+      },
+      startBot: (name) => startManagedBot(name, supervisorOptions()),
+    });
+    piSetupCoordinator.start();
+  }
   createTray();
   await protocolProxyService.start().catch(() => {});
   updaterService = createDesktopUpdater();
@@ -444,6 +483,15 @@ function detectorScriptPath() {
   return app.isPackaged
     ? path.join(process.resourcesPath, "scripts", "detect-codex.ps1")
     : path.join(__dirname, "..", "..", "resources", "scripts", "detect-codex.ps1");
+}
+
+function readPiSetupSnapshot() {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(managedDataRoot(), "pi-setup-batch.json"), "utf8"));
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    return { status: "error", error: String(error?.message || error) };
+  }
 }
 
 async function loadState() {
@@ -490,6 +538,7 @@ async function loadState() {
       startupError,
       recovery: recoverySupervisor?.snapshot() || {},
       workspaceFactory: readWorkspaceFactoryQueue(managedDataRoot()),
+      piSetup: readPiSetupSnapshot(),
       reasoningCapabilities: reasoningRegistry(),
       protocolProxy: protocolProxyService?.snapshot() || { supported: false, status: "unavailable", providerCount: 0 },
     },
@@ -961,6 +1010,7 @@ if (!singleInstance) {
     isQuitting = true;
     if (legacyAdoptionTimer) clearInterval(legacyAdoptionTimer);
     recoverySupervisor?.stop();
+    piSetupCoordinator?.stop();
     updaterService?.stop();
     const proxyStatus = protocolProxyService?.snapshot().status;
     if (!proxyStoppedForQuit && new Set(["online", "starting"]).has(proxyStatus)) {

@@ -128,6 +128,14 @@ export function createEventDispatcher({
     removeByMessageId,
     clearForChat,
     countForChat: (chatId) => queue.countForChat(chatId),
+    workCountForChat: (chatId) => {
+      const target = String(chatId || "").trim();
+      let count = queue.countForChat(target);
+      for (const state of inFlight) {
+        if (!state.cancelled && target && chatIdOf(state.event) === target) count += 1;
+      }
+      return count;
+    },
     summary: (chatId) => queue.summary(chatId),
     get activeJobs() {
       return activeJobs;

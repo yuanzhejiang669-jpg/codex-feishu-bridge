@@ -277,3 +277,19 @@ test("lark client uploads images with stdin JSON and a cwd-relative file argumen
   assert.equal(calls[0].options.cwd, path.dirname(imagePath));
   assert.equal(calls[0].options.stdin, JSON.stringify({ image_type: "message" }));
 });
+
+test("lark client sends an uploaded image with the coordinator Bot identity", async () => {
+  const calls = [];
+  const client = createLarkClient({
+    larkCli: { command: "lark-cli", argsPrefix: ["--profile", "coordinator"] },
+    runTool: async (_tool, args) => { calls.push(args); return { code: 0, stdout: "{}", stderr: "" }; },
+    delay: async () => {},
+    splitText: (text) => [text],
+    idempotencyKey: () => "setup-image-key",
+  });
+  await client.sendImage("oc_chat", "img_qr", "pi-setup");
+  assert.deepEqual(calls[0], [
+    "im", "+messages-send", "--as", "bot", "--chat-id", "oc_chat",
+    "--image", "img_qr", "--idempotency-key", "setup-image-key",
+  ]);
+});

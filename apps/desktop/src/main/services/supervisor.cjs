@@ -124,10 +124,12 @@ function processEnvironment(options, bot = null) {
   ])];
   const environment = {
     ...process.env,
+    ...(options.environment || {}),
     LOCALAPPDATA: options.localAppData,
     USERPROFILE: profileHome,
     HOME: profileHome,
     LARK_CLI_BIN: options.larkCliPath,
+    CODEX_FEISHU_DESKTOP_DATA_ROOT: options.dataRoot,
     PATH: [...toolDirs, process.env.PATH || ""].join(path.delimiter),
   };
   if (bot?.provider?.mode === "custom") {
@@ -138,6 +140,25 @@ function processEnvironment(options, bot = null) {
     const apiKey = options.decryptSecret(encrypted);
     if (!apiKey) throw new Error("Provider API Key 解密结果为空");
     environment[bot.provider.envKey] = apiKey;
+  }
+  const engine = String(bot?.engine || "codex").trim().toLowerCase();
+  environment.CODEX_FEISHU_AGENT_ENGINE = engine;
+  if (engine === "pi") {
+    const envKey = String(bot.provider?.envKey || "").trim();
+    if (!ENV_NAME.test(envKey)) throw new Error("Pi Provider 环境变量名无效");
+    if (!environment[envKey]) throw new Error(`Pi Provider 密钥不可用：${envKey}`);
+    const skillPaths = (bot.piRuntime?.skillPaths || []).filter((item) => item && fs.existsSync(item));
+    if (!skillPaths.length) throw new Error("Pi Skills 权威源不可用");
+    Object.assign(environment, {
+      PI_CODING_AGENT_DIR: bot.agentHome,
+      CODEX_FEISHU_PI_SESSION_DIR: bot.sessionDir,
+      CODEX_FEISHU_PI_PROVIDER: bot.provider.id,
+      CODEX_FEISHU_PI_MODEL: bot.provider.model,
+      CODEX_FEISHU_PI_THINKING: String(bot.provider.reasoning || "medium"),
+      CODEX_FEISHU_PI_EXTENSIONS: bot.piRuntime.extensionPath,
+      CODEX_FEISHU_PI_SKILLS: skillPaths.join(path.delimiter),
+      CODEX_FEISHU_PI_CAPABILITIES_CONFIG: bot.piRuntime.capabilitiesPath,
+    });
   }
   if (options.codexPath) environment.CODEX_CLI_BIN = options.codexPath;
   return environment;
@@ -270,11 +291,18 @@ async function startManagedBotPosix(bot, codexHome, options) {
   fs.mkdirSync(paths.logDir, { recursive: true });
   fs.rmSync(path.join(paths.stateDir, "bridge.stop"), { force: true });
   writeJsonAtomic(path.join(paths.stateDir, "launch-config.json"), {
+    engine: bot.engine || "codex",
     instance: bot.name,
     workspace: bot.workspace,
     larkProfile: bot.profile,
     codexHome,
     desktopCodexHome: "",
+    ...(bot.engine === "pi" ? {
+      piAgentHome: bot.agentHome,
+      piSessionDir: bot.sessionDir,
+      piConfigurationSpace: bot.configurationSpace,
+      piRuntime: bot.piRuntime,
+    } : {}),
     updatedAt: new Date().toISOString(),
   });
   const stdoutFd = fs.openSync(path.join(paths.logDir, "bridge.stdout.log"), "a");
@@ -399,7 +427,9 @@ async function startManagedBot(name, options) {
   if (!fs.existsSync(options.nodePath) || !fs.existsSync(options.larkCliPath)) {
     throw new Error("客户端内置运行时不完整，请重新安装客户端");
   }
-  if (!options.codexAvailable) throw new Error("未检测到可用的 Codex 桌面运行时");
+  const engine = String(bot.engine || "codex").toLowerCase();
+  if (engine === "codex" && !options.codexAvailable) throw new Error("未检测到可用的 Codex 桌面运行时");
+  if (engine === "pi") assertPiRuntimeAvailable(bot);
   const codexHome = bot.codexHome || options.defaultCodexHome;
   if ((options.platform || process.platform) === "win32") {
     const scriptPath = path.join(options.engineRoot, "start-codex-feishu-bridge.ps1");
@@ -408,7 +438,7 @@ async function startManagedBot(name, options) {
     await runPowerShell(scriptPath, startArgs, { env: processEnvironment(options, bot), timeoutMs: 60_000 });
   } else {
     if (!fs.existsSync(options.bridgeEntry || "")) throw new Error("客户端 Bridge 入口缺失");
-    if (!options.codexPath) throw new Error("未检测到可用的 Codex 桌面运行时");
+    if (engine === "codex" && !options.codexPath) throw new Error("未检测到可用的 Codex 桌面运行时");
     await startManagedBotPosix(bot, codexHome, options);
   }
 
@@ -419,6 +449,19 @@ async function startManagedBot(name, options) {
     await new Promise((resolve) => setTimeout(resolve, 400));
   }
   throw new Error("Bridge 启动命令已返回，但 30 秒内没有检测到存活进程");
+}
+
+function assertPiRuntimeAvailable(bot) {
+  const required = [
+    [bot.agentHome, "Pi Agent Home"],
+    [bot.sessionDir, "Pi session 目录"],
+    [bot.agentHome && path.join(bot.agentHome, "models.json"), "Pi models.json"],
+    [bot.agentHome && path.join(bot.agentHome, "settings.json"), "Pi settings.json"],
+    [bot.piRuntime?.extensionPath, "Pi capability extension"],
+    [bot.piRuntime?.capabilitiesPath, "Pi capabilities.json"],
+  ];
+  const missing = required.filter(([target]) => !target || !fs.existsSync(target)).map(([, label]) => label);
+  if (missing.length) throw new Error(`Pi 运行时配置不完整：${missing.join("、")}`);
 }
 
 async function stopManagedBot(name, options) {
@@ -575,6 +618,7 @@ module.exports = {
   posixBridgeEnvironment,
   posixRuntimePaths,
   processEnvironment,
+  assertPiRuntimeAvailable,
   resolveLarkProfileHome,
   runPowerShell,
   restartOnlineManagedBots,

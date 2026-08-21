@@ -12,6 +12,11 @@
     "check": "node scripts/check-syntax.mjs && node scripts/check-control-panel-static.mjs && node scripts/check-model-reasoning-capabilities.mjs && node --test test/*.test.mjs",
     "smoke:app-server": "node scripts/smoke-app-server.mjs",
     "smoke:app-server-pool": "node scripts/smoke-app-server-pool.mjs",
+    "smoke:pi": "node scripts/smoke-pi-rpc.mjs",
+    "smoke:pi:deepseek": "node scripts/smoke-pi-deepseek-provider.mjs",
+    "smoke:pi:backup": "node scripts/smoke-pi-backup-provider.mjs",
+    "smoke:pi:capabilities": "node scripts/smoke-pi-capabilities.mjs",
+    "provision:pi:global": "node scripts/provision-pi-global-bots.mjs",
     "smoke:formulas": "node scripts/smoke-formula-renderer.mjs",
     "doctor": "powershell.exe -NoProfile -File doctor-codex-feishu-bridge.ps1",
     "doctor:json": "powershell.exe -NoProfile -File doctor-codex-feishu-bridge.ps1 -Json",
@@ -22,6 +27,7 @@
     "node": ">=20"
   },
   "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.84.2",
     "@larksuiteoapi/node-sdk": "^1.66.1",
     "katex": "^0.16.22",
     "markdown-it": "^15.0.0",
