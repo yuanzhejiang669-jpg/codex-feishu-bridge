@@ -681,6 +681,13 @@
 - 运行态 `sessions.json` 当前共 1 个 session，engine 集合仅为 `pi`，Pi session ID 为 `01a02252-f30d-7a95-aa14-0c58df37a256`，非空 `codexThreadId` 数量为 0。
 - 飞书 UI 行为仍需用户在 `Pi Global 01 Bridge` 发送 `/list`、`/context`、`/now`、`/help` 验证；`/delete` 是真实破坏性操作，不对现有 session 自动执行。
 
+### 独立分支保存
+
+- 用户明确决定 Pi 集成不合并到 `main`；当前开发与运行基线固定在 `wip/pi-agent-integration`。
+- Pi 集成提交 `fda49edaf22e74d5d20b7f8060759379be5a877b` 已推送到 `origin/wip/pi-agent-integration`，父提交为 Desktop 0.8.19 的 `99d310a535ed8c4aab9036cd060447c90faeefa9`。
+- 推送后远端核对：`origin/main` 仍为 `99d310a535ed8c4aab9036cd060447c90faeefa9`，没有合并、force push、Release 或客户端安装操作。
+- `start-mimo2codex-proxies.ps1`、`creative-preset-adapter/`、`.codex-work/` 仍是未提交的用户独立修改，未进入 Pi 提交。
+
 ## 后续执行记录模板
 
 ### YYYY-MM-DD：阶段名称
