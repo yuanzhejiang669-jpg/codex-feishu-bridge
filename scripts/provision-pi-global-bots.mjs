@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { provisionPiGlobalBots } from "../src/pi/standalone.mjs";
+import { resolvePiModelLimits, resolvePiModelThinkingMetadata } from "../src/pi/model-metadata.mjs";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const require = createRequire(import.meta.url);
@@ -12,7 +13,6 @@ const { inspectCodexHome } = require("../src/codex/model-source.cjs");
 const codexHome = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
 const userHome = path.basename(codexHome).toLowerCase() === ".codex" ? path.dirname(path.resolve(codexHome)) : os.homedir();
 const catalog = inspectCodexHome(codexHome);
-
 const providers = [
   provider("deepseek-direct", "deepseek-chat"),
   provider("backup-api", "gpt-5.6-sol"),
@@ -28,6 +28,8 @@ process.stdout.write(`${JSON.stringify({ bots: bots.map(publicBot), providerIds:
 function provider(id, model) {
   const definition = catalog.providers.find((item) => item.id === id);
   if (!definition) throw new Error(`Global Codex Provider is unavailable: ${id}`);
+  const metadata = resolvePiModelLimits(id, model);
+  const thinking = resolvePiModelThinkingMetadata(id, model) || { reasoning: false };
   return {
     id,
     name: definition.name,
@@ -35,8 +37,8 @@ function provider(id, model) {
     envKey: definition.envKey,
     wireApi: definition.wireApi,
     model,
-    reasoning: true,
-    input: ["text", "image"],
+    ...metadata,
+    ...thinking,
   };
 }
 

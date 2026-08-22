@@ -4,6 +4,8 @@ import path from "node:path";
 import { AGENT_ENGINE_PI } from "../agents/engine.mjs";
 import { normalizePiEvent } from "./events.mjs";
 
+const PI_THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+
 export class PiEngineError extends Error {
   constructor(message, { kind = "unknown", cause = null, recoverable = false } = {}) {
     super(message, cause ? { cause } : undefined);
@@ -50,6 +52,10 @@ export class PiEngineAdapter {
     turnTimeoutMs = 0,
     statsTimeoutMs = 3_000,
     sessionDir = "",
+    assertProviderAvailable = () => {},
+    listConfiguredProviders = async () => [],
+    listProviderModels = async () => [],
+    prepareModelSelection = async (provider, modelId) => ({ provider, id: modelId, name: modelId }),
   } = {}) {
     if (typeof createClient !== "function") throw new Error("PiEngineAdapter requires createClient");
     this.id = AGENT_ENGINE_PI;
@@ -63,6 +69,14 @@ export class PiEngineAdapter {
     this.turnTimeoutMs = turnTimeoutMs;
     this.statsTimeoutMs = statsTimeoutMs;
     this.sessionDir = String(sessionDir || "").trim();
+    if (typeof assertProviderAvailable !== "function") throw new Error("assertProviderAvailable must be a function");
+    if (typeof listConfiguredProviders !== "function") throw new Error("listConfiguredProviders must be a function");
+    if (typeof listProviderModels !== "function") throw new Error("listProviderModels must be a function");
+    if (typeof prepareModelSelection !== "function") throw new Error("prepareModelSelection must be a function");
+    this.assertProviderAvailable = assertProviderAvailable;
+    this.listConfiguredProviders = listConfiguredProviders;
+    this.listProviderModels = listProviderModels;
+    this.prepareModelSelection = prepareModelSelection;
     this.clients = new Map();
     this.activeRuns = new Map();
     this.sessionMutations = new Set();
@@ -172,6 +186,104 @@ export class PiEngineAdapter {
     await this.#refreshSessionStats(session, client);
     this.persistSession(session);
     return response?.data || null;
+  }
+
+  async listProviders() {
+    const providers = await this.listConfiguredProviders();
+    return Array.isArray(providers) ? providers : [];
+  }
+
+  async listModels(_session, provider) {
+    const result = await this.listProviderModels(provider);
+    const models = Array.isArray(result) ? result : result?.models;
+    return (Array.isArray(models) ? models : []).map(normalizeAvailableModel).filter(Boolean);
+  }
+
+  async setModel(session, provider, modelId) {
+    const key = sessionKey(session);
+    if (this.activeRuns.has(key) || this.sessionMutations.has(key)) {
+      throw new PiEngineError("Pi session is busy", { kind: "busy" });
+    }
+    this.sessionMutations.add(key);
+    try {
+      await this.assertProviderAvailable(provider);
+      const prepared = normalizeAvailableModel(await this.prepareModelSelection(provider, modelId));
+      if (!prepared || prepared.provider !== provider || prepared.id !== modelId) {
+        throw new PiEngineError(`Pi model preparation failed: ${provider}/${modelId}`, { kind: "input" });
+      }
+      await this.#discardClient(key, "model-registry-reload");
+      const client = await this.#clientFor(session);
+      const available = await client.request({ type: "get_available_models" });
+      const models = Array.isArray(available?.data?.models) ? available.data.models : [];
+      const selected = models.find((model) => model?.provider === provider && model?.id === modelId);
+      if (!selected) throw new PiEngineError(`Pi model is unavailable: ${provider}/${modelId}`, { kind: "input" });
+      await client.request({ type: "set_model", provider, modelId });
+      const current = await client.request({ type: "get_state" });
+      if (current?.data?.model?.provider !== provider || current?.data?.model?.id !== modelId) {
+        throw new PiEngineError(`Pi model switch was not applied: ${provider}/${modelId}`, { kind: "session" });
+      }
+      session.piContextPeakUsage = null;
+      this.#applySessionState(session, current?.data);
+      await this.#refreshSessionStats(session, client);
+      return { ...normalizeAvailableModel(selected), metadataSource: prepared.metadataSource || "runtime" };
+    } catch (error) {
+      if (["process_exit", "session"].includes(classifyPiFailure(error).kind)) {
+        await this.#discardClient(key, "model-switch-failed");
+      }
+      throw classifyPiFailure(error);
+    } finally {
+      this.sessionMutations.delete(key);
+    }
+  }
+
+  async getThinkingState(session) {
+    const client = await this.#clientFor(session);
+    const [available, current] = await Promise.all([
+      client.request({ type: "get_available_thinking_levels" }),
+      client.request({ type: "get_state" }),
+    ]);
+    this.#applySessionState(session, current?.data);
+    const levels = normalizeThinkingLevels(available?.data?.levels);
+    const effective = normalizeThinkingLevel(current?.data?.thinkingLevel) || "off";
+    return { levels: levels.length ? levels : ["off"], effective };
+  }
+
+  async setThinkingLevel(session, requestedLevel) {
+    const requested = normalizeThinkingLevel(requestedLevel);
+    if (!requested) {
+      throw new PiEngineError(`Pi thinking level is invalid: ${requestedLevel}`, { kind: "input" });
+    }
+    const key = sessionKey(session);
+    if (this.activeRuns.has(key) || this.sessionMutations.has(key)) {
+      throw new PiEngineError("Pi session is busy", { kind: "busy" });
+    }
+    this.sessionMutations.add(key);
+    try {
+      const client = await this.#clientFor(session);
+      const available = await client.request({ type: "get_available_thinking_levels" });
+      const levels = normalizeThinkingLevels(available?.data?.levels);
+      if (!levels.includes(requested)) {
+        throw new PiEngineError(
+          `Pi thinking level ${requested} is unavailable; supported: ${(levels.length ? levels : ["off"]).join(", ")}`,
+          { kind: "input" },
+        );
+      }
+      await client.request({ type: "set_thinking_level", level: requested });
+      const current = await client.request({ type: "get_state" });
+      this.#applySessionState(session, current?.data);
+      const effective = normalizeThinkingLevel(current?.data?.thinkingLevel) || "off";
+      if (effective !== requested) {
+        throw new PiEngineError(
+          `Pi thinking switch was not applied: requested ${requested}, effective ${effective}`,
+          { kind: "session" },
+        );
+      }
+      return { requested, effective, levels: levels.length ? levels : ["off"] };
+    } catch (error) {
+      throw classifyPiFailure(error);
+    } finally {
+      this.sessionMutations.delete(key);
+    }
   }
 
   async resetSession(session) {
@@ -300,6 +412,9 @@ export class PiEngineAdapter {
     if (!state?.sessionId) throw new PiEngineError("Pi RPC state has no sessionId", { kind: "session" });
     session.piSessionId = String(state.sessionId);
     session.piSessionFile = String(state.sessionFile || session.piSessionFile || "");
+    if (state.model?.provider) session.piProvider = String(state.model.provider);
+    if (state.model?.id) session.piModel = String(state.model.id);
+    if (state.thinkingLevel) session.piThinking = String(state.thinkingLevel);
     session.piUsage = state.usage || session.piUsage || null;
     session.updatedAt = Date.now();
     this.persistSession(session);
@@ -356,6 +471,43 @@ export class PiEngineAdapter {
     this.log("WARN", "discarding Pi RPC client", { sessionId: key, reason });
     await client?.stop?.().catch(() => {});
   }
+}
+
+function normalizeAvailableModel(model) {
+  const provider = String(model?.provider || "").trim();
+  const id = String(model?.id || "").trim();
+  if (!provider || !id) return null;
+  return {
+    provider,
+    id,
+    name: String(model?.name || id),
+    reasoning: model?.reasoning === true,
+    thinkingLevels: normalizeThinkingLevels(model?.thinkingLevels),
+    input: Array.isArray(model?.input) ? model.input.map(String) : [],
+    contextWindow: Number(model?.contextWindow) || null,
+    maxTokens: Number(model?.maxTokens) || null,
+    ownedBy: String(model?.ownedBy || model?.owned_by || ""),
+    registered: model?.registered === true,
+    metadataSource: String(model?.metadataSource || "runtime"),
+  };
+}
+
+function normalizeThinkingLevel(value) {
+  const level = String(value || "").trim().toLowerCase();
+  return PI_THINKING_LEVELS.has(level) ? level : "";
+}
+
+function normalizeThinkingLevels(levels) {
+  if (!Array.isArray(levels)) return [];
+  const seen = new Set();
+  const normalized = [];
+  for (const value of levels) {
+    const level = normalizeThinkingLevel(value);
+    if (!level || seen.has(level)) continue;
+    seen.add(level);
+    normalized.push(level);
+  }
+  return normalized;
 }
 
 function sessionKey(session) {

@@ -719,7 +719,7 @@ test("Pi status avoids Codex runtime fields and reports the Pi adapter configura
   );
   assert.match(statusSource, /currentSession\.engine === "pi"[\s\S]*piStatusMarkdown/);
   assert.match(statusSource, /agentEngineRegistry\.get\("pi"\)\.status\(session\)/);
-  assert.match(statusSource, /Pi Agent Home[\s\S]*CONFIG\.piProvider[\s\S]*CONFIG\.piModel/);
+  assert.match(statusSource, /Pi Agent Home[\s\S]*piSessionSelection\(session\)\.provider[\s\S]*piSessionSelection\(session\)\.model/);
   const piStatusSource = statusSource.slice(statusSource.indexOf("async function piStatusMarkdown"));
   assert.doesNotMatch(piStatusSource, /readCodexRuntimeVersionStatus|syncChatSessionsWithCodex|Codex Home|Codex CLI/);
 });
@@ -733,6 +733,9 @@ test("common engine completion finalizes cards and uses the session engine label
   assert.match(titleSource, /agentEngineLabel\(state\.session\?\.engine\)/);
   assert.match(titleSource, /`\$\{label\} 已完成`/);
   assert.doesNotMatch(titleSource.slice(titleSource.indexOf("const label")), /Codex 正在回复|Codex 已完成/);
+  const answerSource = bridgeSource.slice(bridgeSource.indexOf("function formatAnswer("), bridgeSource.indexOf("function formatDuration("));
+  assert.match(answerSource, /agentEngineLabel\(session\?\.engine\)/);
+  assert.match(answerSource, /piSessionSelection\(session\)[\s\S]*thinking \$\{piSelection\.thinking\}/);
 });
 
 test("Pi completion cards use Pi context and compaction metadata", () => {
@@ -745,6 +748,12 @@ test("Pi completion cards use Pi context and compaction metadata", () => {
   assert.match(metaSource, /session\.piContextUsage/);
   assert.match(metaSource, /session\.piContextPeakUsage/);
   assert.match(metaSource, /session\.piCompactedAt/);
+  const cardSource = bridgeSource.slice(
+    bridgeSource.indexOf("function renderRunCard("),
+    bridgeSource.indexOf("function renderContextUsage("),
+  );
+  assert.match(cardSource, /piRunIdentity\(state\.session\)/);
+  assert.match(cardSource, /selection\.provider[\s\S]*selection\.model[\s\S]*selection\.thinking/);
 });
 
 test("Pi session commands never scan or mutate Codex thread inventory", () => {
@@ -771,15 +780,13 @@ test("Pi session commands never scan or mutate Codex thread inventory", () => {
   assert.match(deleteSource, /CONFIG\.agentEngine === "pi"[\s\S]*handlePiDeleteCommand/);
 });
 
-test("Pi rejects Codex-private commands before their Codex handlers run", () => {
+test("Pi model commands use Pi RPC handlers while remaining Codex-private commands stay isolated", () => {
   const bridgeSource = fs.readFileSync(new URL("../codex-feishu-bridge.mjs", import.meta.url), "utf8");
   const commandStart = bridgeSource.indexOf("async function handleCommand(");
   const commandEnd = bridgeSource.indexOf("async function handlePiPrivateCommand(", commandStart);
   const commandSource = bridgeSource.slice(commandStart, commandEnd);
   for (const [command, handler] of [
     ["/goal", "handleGoalCommand"],
-    ["/provider", "handleProviderCommand"],
-    ["/model", "handleModelCommand"],
     ["/fast", "handleFastCommand"],
   ]) {
     const offset = commandSource.indexOf(`case "${command}"`);
@@ -788,6 +795,23 @@ test("Pi rejects Codex-private commands before their Codex handlers run", () => 
     assert.match(block, /handlePiPrivateCommand/);
     assert.ok(block.indexOf("handlePiPrivateCommand") < block.indexOf(handler));
   }
+  for (const [command, piHandler, codexHandler] of [
+    ["/provider", "handlePiProviderCommand", "handleProviderCommand"],
+    ["/model", "handlePiModelCommand", "handleModelCommand"],
+  ]) {
+    const offset = commandSource.indexOf(`case "${command}"`);
+    const nextCase = commandSource.indexOf("case \"/", offset + 8);
+    const block = commandSource.slice(offset, nextCase >= 0 ? nextCase : commandSource.length);
+    assert.match(block, new RegExp(piHandler));
+    assert.ok(block.indexOf(piHandler) < block.indexOf(codexHandler));
+  }
+  assert.match(bridgeSource, /async function handlePiProviderCommand[\s\S]*adapter\.listProviders\(\)[\s\S]*adapter\.listModels\(session, targetProvider\)[\s\S]*switchPiSessionModel/);
+  assert.match(bridgeSource, /async function handlePiModelCommand[\s\S]*adapter\.getThinkingState\(session\)[\s\S]*adapter\.setThinkingLevel\(session, requested\)[\s\S]*adapter\.listModels\(session, targetProvider\)[\s\S]*switchPiSessionModel/);
+  assert.match(bridgeSource, /async function switchPiSessionModel[\s\S]*assertPiSessionMutationIdle\(chatId, "切换模型"\)[\s\S]*adapter\.setModel/);
+  assert.match(bridgeSource, /function assertPiSessionMutationIdle[\s\S]*sessionMutationWorkForChat\(chatId\)/);
+  assert.match(bridgeSource, /listProviderModels: \(provider\) => listPiProviderModels/);
+  assert.match(bridgeSource, /prepareModelSelection: \(provider, modelId\) => registerPiProviderModel/);
+  assert.match(bridgeSource, /function startPiRpcClient[\s\S]*piSessionSelection\(session\)[\s\S]*provider: selection\.provider[\s\S]*model: selection\.model/);
 });
 
 test("Pi reset and delete reject queued messages and persist unlinking before deleting JSONL", () => {

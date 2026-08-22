@@ -316,6 +316,7 @@ function resolvePiProvider(raw, options) {
 
 async function preparePiRuntime(bot, options) {
   const configModule = await import(pathToFileURL(path.join(options.engineRoot, "src", "pi", "config.mjs")).href);
+  const metadataModule = await import(pathToFileURL(path.join(options.engineRoot, "src", "pi", "model-metadata.mjs")).href);
   const capabilitiesModule = await import(pathToFileURL(path.join(options.engineRoot, "src", "pi", "capabilities", "config.mjs")).href);
   fs.mkdirSync(bot.sessionDir, { recursive: true });
   fs.mkdirSync(bot.configurationSpace.home, { recursive: true });
@@ -332,7 +333,7 @@ async function preparePiRuntime(bot, options) {
       wireApi: bot.provider.wireApi,
       model: bot.provider.model,
       reasoning: true,
-      input: ["text", "image"],
+      ...metadataModule.resolvePiModelLimits(bot.provider.id, bot.provider.model),
     },
   });
   const capabilitiesPath = path.join(bot.configurationSpace.home, "capabilities.json");

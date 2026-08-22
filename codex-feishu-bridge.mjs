@@ -78,8 +78,14 @@ import {
   renderRunActivityMarkdown,
 } from "./src/runtime/run-activity.mjs";
 import { createSeenEventsStore } from "./src/runtime/seen-events.mjs";
-import { buildPiRpcArguments } from "./src/pi/config.mjs";
+import { assertPiProviderCredentialAvailable, buildPiRpcArguments } from "./src/pi/config.mjs";
 import { PiEngineAdapter } from "./src/pi/engine-adapter.mjs";
+import { reconcilePiSessionModelLimits, resolvePiModelLimits } from "./src/pi/model-metadata.mjs";
+import {
+  listConfiguredPiProviders,
+  listPiProviderModels,
+  registerPiProviderModel,
+} from "./src/pi/provider-models.mjs";
 import { PiRpcClient } from "./src/pi/rpc-client.mjs";
 import {
   activePiSetupBot,
@@ -539,6 +545,28 @@ const {
   saveSessions,
   sessions,
 } = sessionStore;
+if (CONFIG.agentEngine === "pi") {
+  let changed = false;
+  for (const chat of Object.values(sessions.chats || {})) {
+    if (!Array.isArray(chat?.sessions)) continue;
+    for (const session of chat.sessions) {
+      const selection = piSessionSelection(session);
+      let limits;
+      try {
+        limits = resolvePiModelLimits(selection.provider, selection.model);
+      } catch (error) {
+        log("WARN", "Pi context snapshot calibration skipped for unknown model", {
+          provider: selection.provider,
+          model: selection.model,
+          error: String(error?.message || error),
+        });
+        continue;
+      }
+      if (reconcilePiSessionModelLimits(session, limits)) changed = true;
+    }
+  }
+  if (changed) saveSessions();
+}
 seenEvents.cleanupOldEventLocks();
 const stats = {
   startedAt: Date.now(),
@@ -610,6 +638,7 @@ const codexEngineAdapter = new CodexEngineAdapter({
   }),
   dispose: (reason) => appServerPool.closeAll(reason),
 });
+const piModelsPath = path.join(CONFIG.piAgentHome || CONFIG.stateDir, "models.json");
 const piEngineAdapter = new PiEngineAdapter({
   createClient: (session) => startPiRpcClient(session),
   sessionDir: CONFIG.piSessionDir,
@@ -619,6 +648,17 @@ const piEngineAdapter = new PiEngineAdapter({
   log,
   readyTimeoutMs: 60_000,
   turnTimeoutMs: CONFIG.codexTimeoutMs,
+  assertProviderAvailable: (provider) => assertPiProviderCredentialAvailable({
+    modelsPath: piModelsPath,
+    provider,
+  }),
+  listConfiguredProviders: () => listConfiguredPiProviders({ modelsPath: piModelsPath }),
+  listProviderModels: (provider) => listPiProviderModels({ modelsPath: piModelsPath, provider }),
+  prepareModelSelection: (provider, modelId) => registerPiProviderModel({
+    modelsPath: piModelsPath,
+    provider,
+    modelId,
+  }),
 });
 const agentEngineRegistry = createAgentEngineRegistry([codexEngineAdapter, piEngineAdapter]);
 shutdownCallbacks.add(() => {
@@ -747,6 +787,9 @@ function normalizeSessionData(session) {
     updatedAt: Number(session?.updatedAt) || Number(session?.createdAt) || now,
     messages: Array.isArray(session?.messages) ? session.messages : [],
     ...identity,
+    piProvider: engine === "pi" ? cleanOverride(session?.piProvider) || CONFIG.piProvider : "",
+    piModel: engine === "pi" ? cleanOverride(session?.piModel) || CONFIG.piModel : "",
+    piThinking: engine === "pi" ? cleanOverride(session?.piThinking) || CONFIG.piThinking : "",
     piUsage: engine === "pi" ? normalizePiSessionUsage(session?.piUsage) : null,
     piContextUsage: engine === "pi" ? normalizeContextUsage(session?.piContextUsage) : null,
     piContextPeakUsage: engine === "pi" ? normalizeContextUsage(session?.piContextPeakUsage) : null,
@@ -1928,6 +1971,9 @@ function createSessionData(title) {
     codexThreadId: "",
     piSessionId: "",
     piSessionFile: "",
+    piProvider: CONFIG.agentEngine === "pi" ? CONFIG.piProvider : "",
+    piModel: CONFIG.agentEngine === "pi" ? CONFIG.piModel : "",
+    piThinking: CONFIG.agentEngine === "pi" ? CONFIG.piThinking : "",
     piUsage: null,
     piContextUsage: null,
     piContextPeakUsage: null,
@@ -2579,7 +2625,8 @@ function renderRunCard(state) {
   }
 
   if (state.terminal === "running") {
-    elements.push(noteMd(renderFooterText(state.footer, elapsed)));
+    const identity = piRunIdentity(state.session);
+    elements.push(noteMd([renderFooterText(state.footer, elapsed), identity].filter(Boolean).join(" · ")));
   } else if (state.terminal === "interrupted") {
     elements.push(noteMd(`已停止 · ${elapsed}`));
   } else if (state.terminal === "error") {
@@ -3319,12 +3366,20 @@ function renderFooterText(footer, elapsed) {
 
 function renderDoneMeta(state) {
   const parts = [];
+  const identity = piRunIdentity(state.session);
+  if (identity) parts.push(identity);
   const context = renderContextUsage(state.meta.contextUsage, "当前窗口");
   if (context) parts.push(context);
   const peak = renderContextUsage(state.meta.contextPeakUsage, "曾达");
   if (peak && isContextUsageHigher(state.meta.contextPeakUsage, state.meta.contextUsage)) parts.push(peak);
   parts.push(state.meta.compactedAt ? `上次压缩 ${formatTime(state.meta.compactedAt)}` : "未压缩");
   return parts.length ? parts.join(" · ") : "已完成";
+}
+
+function piRunIdentity(session) {
+  if (session?.engine !== "pi") return "";
+  const selection = piSessionSelection(session);
+  return `${selection.provider}/${selection.model} · thinking ${selection.thinking}`;
 }
 
 function renderContextUsage(usage, label = "context") {
@@ -5183,11 +5238,12 @@ function startPiRpcClient(session) {
   if (!CONFIG.piSessionDir) throw new Error("CODEX_FEISHU_PI_SESSION_DIR is required for a Pi Bot");
   if (!CONFIG.piModel) throw new Error("CODEX_FEISHU_PI_MODEL is required for a Pi Bot");
   const entryPath = path.join(ROOT, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js");
+  const selection = piSessionSelection(session);
   const args = buildPiRpcArguments({
     entryPath,
-    provider: CONFIG.piProvider,
-    model: CONFIG.piModel,
-    thinking: CONFIG.piThinking,
+    provider: selection.provider,
+    model: selection.model,
+    thinking: selection.thinking,
     sessionDir: CONFIG.piSessionDir,
     sessionFile: session?.piSessionFile || "",
     extensionPaths: CONFIG.piExtensions,
@@ -7218,14 +7274,20 @@ async function handleCommand(event, command) {
       await handleGoalCommand(chatId, command.rest, messageId);
       return;
     case "/provider":
-      if (await handlePiPrivateCommand(chatId, "/provider", messageId)) return;
+      if (getSession(chatId).engine === "pi") {
+        await handlePiProviderCommand(chatId, command.rest, messageId);
+        return;
+      }
       await handleProviderCommand(chatId, command.rest, messageId);
       return;
     case "/pi":
       await handlePiSetupCommand(chatId, command.rest, messageId);
       return;
     case "/model":
-      if (await handlePiPrivateCommand(chatId, "/model", messageId)) return;
+      if (getSession(chatId).engine === "pi") {
+        await handlePiModelCommand(chatId, command.rest, messageId);
+        return;
+      }
       await handleModelCommand(chatId, command.rest, messageId);
       return;
     case "/fast":
@@ -7293,8 +7355,6 @@ async function handlePiPrivateCommand(chatId, command, messageId) {
   if (session.engine !== "pi") return false;
   const descriptions = {
     "/goal": "Pi 没有 Codex 原生 Goal API。请直接发送任务，运行中可用 `/steer` 补充。",
-    "/provider": `当前 Pi Provider 固定为 \`${CONFIG.piProvider}\`，Bot 运行期间不通过 Codex provider 配置切换。`,
-    "/model": `当前 Pi 模型固定为 \`${CONFIG.piProvider}/${CONFIG.piModel}\`，thinking 为 \`${CONFIG.piThinking}\`。`,
     "/fast": "Fast 是 Codex 私有速度档，Pi 没有对应能力。",
   };
   await sendMarkdown(
@@ -7304,6 +7364,221 @@ async function handlePiPrivateCommand(chatId, command, messageId) {
     messageId,
   );
   return true;
+}
+
+function piSessionSelection(session) {
+  return {
+    provider: cleanOverride(session?.piProvider) || CONFIG.piProvider,
+    model: cleanOverride(session?.piModel) || CONFIG.piModel,
+    thinking: cleanOverride(session?.piThinking) || CONFIG.piThinking,
+  };
+}
+
+async function handlePiProviderCommand(chatId, rest, messageId) {
+  const session = getSession(chatId);
+  const args = commandArgs(rest);
+  const action = String(args[0] || "").trim();
+  try {
+    if (!action || ["status", "view"].includes(action.toLowerCase())) {
+      await sendMarkdown(chatId, piModelStatusMarkdown(session), "pi-provider-status", messageId);
+      return;
+    }
+    const adapter = agentEngineRegistry.get("pi");
+    const providers = await adapter.listProviders();
+    if (["list", "ls"].includes(action.toLowerCase())) {
+      await sendMarkdown(chatId, piProviderListMarkdown(session, providers), "pi-provider-list", messageId);
+      return;
+    }
+    const targetProvider = ["default", "reset"].includes(action.toLowerCase()) ? CONFIG.piProvider : action;
+    const target = providers.find((provider) => provider.id === targetProvider);
+    if (!target) throw new Error(`Pi Provider 未配置：${targetProvider}`);
+    const models = await adapter.listModels(session, targetProvider);
+    let selected = models.find((model) => model.id === piSessionSelection(session).model);
+    selected ||= models.find((model) => model.id === target.defaultModel);
+    selected ||= models[0];
+    if (!selected) throw new Error(`Pi Provider ${targetProvider} 的实时 /models 没有可用模型`);
+    await switchPiSessionModel(chatId, session, selected, adapter);
+    const thinking = await adapter.getThinkingState(session);
+    await sendMarkdown(chatId, piModelStatusMarkdown(session, `已切换 Pi Provider：\`${selected.provider}\``, thinking), "pi-provider-set", messageId);
+  } catch (error) {
+    await sendMarkdown(chatId, runtimeCommandErrorMarkdown("Pi provider 操作失败", error), "pi-provider-error", messageId);
+  }
+}
+
+async function handlePiModelCommand(chatId, rest, messageId) {
+  const session = getSession(chatId);
+  const args = commandArgs(rest);
+  const action = String(args[0] || "").trim();
+  try {
+    const adapter = agentEngineRegistry.get("pi");
+    if (!action || ["status", "view"].includes(action.toLowerCase())) {
+      const thinking = await adapter.getThinkingState(session);
+      await sendMarkdown(chatId, piModelStatusMarkdown(session, "Pi 模型设置", thinking), "pi-model-status", messageId);
+      return;
+    }
+    if (["effort", "thinking"].includes(action.toLowerCase())) {
+      const rawRequested = cleanOverride(args[1]);
+      const requested = ["default", "reset"].includes(rawRequested.toLowerCase()) ? CONFIG.piThinking : rawRequested;
+      if (!requested) {
+        const thinking = await adapter.getThinkingState(session);
+        await sendMarkdown(chatId, piThinkingListMarkdown(session, thinking), "pi-thinking-list", messageId);
+        return;
+      }
+      assertPiSessionMutationIdle(chatId, "切换思考强度");
+      const thinking = await adapter.setThinkingLevel(session, requested);
+      await sendMarkdown(chatId, piModelStatusMarkdown(session, "已切换 Pi 思考强度", thinking, requested), "pi-thinking-set", messageId);
+      return;
+    }
+    if (["list", "ls", "capability", "capabilities"].includes(action.toLowerCase())) {
+      const targetProvider = cleanOverride(args[1]) || piSessionSelection(session).provider;
+      const providers = await adapter.listProviders();
+      if (!providers.some((provider) => provider.id === targetProvider)) {
+        throw new Error(`Pi Provider 未配置：${targetProvider}`);
+      }
+      const models = await adapter.listModels(session, targetProvider);
+      await sendMarkdown(chatId, piModelListMarkdown(session, targetProvider, models), "pi-model-list", messageId);
+      return;
+    }
+    const restoreDefaults = ["default", "reset"].includes(action.toLowerCase());
+    const target = restoreDefaults
+      ? `${CONFIG.piProvider}/${CONFIG.piModel}`
+      : action;
+    const separator = target.indexOf("/");
+    let targetProvider;
+    let targetModel;
+    if (separator > 0) {
+      targetProvider = target.slice(0, separator);
+      targetModel = target.slice(separator + 1);
+    } else {
+      targetProvider = piSessionSelection(session).provider;
+      targetModel = target;
+    }
+    const providers = await adapter.listProviders();
+    if (!providers.some((provider) => provider.id === targetProvider)) throw new Error(`Pi Provider 未配置：${targetProvider}`);
+    const models = await adapter.listModels(session, targetProvider);
+    const selected = models.find((model) => model.id === targetModel);
+    if (!selected) throw new Error(`模型 ${targetModel} 不在 Provider ${targetProvider} 当前实时 /models 列表中`);
+    await switchPiSessionModel(chatId, session, selected, adapter);
+    const requestedThinking = cleanOverride(args[1]) || (restoreDefaults ? CONFIG.piThinking : "");
+    let thinking = await adapter.getThinkingState(session);
+    let thinkingWarning = "";
+    if (requestedThinking) {
+      if (thinking.levels.includes(requestedThinking.toLowerCase())) {
+        thinking = await adapter.setThinkingLevel(session, requestedThinking);
+      } else {
+        thinkingWarning = `请求的思考强度 \`${requestedThinking}\` 不受当前模型支持，实际保持 \`${thinking.effective}\`。`;
+      }
+    }
+    await sendMarkdown(
+      chatId,
+      piModelStatusMarkdown(session, `已切换 Pi 模型：\`${selected.provider}/${selected.id}\``, thinking, requestedThinking, thinkingWarning),
+      "pi-model-set",
+      messageId,
+    );
+  } catch (error) {
+    await sendMarkdown(chatId, runtimeCommandErrorMarkdown("Pi model 操作失败", error), "pi-model-error", messageId);
+  }
+}
+
+async function switchPiSessionModel(chatId, session, model, adapter) {
+  assertPiSessionMutationIdle(chatId, "切换模型");
+  await adapter.setModel(session, model.provider, model.id);
+  session.piProvider = model.provider;
+  session.piModel = model.id;
+  session.updatedAt = Date.now();
+  saveSessions();
+}
+
+function assertPiSessionMutationIdle(chatId, action) {
+  const pending = sessionMutationWorkForChat(chatId);
+  if (pending > 0) throw new Error(`当前聊天还有 ${pending} 条正在处理或等待的消息；请等待完成，或先发送 /stop queue，再${action}。`);
+}
+
+function piModelStatusMarkdown(session, title = "Pi 模型设置", thinkingState = null, requestedThinking = "", warning = "") {
+  const selection = piSessionSelection(session);
+  const effectiveThinking = cleanOverride(thinkingState?.effective) || selection.thinking;
+  const supportedThinking = Array.isArray(thinkingState?.levels) && thinkingState.levels.length
+    ? thinkingState.levels.map((level) => `\`${level}\``).join("、")
+    : "未实时查询";
+  return [
+    `**${title}**`,
+    "",
+    `当前会话：\`${session.title || "未命名会话"}\` (${session.id})`,
+    `Provider：\`${selection.provider}\``,
+    `模型：\`${selection.model}\``,
+    requestedThinking ? `请求思考强度：\`${requestedThinking}\`` : "",
+    `实际思考强度：\`${effectiveThinking}\``,
+    `支持档位：${supportedThinking}`,
+    warning,
+    "",
+    "查看 Provider：`/provider list`；切换：`/provider <providerId>`",
+    "查看当前 Provider 实时模型：`/model list`；查看指定 Provider：`/model list <providerId>`",
+    "切换模型：`/model <模型ID> [思考强度]` 或 `/model <provider>/<模型ID> [思考强度]`",
+    "查看/切换思考强度：`/model effort`、`/model effort <档位>`",
+    "恢复 Bot 默认值：`/model default`",
+  ].join("\n");
+}
+
+function piThinkingListMarkdown(session, thinking) {
+  const selection = piSessionSelection(session);
+  const lines = [
+    "**Pi 思考强度**",
+    "",
+    `当前模型：\`${selection.provider}/${selection.model}\``,
+  ];
+  for (const level of thinking.levels) {
+    lines.push(`- \`${level}\`${level === thinking.effective ? " ← 当前" : ""}`);
+  }
+  lines.push("", "切换：`/model effort <档位>`", "也可一步切换：`/model <模型ID> <档位>`");
+  return lines.join("\n");
+}
+
+function piProviderListMarkdown(session, providers) {
+  const selection = piSessionSelection(session);
+  const lines = ["**Pi Provider 列表**", ""];
+  for (const provider of providers) {
+    const marker = provider.id === selection.provider ? " ← 当前" : "";
+    const defaultModel = provider.defaultModel ? `；默认模型 \`${provider.defaultModel}\`` : "";
+    lines.push(`- \`${provider.id}\`${marker}：${provider.name}${defaultModel}`);
+  }
+  lines.push("", "切换 Provider：`/provider <providerId>`");
+  return lines.join("\n");
+}
+
+function piModelListMarkdown(session, provider, models) {
+  const selection = piSessionSelection(session);
+  const lines = [
+    `**Pi 实时模型列表 · ${provider}**`,
+    "",
+    "来源：当前 Provider `/models`",
+    ...(provider === selection.provider ? [`当前实际思考强度：\`${selection.thinking}\``] : []),
+    "",
+  ];
+  for (const model of models.slice(0, 50)) {
+    const marker = provider === selection.provider && model.id === selection.model ? " ← 当前" : "";
+    const capabilities = model.metadataSource === "configured"
+      ? `配置能力 ${model.input.length ? model.input.join("+") : "text"}`
+      : "能力元数据待确认";
+    const window = model.metadataSource === "configured" && model.contextWindow
+      ? `；配置窗口 ${formatNumber(model.contextWindow)}`
+      : "";
+    const thinking = Array.isArray(model.thinkingLevels) && model.thinkingLevels.length
+      ? `；思考档位 ${model.thinkingLevels.map((level) => `\`${level}\``).join("/")}`
+      : "";
+    lines.push(`- \`${model.id}\`${marker}：${escapePiInlineMarkdown(model.name)}；${capabilities}${window}${thinking}`);
+  }
+  if (models.length > 50) lines.push(`- 还有 ${models.length - 50} 个模型未显示`);
+  lines.push(
+    "",
+    `切换当前 Provider 模型：\`/model <模型ID> [思考强度]\``,
+    "跨 Provider 切换：`/model <provider>/<模型ID> [思考强度]`",
+    "查看当前模型支持档位：`/model effort`",
+  );
+  return lines.join("\n");
+}
+
+function escapePiInlineMarkdown(value) {
+  return String(value || "").replace(/([\\`*_[\]{}()#+.!|>~-])/g, "\\$1");
 }
 
 async function handleSwitchCommand(chatId, target, messageId) {
@@ -9378,7 +9653,7 @@ async function piStatusMarkdown(chatId, session) {
     `工作区：\`${CONFIG.workspace}\``,
     `Pi Agent Home：\`${CONFIG.piAgentHome}\``,
     `Pi session 目录：\`${CONFIG.piSessionDir}\``,
-    `Provider：\`${CONFIG.piProvider}\` · model：\`${CONFIG.piModel}\` · thinking：\`${CONFIG.piThinking}\``,
+    `Provider：\`${piSessionSelection(session).provider}\` · model：\`${piSessionSelection(session).model}\` · thinking：\`${piSessionSelection(session).thinking}\``,
     `Extensions：${CONFIG.piExtensions.length} · Skills 根：${CONFIG.piSkills.length} · Capabilities：${CONFIG.piCapabilitiesConfig ? "已配置" : "未配置"}`,
   ].join("\n");
 }
@@ -9521,7 +9796,7 @@ async function nowMarkdown(chatId) {
       `上下文：${renderContextUsage(session.piContextUsage, "当前窗口") || "暂无统计"}`,
       `累计 usage：${piUsageSummary(session.piUsage)}`,
       `队列：${queueSummary(chatId)}`,
-      `Provider：\`${CONFIG.piProvider}\` · model：\`${CONFIG.piModel}\` · thinking：\`${CONFIG.piThinking}\``,
+      `Provider：\`${piSessionSelection(session).provider}\` · model：\`${piSessionSelection(session).model}\` · thinking：\`${piSessionSelection(session).thinking}\``,
       `Skills 根：${CONFIG.piSkills.length} · Extensions：${CONFIG.piExtensions.length}`,
     ].join("\n");
   }
@@ -9648,18 +9923,19 @@ function piSessionsMarkdown(chatId) {
 
 function formatAnswer(result, session) {
   const settings = effectiveSessionSettings(session);
+  const piSelection = session?.engine === "pi" ? piSessionSelection(session) : null;
   const meta = [
     formatDuration(result.durationMs),
     result.tokens ? `${result.tokens} tokens` : "",
     result.mode ? `mode ${result.mode}` : "",
     result.threadId ? `thread ${result.threadId}` : "",
-    settings.model || codexModelLabel,
-    settings.provider ? `provider ${settings.provider}` : "",
-    settings.serviceTier ? `speed ${displayServiceTier(settings.serviceTier)}` : "",
+    piSelection ? `${piSelection.provider}/${piSelection.model}` : settings.model || codexModelLabel,
+    piSelection ? `thinking ${piSelection.thinking}` : settings.provider ? `provider ${settings.provider}` : "",
+    !piSelection && settings.serviceTier ? `speed ${displayServiceTier(settings.serviceTier)}` : "",
     `会话 ${session.id}`,
   ].filter(Boolean).join(" · ");
   return [
-    "**Codex 已完成**",
+    `**${agentEngineLabel(session?.engine)} 已完成**`,
     "",
     result.text,
     "",

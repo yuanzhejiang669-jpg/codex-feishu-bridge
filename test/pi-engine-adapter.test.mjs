@@ -22,8 +22,10 @@ class FakePiClient extends EventEmitter {
     this.closed = false;
     this.autoSettle = autoSettle;
     this.statsError = statsError;
+    this.thinkingLevel = "medium";
+    this.thinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
   }
-  async start() { return this; }
+  async start() { this.closed = false; return this; }
   async waitUntilReady() { return this; }
   onEvent(listener) { this.on("event", listener); return () => this.off("event", listener); }
   waitForEvent(predicate) {
@@ -40,7 +42,26 @@ class FakePiClient extends EventEmitter {
     this.commands.push(command);
     this.requestTimeouts.push({ type: command.type, timeoutMs });
     if (command.type === "get_state") {
-      return { data: { sessionId: this.sessionId, sessionFile: this.sessionFile, isStreaming: false } };
+      return { data: {
+        sessionId: this.sessionId,
+        sessionFile: this.sessionFile,
+        isStreaming: false,
+        model: this.model || { provider: "deepseek-direct", id: "deepseek-chat" },
+        thinkingLevel: this.thinkingLevel,
+      } };
+    }
+    if (command.type === "get_available_models") return { data: { models: [
+      { provider: "deepseek-direct", id: "deepseek-chat", name: "DeepSeek", input: ["text"], contextWindow: 128000, maxTokens: 8192 },
+      { provider: "backup-api", id: "gpt-5.6-sol", name: "Backup", reasoning: true, input: ["text", "image"], contextWindow: 258400, maxTokens: 32000 },
+    ] } };
+    if (command.type === "set_model") {
+      this.model = { provider: command.provider, id: command.modelId };
+      return { data: this.model };
+    }
+    if (command.type === "get_available_thinking_levels") return { data: { levels: this.thinkingLevels } };
+    if (command.type === "set_thinking_level") {
+      this.thinkingLevel = command.level;
+      return { success: true };
     }
     if (command.type === "get_session_stats") {
       if (this.statsError) throw this.statsError;
@@ -132,6 +153,118 @@ test("Pi adapter routes steer, follow-up, abort, compact and status over RPC", a
   );
   await adapter.dispose("test");
   assert.equal(client.closed, true);
+});
+
+test("Pi adapter lists and switches models through official RPC while persisting session selection", async () => {
+  const client = new FakePiClient();
+  const persisted = [];
+  const prepared = [];
+  const adapter = new PiEngineAdapter({
+    createClient: async () => client,
+    persistSession: (session) => persisted.push({ ...session }),
+    listConfiguredProviders: async () => [
+      { id: "deepseek-direct", defaultModel: "deepseek-chat" },
+      { id: "backup-api", defaultModel: "gpt-5.6-sol" },
+    ],
+    listProviderModels: async (provider) => provider === "backup-api" ? [{
+      provider: "backup-api",
+      id: "gpt-5.6-sol",
+      name: "Backup",
+      input: ["text", "image"],
+      contextWindow: 258400,
+      maxTokens: 32000,
+      metadataSource: "configured",
+    }] : [],
+    prepareModelSelection: async (provider, modelId) => {
+      prepared.push(`${provider}/${modelId}`);
+      return { provider, id: modelId, name: "Backup", metadataSource: "configured" };
+    },
+  });
+  const session = { id: "bridge-model-switch" };
+  assert.deepEqual((await adapter.listProviders()).map((provider) => provider.id), ["deepseek-direct", "backup-api"]);
+  const models = await adapter.listModels(session, "backup-api");
+  assert.deepEqual(models.map((model) => `${model.provider}/${model.id}`), ["backup-api/gpt-5.6-sol"]);
+  const selected = await adapter.setModel(session, "backup-api", "gpt-5.6-sol");
+  assert.equal(selected.provider, "backup-api");
+  assert.equal(session.piProvider, "backup-api");
+  assert.equal(session.piModel, "gpt-5.6-sol");
+  assert.equal(session.piThinking, "medium");
+  assert.equal(session.piContextUsage.contextWindow, 1000);
+  assert.deepEqual(prepared, ["backup-api/gpt-5.6-sol"]);
+  assert.ok(client.closed === false);
+  assert.ok(client.commands.some((command) => command.type === "set_model" && command.provider === "backup-api"));
+  assert.ok(persisted.some((entry) => entry.piModel === "gpt-5.6-sol"));
+});
+
+test("Pi adapter rejects model switching while a turn is active", async () => {
+  const client = new FakePiClient({ autoSettle: false });
+  const adapter = new PiEngineAdapter({ createClient: async () => client });
+  const session = { id: "bridge-model-switch-busy" };
+  const runPromise = adapter.run({ content: "hello" }, session);
+  await new Promise((resolve) => setImmediate(resolve));
+  await assert.rejects(
+    adapter.setModel(session, "backup-api", "gpt-5.6-sol"),
+    (error) => error instanceof PiEngineError && error.kind === "busy",
+  );
+  client.settle();
+  await runPromise;
+  assert.equal(client.commands.some((command) => command.type === "set_model"), false);
+});
+
+test("Pi adapter lists, switches and persists the effective thinking level through official RPC", async () => {
+  const client = new FakePiClient();
+  const persisted = [];
+  const adapter = new PiEngineAdapter({
+    createClient: async () => client,
+    persistSession: (session) => persisted.push({ ...session }),
+  });
+  const session = { id: "bridge-thinking" };
+  const before = await adapter.getThinkingState(session);
+  assert.deepEqual(before, {
+    levels: ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
+    effective: "medium",
+  });
+  const changed = await adapter.setThinkingLevel(session, "high");
+  assert.equal(changed.requested, "high");
+  assert.equal(changed.effective, "high");
+  assert.equal(session.piThinking, "high");
+  assert.ok(client.commands.some((command) => command.type === "set_thinking_level" && command.level === "high"));
+  assert.ok(persisted.some((entry) => entry.piThinking === "high"));
+});
+
+test("Pi adapter rejects unsupported thinking levels and thinking changes during an active turn", async () => {
+  const client = new FakePiClient({ autoSettle: false });
+  client.thinkingLevels = ["off"];
+  const adapter = new PiEngineAdapter({ createClient: async () => client });
+  const idleSession = { id: "bridge-thinking-unsupported" };
+  await assert.rejects(adapter.setThinkingLevel(idleSession, "high"), /supported: off/);
+  assert.equal(client.commands.some((command) => command.type === "set_thinking_level"), false);
+
+  const activeSession = { id: "bridge-thinking-busy" };
+  const runPromise = adapter.run({ content: "hello" }, activeSession);
+  await new Promise((resolve) => setImmediate(resolve));
+  await assert.rejects(
+    adapter.setThinkingLevel(activeSession, "off"),
+    (error) => error instanceof PiEngineError && error.kind === "busy",
+  );
+  client.settle();
+  await runPromise;
+});
+
+test("Pi adapter validates Provider credentials before sending set_model", async () => {
+  const client = new FakePiClient();
+  const checked = [];
+  const adapter = new PiEngineAdapter({
+    createClient: async () => client,
+    assertProviderAvailable: async (provider) => {
+      checked.push(provider);
+      throw new Error("Pi Provider key is unavailable: BACKUP_API_KEY");
+    },
+  });
+  const session = { id: "bridge-model-switch-no-key" };
+  await assert.rejects(adapter.setModel(session, "backup-api", "gpt-5.6-sol"), /BACKUP_API_KEY/);
+  assert.deepEqual(checked, ["backup-api"]);
+  assert.equal(client.commands.some((command) => command.type === "set_model"), false);
 });
 
 test("Pi adapter refuses a mismatched resumed session without replacing it", async () => {

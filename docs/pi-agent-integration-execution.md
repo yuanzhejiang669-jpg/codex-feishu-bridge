@@ -688,7 +688,182 @@
 - 推送后远端核对：`origin/main` 仍为 `99d310a535ed8c4aab9036cd060447c90faeefa9`，没有合并、force push、Release 或客户端安装操作。
 - `start-mimo2codex-proxies.ps1`、`creative-preset-adapter/`、`.codex-work/` 仍是未提交的用户独立修改，未进入 Pi 提交。
 
+## 2026-08-21：Pi 模型上下文窗口元数据修复
+
+### 现象与根因
+
+- Pi 完成卡片显示 `35,034 / 258,400 tokens`；百分比计算正确，但 DeepSeek 的窗口分母错误。
+- `src/pi/config.mjs` 在 Provider 未传模型限制时静默回退为 `258400/32000`，导致 DeepSeek 与 Backup API 被渲染成相同窗口，也会使 Pi 自动压缩触发过晚。
+
+### 修改
+
+- `src/pi/config.mjs`：`contextWindow` 与 `maxTokens` 改为必填正整数，并拒绝 `maxTokens > contextWindow`，不再静默猜测模型能力。
+- `scripts/provision-pi-global-bots.mjs`：为 `deepseek-direct/deepseek-chat` 显式配置 `128000/8192`，为 `backup-api/gpt-5.6-sol` 显式配置 `258400/32000`；未知 Provider/model 组合拒绝 provision。
+- Bridge 启动时只对 Pi session 的持久化上下文快照按当前固定模型窗口重新校准，避免新配置加载后 `/context` 在下一次回答前仍显示旧分母；Codex session 不参与。
+- `test/pi-config.test.mjs`、`test/pi-standalone.test.mjs`：覆盖显式窗口渲染、不同 Provider 窗口隔离，以及缺失、非整数和越界限制拒绝。
+
+### 阶段验证与剩余项
+
+- 定向测试：9/9 通过；`git diff --check` 无本任务空白错误（仅报告用户独立修改 `start-mimo2codex-proxies.ps1` 的既有行尾提示）。
+- Provider 密钥仍只允许以环境变量引用写入配置，测试继续验证真实密钥不落盘。
+- 三套真实 Pi Home 已重新 provision；01 的 session 文件数量保持 1，SHA-256 前后完全一致，02/03 仍无 session。三个 `models.json` 均为 DeepSeek `128000/8192`、Backup API `258400/32000`，密钥字段仅为 `$DEEPSEEK_API_KEY`/`$BACKUP_API_KEY`。
+- 根 Bridge 完整测试：首次 170/170 通过；对抗性审查补强后最终结果见下方。Desktop 测试：211 通过、3 跳过、0 失败。Desktop 仅验证源码，没有构建、安装或发布，已安装 0.8.19 不变。
+- 真实 DeepSeek smoke 已发出最小请求，但上游在 90 秒内未返回 `agent_settled`，stderr 为空；临时 Pi Home 已由 `finally` 清理。该结果不作为成功验证，配置渲染、进程启动和本地 RPC 边界由其他测试覆盖，上游延迟仍需后续观察。
+- 首次空闲重启后，真实飞书消息自然完成并写回 `46271/128000 = 36.149%`，证明实际 Pi RPC 运行路径已加载正确窗口。该消息运行期间第二次重启被 active-run guard 拒绝，没有中断任务；任务完成后再优雅重启以加载启动校准代码。最终 PID `67412`，StartTime `2026-08-21T14:43:39.3578189+08:00`，event consumer ready，`bridge.stderr.log` 为空；当前 Codex Bot 未重启。
+- 最终根 Bridge 测试：172/172 通过；Desktop 测试：211 通过、3 跳过、0 失败；`git diff --check` 无本任务空白错误。
+
+### 对抗性审查
+
+- 最可能原因一：三个月后新增 Provider 或新调用方没有提供模型限制，又生成错误配置。逐一搜索所有 renderer 调用点后，发现两个真实 smoke 和 Desktop Bot 创建路径确实会因新必填字段失败；已新增 `src/pi/model-metadata.mjs` 作为唯一权威表，provision、smoke、Desktop 共用它，未知 Provider/model 明确拒绝，并新增严格表测试。
+- 最可能原因二：磁盘上的 `models.json` 已修复，但长驻 Bridge/Pi RPC client 和 `sessions.json` 卡片快照仍缓存旧模型数据。验证在线进程此前持有一个 Pi client，且现有快照仍是 `35034/258400`；已增加 Pi-only 启动校准，并在任务归零后优雅重启 Pi Global 01，核对新 PID、event consumer ready 和落盘窗口。
+- 最可能原因三：重新 provision 时误写 session、泄漏密钥，或让 02/03 使用错误默认 Provider。已在 provision 前后比较 01 全部 session 文件 SHA-256，确认完全不变；逐个解析三套 `models.json` 和 `bridge.json`，确认只有环境变量引用，01 默认 DeepSeek，02/03 默认 Backup API。
+- 审查只修复了上述 Pi 模型元数据调用边界，没有修改 `main`、Desktop 版本、Codex engine、用户独立的 `start-mimo2codex-proxies.ps1`、`.codex-work/` 或 `creative-preset-adapter/`。
+
+## 2026-08-21：Pi session Provider/model 动态切换
+
+### 现象与根因
+
+- Pi Global 01 的 `models.json` 已同时包含 `deepseek-direct/deepseek-chat` 和 `backup-api/gpt-5.6-sol`，但 `/provider`、`/provider list`、`/model` 被命令入口当成 Codex 私有能力拦截，只显示固定 DeepSeek 的误导文案。
+- Pi 0.84.2 RPC 已原生提供 `get_available_models` 与 `set_model`；冻结约束只禁止 Pi/Codex engine 互切，不禁止同一 Pi session 在已配置 Pi 模型间切换。
+
+### 修改
+
+- `src/pi/engine-adapter.mjs`：通过官方 RPC 列出与切换模型；切换使用 session mutation lock，拒绝 active turn，并刷新 state/stats。选择写入 Pi 专属 `piProvider/piModel/piThinking`，不接触 Codex override/thread 字段。
+- `codex-feishu-bridge.mjs`：Pi `/provider list`、`/provider <id>`、`/model list`、`/model <id>`、`/model <provider>/<id>`、`/model default` 接入 Pi handler；状态、`/now` 和重启参数均读取 session 当前选择。存在 in-flight/queued 工作时拒绝切换。
+- `src/pi/model-metadata.mjs`：DeepSeek 明确声明为 `text`，Backup API 声明为 `text+image`；provisioner 与 Desktop 创建路径共用该权威能力。未知未来模型不会因上下文快照校准导致 Bridge 启动失败，而是跳过校准并告警。
+- 测试更新 adapter 官方 RPC、持久化、模型能力、命令分流、Codex 私有边界、重启恢复参数和 session mutation guard。
+
+### 阶段验证与剩余项
+
+- Pi config/adapter/standalone、session migration、architecture 定向测试：63/63 通过。
+- 根 Bridge 完整测试：173/173 通过；Desktop：211 通过、3 跳过、0 失败；staged engine parity 通过，`git diff --check` 无本任务空白错误。
+- 三套真实 Pi Home 已重新 provision；01 的 session JSONL SHA-256 前后不变。三套 `models.json` 均声明 DeepSeek `text`、Backup API `text+image`，密钥继续仅引用环境变量。
+- 待在 active run 为 0 时重启 Pi Global 01 后，通过真实 `/provider list`、切换 Backup API、读取状态、再切回 DeepSeek验证。
+- 本阶段不改变 Bot engine，不创建 Codex thread，不构建或安装 Desktop。
+
+### 部署、真实请求与对抗性审查
+
+- 重启前再次解析 `C:\Users\yzjiang\AppData\Local\CodexFeishuBridge\instances\pi-global-01\state\active-runs.json`，`runs` 下非 null entry 为 0；仅通过 `bridge.stop` 优雅停止 Pi Global 01 旧 PID `67412`，未重启当前 Codex Bot。
+- 该 Bot 是脚本管理实例，不在 Desktop `managed-bots` 注册表，Desktop recovery 不负责拉起。首次从 Desktop 隔离环境调用通用启动脚本时继承了错误 `LOCALAPPDATA`，误启动进程 PID `67472` 随即因无对应 Lark Profile 退出；随后显式恢复真实 Windows 用户目录并启动原实例。对抗性修复完成后使用专用 `start-pi-feishu-bridge.ps1` 再次空闲重启，最终 PID `12180`，StartTime `2026-08-21 15:37:18`，App `cli_aa0d031766e21bd9` 的 `im.message.receive_v1` consumer ready，正确实例 stderr 为空、active run 为 0。
+- 误启动产生的残留目录为 `C:\Users\yzjiang\AppData\Local\CodexFeishuBridgeDesktop\runtime-localappdata\CodexFeishuBridge\instances\pi-global-01`。清理操作被运行环境策略拦截，目录保留但无存活进程，不参与真实 Pi 01 运行。后续脚本管理 Pi Bot 必须使用 `start-pi-feishu-bridge.ps1 -Name <name> -UserHome C:\Users\yzjiang`，避免继承 Desktop 隔离路径。
+- 真实 `npm run smoke:pi:backup` 通过，`backup-api/gpt-5.6-sol` 返回正文和 usage，证明 Backup API 不只是静态列在 `models.json` 中。
+- Pi Global 01 profile 的 Bot 身份 verified，但 user identity 未授权，不能由 CLI 冒充用户发送 `/provider` 命令。本轮没有让 Bot 给自己发送命令制造假验证；飞书端仍需用户发送 `/provider list`、`/model list`、`/provider backup-api`、`/status` 验证 UI，再按需用 `/provider deepseek-direct` 切回。
+- 对抗性原因一：运行中或等待队列中切换造成当前 turn 与 session 选择错位。验证 Bridge 先检查 chat in-flight/queued 数，adapter 再以 `activeRuns/sessionMutations` 双层互斥；新增 active turn 中 `setModel` 拒绝测试，确认没有发出 `set_model`。
+- 对抗性原因二：切换成功但重启后恢复 Bot 默认模型。验证选择由 adapter 的 `get_state` 写入 `piProvider/piModel/piThinking` 并原子保存，`startPiRpcClient()` 从 `piSessionSelection(session)` 生成启动参数；现有 adapter 持久化测试和架构边界测试均通过。
+- 对抗性原因三：Provider 显示在列表中，但环境密钥丢失，`set_model` 成功后第一条请求才失败。确认这是实际缺口后，新增 `models.json` `$ENV_KEY` 结构化解析与切换前 credential preflight；只返回环境变量名，不读取、返回或记录密钥内容。缺失密钥时不会向 Pi RPC 发送 `set_model`。
+- 审查后定向测试 63/63、根 Bridge 176/176、Desktop 211 通过/3 跳过/0 失败；staged engine parity 通过。真实 Backup API smoke 通过。
+- `apps/desktop/npm run check` 的 precheck 重新安装了 `apps/desktop/proxy-runtime/node_modules` 并执行既有 mimo2codex compatibility patch；未构建、未安装、未发布 Desktop，已安装客户端仍为 0.8.19。
+- 一次误用不存在的 `apps/desktop npm test` 脚本产生 npm debug log：`C:\Users\yzjiang\AppData\Local\CodexFeishuBridgeDesktop\runtime-localappdata\npm-cache\_logs\2026-08-21T07_34_34_159Z-debug-0.log`。清理同样被环境策略拦截，文件保留且与产品运行无关。
+
 ## 后续执行记录模板
+
+## 2026-08-21：Pi thinking 实时查询、切换与飞书可见状态
+
+### 现象与根因
+
+- Pi 0.84.2 RPC 原生提供 `get_available_thinking_levels`、`set_thinking_level` 和 `cycle_thinking_level`，但 Bridge 只在模型切换后的 `get_state` 中被动记录 `thinkingLevel`，没有飞书查询或切换入口。
+- `/model <模型> medium` 的第二个参数此前被忽略；运行卡片和无卡片降级回复也不显示 Pi 的实际 Provider/model/thinking。
+
+### 修改
+
+- `src/pi/engine-adapter.mjs`：新增实时 thinking state 查询和切换；先读取当前模型实际支持档位，只允许有效值，调用官方 `set_thinking_level` 后再用 `get_state` 验证实际值并原子持久化到 Pi session。active turn 或其他 session mutation 期间拒绝切换。
+- `codex-feishu-bridge.mjs`：新增 `/model effort`、`/model effort <档位>`，并支持 `/model <模型ID> [档位]`、`/model <provider>/<模型ID> [档位]`。`/model` 实时读取 Pi state 和支持档位；模型不支持请求档位时明确显示请求值、实际值和原因，不伪造成功。
+- `/model default` 同时恢复 Bot 默认 Provider、模型与 thinking；`/model effort default` 只恢复默认 thinking。
+- 模型/Provider 切换结果、`/model list`、运行中卡片、完成卡片和无卡片 Markdown 降级回复均显示当前 `provider/model · thinking <实际值>`；Codex 卡片和回复不受影响。
+
+### 验证
+
+- adapter/architecture/Provider 定向测试：60/60 通过；覆盖查询、切换、持久化、不支持档位拒绝、active turn 互斥、命令分流和卡片身份显示。
+- 完整 `npm run check`：185/185 通过；相关 `node --check` 和 `git diff --check` 通过。
+- 真实 `npm run smoke:pi:backup` 通过：临时 Pi Home 动态切换模型后恢复 `backup-api/gpt-5.6-sol`，官方 RPC 返回支持档位并实际完成 `medium -> minimal -> medium`，随后真实最小请求和 usage 正常；临时目录由 `finally` 清理。
+
+### 对抗性审查
+
+- 最可能原因一：运行中修改 thinking，使同一 turn 的请求参数和 Bridge session 状态错位。验证 adapter active-run/session-mutation 双锁和 Bridge in-flight/queue guard；回归测试确认 busy 时未发出 `set_thinking_level`。
+- 最可能原因二：用户请求当前模型不支持的档位，Pi 自动 clamp 后 UI 仍显示请求值。直接 effort 切换会在 RPC 前依据 `get_available_thinking_levels` 拒绝；组合模型切换会重新读取新模型档位并同时展示请求值与实际值，避免假成功。
+- 最可能原因三：卡片发送失败或 Bridge 重启后丢失 thinking。`get_state` 的实际值写入 `piThinking` 并随 `sessions.json` 保存；普通卡片与 Markdown fallback 都直接使用 Pi session selection。真实 smoke 验证 Pi RPC state 往返，adapter 测试验证持久化回调。
+- 审查还发现 `/model default` 原本只恢复模型、不恢复 thinking；已修复为完整恢复 Bot 默认 Provider/model/thinking。
+
+### 部署边界
+
+- 本阶段只部署脚本管理的 Pi Global 01；用户已明确 Pi 分支不合并 `main`，因此不构建、不发布、不安装 Desktop，不同步 `origin/main` 或其他设备。
+- 重启前再次解析真实 `active-runs.json.runs` 非 null property 为 0；优雅停止旧 PID `60560` 后通过专用 `start-pi-feishu-bridge.ps1` 启动当前分支源码。最终 PID `61412`，StartTime `2026-08-21T18:18:06.4809472+08:00`，event consumer ready，`bridge.stderr.log` 0 字节。
+- 重启后真实 `sessions.json` 仍为 `backup-api/gpt-5.6-sol`、thinking `medium`，没有恢复 Bot 默认 DeepSeek。飞书可见行为待用户发送 `/model`、`/model effort`、`/model effort high` 验证；不让 Bot 冒充用户给自己发命令。
+
+## 2026-08-21：Pi Provider 实时模型列表与动态注册修复
+
+### 现象与根因
+
+- `/provider list` 应只展示当前 Pi Home `models.json` 中显式配置的 Provider；原实现却通过 Pi RPC `get_available_models` 展示环境自动发现模型，导致 `deepseek/deepseek-v4-flash`、`deepseek/deepseek-v4-pro` 等未配置且不可切换的模型混入列表。
+- `/model list` 应实时请求当前 Provider 的 `/models`，原实现展示的是 Pi 进程启动时的全局模型注册表，既不是当前 Provider 的实时 inventory，也无法展示 Backup API 新增模型。
+
+### 修改
+
+- 新增 `src/pi/provider-models.mjs`：结构化读取显式 Provider，使用 `$ENV_KEY` 注入凭据并实时调用选中 Provider 的 `/models`；响应、错误与日志均不持久化密钥。
+- `codex-feishu-bridge.mjs`：Pi `/provider list` 只列显式 Provider；`/model list` 查询当前 Provider，`/model list <providerId>` 查询指定 Provider；`/model <模型ID>` 只在当前 Provider 实时列表中选择，仍支持完整的 `<provider>/<模型ID>`。
+- 动态模型首次切换前，以原子写注册到该 Bot 独立 `models.json`，随后丢弃当前 Pi RPC client，让新进程加载注册表，再通过官方 `set_model` 切换并以 `get_state` 验证结果。未知模型只写 `id/name`，界面明确显示“能力元数据待确认”，不伪造视觉能力或上下文窗口。
+- 同一 Bridge 进程内对相同 `models.json` 的注册读改写加串行锁；两个 session 同时首次选择不同新模型时会保留两项，不发生最后写入覆盖。
+
+### 验证
+
+- 定向 Provider/adapter/architecture 测试：57/57 通过，覆盖幽灵模型隔离、当前 Provider 实时查询、动态注册、并发注册、密钥边界、HTTP/JSON/超时错误、RPC 切换与 busy guard。
+- 完整 `npm run check`：182/182 通过；相关 `node --check` 与 `git diff --check` 通过。
+- 真实 `npm run smoke:pi:backup` 通过：Backup API `/models` 实时发现 `gpt-5.6-terra`，临时 Pi Home 动态注册后由 Pi RPC 切换成功，再恢复 `backup-api/gpt-5.6-sol`，真实最小请求返回正文和 usage。临时 Pi Home 由 `finally` 清理。
+- 本阶段尚未宣称飞书 UI 已部署；必须在 `active-runs.json.runs` 为 0 后仅重启 `pi-global-01`，再由用户在真实对话发送 `/provider list` 和 `/model list` 验证。
+
+### 剩余风险
+
+- `/model list` 按产品语义依赖 Provider 实时 `/models`；上游不可用时明确报错，不回退到可能过期或混入其他 Provider 的 Pi 全局缓存。
+- 动态发现接口通常不提供可靠的视觉能力、上下文窗口和最大输出元数据；这些模型允许切换，但在获得权威元数据前不会在 Bridge 中声称具体能力。
+- 当前串行锁覆盖同一 Bridge 进程内的并发 session；每个 Bot 的 single-instance lock 和独立 Pi Home 负责阻止跨进程共享写入。部署前继续核对实际进程与 lock 状态。
+
+### 部署与对抗性审查
+
+- 部署前解析 `C:\Users\yzjiang\AppData\Local\CodexFeishuBridge\instances\pi-global-01\state\active-runs.json` 的 `runs` 非 null property 为 0；只优雅重启脚本管理的 Pi Global 01，没有重启当前 Codex Bot、Desktop managed Bot 或客户端。
+- 最终 Pi Global 01 PID 为 `60560`，StartTime `2026-08-21T16:23:20.0954905+08:00`；运行入口仍是当前分支源码 `C:\Users\yzjiang\Documents\Codex\tools\codex-feishu-bridge\codex-feishu-bridge.mjs`。App `cli_aa0d031766e21bd9` 的 `im.message.receive_v1` consumer ready，`bridge.stderr.log` 为 0 字节。
+- 重启后的真实 `sessions.json` 保持 `engine=pi`、`codexThreadId=""`、`piProvider=backup-api`、`piModel=gpt-5.6-sol`，证明当前 session 选择没有回退到 Bot 默认 DeepSeek。飞书端仍需用户发送 `/provider list` 和 `/model list` 做最终可见 UI 验证；Bridge Bot 身份不能伪装用户给自己发命令。
+- 对抗性原因一：Pi 的环境自动发现或 `models-store.json` 再次混入未配置“幽灵模型”。逐项验证用户命令链路不再调用 `get_available_models` 做列表，只以 `models.json` Provider 加所选 Provider 实时 `/models` 为来源；架构和 Provider 隔离测试通过。
+- 对抗性原因二：两个 session 同时首次选择不同新模型，两个异步 `/models` 请求之后分别读旧配置并相互覆盖。该竞态在审查中被确认并修复：相同绝对 `models.json` 的读改写在进程内串行，专门并发测试确认两个新增模型都保留。
+- 对抗性原因三：动态注册成功，但新 Pi RPC 未加载注册表，或重启后 session 又恢复默认模型。真实临时 Pi Home smoke 验证 `gpt-5.6-terra` 注册、RPC 可见、切换、`get_state` 确认、恢复 `gpt-5.6-sol` 和最小真实请求；在线空闲重启后落盘选择仍为 Backup API。
+- 额外检查发现实时 Provider 可返回含换行、控制字符或超长的模型展示名，可能破坏飞书 Markdown 卡片。已将展示名归一化为最长 160 字符的单行文本，并在渲染时转义 Markdown；新增恶意名称回归测试。
+- 审查后的定向测试 58/58、最终完整 `npm run check` 183/183、相关 `git diff --check` 通过。没有构建、安装、发布、commit 或 push；`main`、`origin/main` 和已安装 Desktop 0.8.19 均未改变。
+
+## 2026-08-22：按模型补全 Pi 思考档位
+
+### 现象与根因
+
+- `backup-api/gpt-5.6-sol` 的 `/model` 只显示 `off/minimal/low/medium/high`，缺少模型真实支持的 `xhigh/max`，并错误显示官方不支持的 `minimal`。
+- Bridge 已接受七个 Pi 内部档位，但 Pi 0.84.2 的 `get_available_thinking_levels` 依据模型 `thinkingLevelMap` 生成列表；现有 `models.json` 只有 `reasoning: true`，没有按模型映射，因此问题位于模型元数据，不是飞书渲染过滤。
+
+### 修改
+
+- `src/pi/model-metadata.mjs` 增加权威映射：GPT-5.6 Sol/Terra/Luna/alias 为 `off→none、low、medium、high、xhigh、max`；DeepSeek V4 为三个实际档位 `off、high、max`；已弃用的 `deepseek-chat` 按官方兼容语义标为非思考模型。
+- `src/pi/config.mjs` 和 `scripts/provision-pi-global-bots.mjs` 将映射写入新建 Pi Bot 的标准 `models.json`，后续 Bot 可直接复用。
+- `src/pi/provider-models.mjs` 在实时列表中展示模型专属档位；首次注册或再次选择已注册模型时修复缺失/过期映射，继续保证凭据只以 `$ENV_KEY` 引用。飞书 `/model list` 同时显示每个已识别模型的思考档位。
+- 两条真实 smoke 改为断言 Pi RPC 返回精确档位，不再只断言“有一个可切换档位”。
+
+### 权威依据和验证
+
+- OpenAI 官方 GPT-5.6 文档：Sol、Terra、Luna 均支持 `none/low/medium/high/xhigh/max`；Pi UI 用 `off` 表示线上的 `none`。
+- DeepSeek 官方 Thinking Mode：真实 effort 为 `high/max`，`low/medium` 兼容映射到 `high`，`xhigh` 兼容映射到 `max`；Bridge 只展示三个不同效果的选择 `off/high/max`，不制造重复档位。
+- 定向 Pi/adapter/architecture 测试 75/75；完整 `npm run check` 188/188。
+- 真实 `npm run smoke:pi:backup`：Pi RPC 精确返回 `off/low/medium/high/xhigh/max`，动态切换 `gpt-5.6-terra`、恢复 Sol、`medium→low→medium` 和真实请求/usage 全部通过。
+- 真实 `npm run smoke:pi:deepseek`：动态注册 `deepseek-v4-flash`，Pi RPC 精确返回 `off/high/max`，以 `high` 完成真实请求并返回 usage；额外对真实 `/responses` 以 16 个最大输出 token 分别探测 `none/high/max`，三项均 HTTP 200 且返回 response id/usage，确认 `off→none` 映射在当前端点确实生效。
+- 两个临时 Pi Home 均由 smoke 的 `finally` 删除，没有留下密钥或临时模型文件。
+
+### 对抗性审查
+
+- 三个月后风险一：Provider 新增模型后被错误套用 GPT 档位。验证映射按 Provider 和严格模型族匹配；未知模型继续标为元数据待确认，不推断 `xhigh/max`。
+- 三个月后风险二：老 Bot 的 `models.json` 已注册模型永远保留旧映射。审查确认原逻辑对 existing model 直接返回；已改为原子修复已注册模型并增加回归测试。
+- 三个月后风险三：配置已更新但在线 Pi RPC 仍使用启动时缓存。现有模型切换路径会丢弃 client 后重启读取注册表；本阶段部署仍须先确认真实 `active-runs.json.runs` 为 0，再优雅重启 Pi Global 01，并验证 event consumer 与 stderr。
+- 审查只修改 Pi 模型能力映射、展示和验证，没有修改 Codex engine、`main`、Desktop 版本或用户无关文件。
+
+### 在线部署
+
+- 对 Pi Global 01 的真实 `models.json` 执行实时 Provider 校验并原子修复：`backup-api/gpt-5.6-sol` 写入 6 个有效档位，`deepseek-direct/deepseek-v4-flash` 写入 `off/high/max`；密钥仍仅为环境变量引用。
+- 重启前两次解析真实 `active-runs.json.runs` 均为 0。首次停止调用暴露出当前自动化进程继承 Desktop 隔离 `LOCALAPPDATA`、导致停止脚本查看错误实例目录；没有终止任何进程。显式恢复 `C:\Users\yzjiang\AppData\Local` 后，旧 PID `61412` 优雅退出并由专用 `start-pi-feishu-bridge.ps1` 启动新 PID `69776`。
+- 新进程入口仍是当前 Pi 分支源码；`im.message.receive_v1` consumer 对 App `cli_aa0d031766e21bd9` ready，`bridge.stderr.log` 为 0 字节，active run 为 0。未重启 Codex Bot、Desktop 客户端或其他 Bot。
+- 最终飞书可见验证由用户在 Pi Global 01 发送 `/model`、`/model effort` 和 `/model list`；Bot 身份不伪装用户向自身发送命令。
 
 ### YYYY-MM-DD：阶段名称
 

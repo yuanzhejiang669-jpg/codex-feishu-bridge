@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import path from "node:path";
 
 import { writeJsonFileAtomicSync } from "../utils/json.mjs";
@@ -44,23 +45,36 @@ function createPiProviderConfig(provider = {}) {
   if (!modelId) throw new Error("Pi provider model is required");
   if (!/^https?:\/\//i.test(baseUrl)) throw new Error("Pi provider base URL must be http(s)");
   if (!/^[A-Z_][A-Z0-9_]{0,127}$/.test(envKey)) throw new Error("Pi provider environment key is invalid");
-  const contextWindow = Math.max(1, Number(provider.contextWindow) || 258_400);
-  const maxTokens = Math.max(1, Number(provider.maxTokens) || 32_000);
+  const contextWindow = positiveInteger(provider.contextWindow, "Pi provider contextWindow");
+  const maxTokens = positiveInteger(provider.maxTokens, "Pi provider maxTokens");
+  if (maxTokens > contextWindow) {
+    throw new Error("Pi provider maxTokens must not exceed contextWindow");
+  }
   return [id, {
+    name: String(provider.providerName || provider.name || id),
     baseUrl,
     api: piApiFromWireApi(provider.wireApi),
     apiKey: `$${envKey}`,
     authHeader: true,
     models: [{
       id: modelId,
-      name: String(provider.name || modelId),
+      name: String(provider.modelName || provider.name || modelId),
       reasoning: provider.reasoning !== false,
+      ...(provider.thinkingLevelMap ? { thinkingLevelMap: provider.thinkingLevelMap } : {}),
       input: provider.input || ["text", "image"],
       contextWindow,
       maxTokens,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     }],
   }];
+}
+
+function positiveInteger(value, label) {
+  const number = Number(value);
+  if (!Number.isSafeInteger(number) || number <= 0) {
+    throw new Error(`${label} must be a positive integer`);
+  }
+  return number;
 }
 
 export function createPiModelsConfig(providerOrProviders = {}) {
@@ -73,6 +87,34 @@ export function createPiModelsConfig(providerOrProviders = {}) {
     providers[id] = config;
   }
   return { providers };
+}
+
+export function resolvePiProviderEnvironmentKey({ modelsPath, provider } = {}) {
+  const providerId = safeId(provider, "Pi provider id");
+  const target = path.resolve(String(modelsPath || ""));
+  if (!modelsPath || target === path.parse(target).root) throw new Error("Pi models.json path is required");
+  let models;
+  try {
+    models = JSON.parse(fs.readFileSync(target, "utf8").replace(/^\uFEFF/, ""));
+  } catch (error) {
+    throw new Error(`Unable to read Pi models.json: ${error?.message || error}`, { cause: error });
+  }
+  const definition = models?.providers?.[providerId];
+  if (!definition) throw new Error(`Pi Provider is not configured: ${providerId}`);
+  const reference = String(definition.apiKey || "").trim();
+  const match = /^\$([A-Z_][A-Z0-9_]{0,127})$/.exec(reference);
+  if (!match) throw new Error(`Pi Provider ${providerId} must reference an environment variable`);
+  return match[1];
+}
+
+export function assertPiProviderCredentialAvailable({ modelsPath, provider, env = process.env } = {}) {
+  const envKey = resolvePiProviderEnvironmentKey({ modelsPath, provider });
+  if (!String(env?.[envKey] || "").trim()) {
+    const error = new Error(`Pi Provider key is unavailable: ${envKey}`);
+    error.code = "PI_PROVIDER_CREDENTIAL_UNAVAILABLE";
+    throw error;
+  }
+  return { provider: safeId(provider, "Pi provider id"), envKey };
 }
 
 export function createPiSettings({ shellPath = "", enableInstallTelemetry = false } = {}) {

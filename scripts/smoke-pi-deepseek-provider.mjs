@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 import { buildPiRpcArguments, writePiRuntimeConfig } from "../src/pi/config.mjs";
 import { assistantTextFromPiMessage } from "../src/pi/events.mjs";
 import { PiRpcClient } from "../src/pi/rpc-client.mjs";
+import { resolvePiModelLimits, resolvePiModelThinkingMetadata } from "../src/pi/model-metadata.mjs";
+import { listPiProviderModels, registerPiProviderModel } from "../src/pi/provider-models.mjs";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const apiKey = String(process.env.DEEPSEEK_API_KEY || "");
@@ -29,7 +31,8 @@ try {
       envKey: "DEEPSEEK_API_KEY",
       wireApi: "responses",
       model: "deepseek-chat",
-      reasoning: false,
+      ...resolvePiModelLimits("deepseek-direct", "deepseek-chat"),
+      ...resolvePiModelThinkingMetadata("deepseek-direct", "deepseek-chat"),
       input: ["text"],
     },
   });
@@ -37,6 +40,12 @@ try {
   if (!modelsText.includes("$DEEPSEEK_API_KEY") || modelsText.includes(apiKey)) {
     throw new Error("Rendered Pi models.json did not preserve the environment-only credential boundary");
   }
+  const liveModels = await listPiProviderModels({ modelsPath: directories.modelsPath, provider: "deepseek-direct" });
+  const v4Model = liveModels.models.find((model) => model.id === "deepseek-v4-flash")
+    || liveModels.models.find((model) => /^deepseek-v4-(?:flash|pro)$/.test(model.id));
+  if (!v4Model) throw new Error("DeepSeek did not expose a V4 model for thinking-level verification");
+  await verifyDeepSeekResponseEfforts(v4Model.id, apiKey);
+  await registerPiProviderModel({ modelsPath: directories.modelsPath, provider: "deepseek-direct", modelId: v4Model.id });
   client = new PiRpcClient({
     command: process.execPath,
     args: [
@@ -72,14 +81,39 @@ try {
   });
   await client.start();
   await client.waitUntilReady({ timeoutMs: 60_000, probeTimeoutMs: 5_000, retryDelayMs: 250 });
+  await client.request({ type: "set_model", provider: "deepseek-direct", modelId: v4Model.id }, 30_000);
+  const thinking = await client.request({ type: "get_available_thinking_levels" }, 30_000);
+  const thinkingLevels = Array.isArray(thinking?.data?.levels) ? thinking.data.levels : [];
+  if (JSON.stringify(thinkingLevels) !== JSON.stringify(["off", "high", "max"])) {
+    throw new Error(`Unexpected ${v4Model.id} thinking levels: ${thinkingLevels.join(",")}`);
+  }
+  await client.request({ type: "set_thinking_level", level: "high" }, 30_000);
   const settled = client.waitForEvent((event) => event?.type === "agent_settled", 90_000);
   await client.request({ type: "prompt", message: "Reply with exactly: PI_DEEPSEEK_OK" }, 90_000);
   await settled;
   const stats = await client.request({ type: "get_session_stats" }, 30_000);
   if (!finalText.includes("PI_DEEPSEEK_OK")) throw new Error(`Unexpected Pi response: ${finalText.slice(0, 200)}`);
   if (Number(stats?.data?.tokens?.total) <= 0) throw new Error("Pi DeepSeek session stats did not report usage");
-  process.stdout.write("Pi DeepSeek smoke passed: response and usage received\n");
+  process.stdout.write(`Pi DeepSeek smoke passed: ${v4Model.id} exposed off/high/max, high-effort response and usage received\n`);
 } finally {
   await client?.stop({ forceAfterMs: 1_000 }).catch(() => {});
   fs.rmSync(temporaryHome, { recursive: true, force: true });
+}
+
+async function verifyDeepSeekResponseEfforts(model, credential) {
+  for (const effort of ["none", "high", "max"]) {
+    const response = await fetch("https://api.deepseek.com/responses", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${credential}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ model, input: "Reply OK.", max_output_tokens: 16, reasoning: { effort } }),
+    });
+    const text = await response.text();
+    let body = {};
+    try { body = JSON.parse(text); } catch {}
+    if (!response.ok) {
+      const detail = String(body?.error?.message || body?.message || "request rejected").slice(0, 200);
+      throw new Error(`DeepSeek ${model} rejected reasoning effort ${effort}: HTTP ${response.status} ${detail}`);
+    }
+    if (!body?.id || !body?.usage) throw new Error(`DeepSeek ${model} ${effort} probe returned no response id or usage`);
+  }
 }

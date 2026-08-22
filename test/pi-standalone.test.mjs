@@ -27,8 +27,8 @@ test("standalone Pi provisioning creates three isolated global Bots with shared 
       documentsRoot,
       skillPaths: [skillOne, skillTwo],
       providers: [
-        { id: "deepseek-direct", name: "DeepSeek", baseUrl: "https://deepseek.test", envKey: "DEEPSEEK_API_KEY", wireApi: "responses", model: "deepseek-chat" },
-        { id: "backup-api", name: "Backup", baseUrl: "https://backup.test/v1", envKey: "BACKUP_API_KEY", wireApi: "responses", model: "gpt-5.6-sol" },
+        { id: "deepseek-direct", name: "DeepSeek", baseUrl: "https://deepseek.test", envKey: "DEEPSEEK_API_KEY", wireApi: "responses", model: "deepseek-chat", contextWindow: 128_000, maxTokens: 8_192 },
+        { id: "backup-api", name: "Backup", baseUrl: "https://backup.test/v1", envKey: "BACKUP_API_KEY", wireApi: "responses", model: "gpt-5.6-sol", contextWindow: 258_400, maxTokens: 32_000 },
       ],
     });
     assert.equal(bots.length, 3);
@@ -40,6 +40,8 @@ test("standalone Pi provisioning creates three isolated global Bots with shared 
     for (const bot of bots) {
       const models = fs.readFileSync(bot.modelsPath, "utf8");
       assert.deepEqual(Object.keys(JSON.parse(models).providers).sort(), ["backup-api", "deepseek-direct"]);
+      assert.equal(JSON.parse(models).providers["deepseek-direct"].models[0].contextWindow, 128_000);
+      assert.equal(JSON.parse(models).providers["backup-api"].models[0].contextWindow, 258_400);
       assert.match(models, /\$DEEPSEEK_API_KEY/);
       assert.match(models, /\$BACKUP_API_KEY/);
       assert.doesNotMatch(models, /secret-must-not-leak/);
@@ -69,7 +71,7 @@ test("standalone Pi provisioning rejects a missing default Provider", () => {
       bridgeRoot,
       documentsRoot: path.join(root, "Documents"),
       skillPaths: [skillRoot],
-      providers: [{ id: "backup-api", baseUrl: "https://backup.test/v1", envKey: "BACKUP_API_KEY", wireApi: "responses", model: "gpt-5.6-sol" }],
+      providers: [{ id: "backup-api", baseUrl: "https://backup.test/v1", envKey: "BACKUP_API_KEY", wireApi: "responses", model: "gpt-5.6-sol", contextWindow: 258_400, maxTokens: 32_000 }],
     }), /Default Pi provider is not configured/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
@@ -91,8 +93,8 @@ test("standalone Pi defaults derive the real user root from CODEX_HOME", () => {
     const bots = provisionPiGlobalBots({
       bridgeRoot,
       providers: [
-        { id: "deepseek-direct", baseUrl: "https://deepseek.test", envKey: "DEEPSEEK_API_KEY", wireApi: "responses", model: "deepseek-chat" },
-        { id: "backup-api", baseUrl: "https://backup.test/v1", envKey: "BACKUP_API_KEY", wireApi: "responses", model: "gpt-5.6-sol" },
+        { id: "deepseek-direct", baseUrl: "https://deepseek.test", envKey: "DEEPSEEK_API_KEY", wireApi: "responses", model: "deepseek-chat", contextWindow: 128_000, maxTokens: 8_192 },
+        { id: "backup-api", baseUrl: "https://backup.test/v1", envKey: "BACKUP_API_KEY", wireApi: "responses", model: "gpt-5.6-sol", contextWindow: 258_400, maxTokens: 32_000 },
       ],
     });
     assert.ok(bots.every((item) => item.workspace.startsWith(path.join(realHome, "Documents"))));
