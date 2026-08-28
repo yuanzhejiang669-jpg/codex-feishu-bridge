@@ -21,6 +21,7 @@ Windows keeps `Codex-Feishu-Bridge-Setup-<version>.exe`. macOS publishes `Codex-
 
 ## Ubuntu installation and maintenance
 
+- A native Ubuntu release build requires `binutils` (specifically `ar`) in addition to Node.js and npm. Install it with `sudo apt install -y binutils` before `npm run dist:linux`; the package verifier itself still runs after electron-builder creates the `.deb`.
 - Install with `sudo apt install ./Codex-Feishu-Bridge-<version>-linux-amd64.deb` so APT resolves GTK, NSS, XDG, and Secret Service dependencies.
 - Launch from the desktop application menu. Login startup uses a marked file at `~/.config/autostart/codex-feishu-bridge.desktop` and refuses to overwrite an unrelated entry.
 - Provider keys require an available Linux Secret Service backend such as GNOME libsecret; `basic_text` is rejected.
