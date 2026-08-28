@@ -69,6 +69,22 @@ function macCodexCandidates(home = require("node:os").homedir()) {
   return bundles.flatMap((bundle) => relativeCandidates.map((relative) => path.posix.join(bundle, relative)));
 }
 
+function linuxCodexCandidates(home = require("node:os").homedir(), environment = process.env) {
+  const posixHome = String(home || "").replaceAll("\\", "/");
+  const candidates = [
+    String(environment.CODEX_CLI_BIN || "").trim(),
+    "/usr/local/bin/codex",
+    "/usr/bin/codex",
+    path.posix.join(posixHome, ".local", "bin", "codex"),
+    path.posix.join(posixHome, ".npm-global", "bin", "codex"),
+    path.posix.join(posixHome, ".local", "share", "pnpm", "codex"),
+  ];
+  for (const directory of String(environment.PATH || "").split(":")) {
+    if (directory) candidates.push(path.posix.join(directory, "codex"));
+  }
+  return [...new Set(candidates.filter(Boolean))];
+}
+
 function findMacBundleRuntime(bundlePath) {
   const resourcesRoot = path.posix.join(bundlePath, "Contents", "Resources");
   const matches = [];
@@ -159,6 +175,31 @@ async function inspectMacCodex(options = {}) {
   };
 }
 
+async function inspectLinuxCodex(options = {}) {
+  const candidates = options.candidates || linuxCodexCandidates(options.home, options.environment);
+  const runtimePath = firstExecutable(candidates);
+  const version = await runCodex(runtimePath, ["--version"], 8_000);
+  const auth = await runCodex(runtimePath, ["login", "status"], 10_000);
+  const cliVersion = cleanVersion(version.output);
+  return {
+    supported: true,
+    platform: "linux",
+    packageFound: Boolean(runtimePath),
+    bundleIdentifier: "",
+    packageVersion: cliVersion,
+    installLocation: runtimePath ? path.dirname(runtimePath) : "",
+    sourceRuntimePath: runtimePath,
+    cachedRuntimePath: "",
+    runtimeFound: Boolean(runtimePath && version.ok),
+    runtimePath: version.ok ? runtimePath : "",
+    ...inspectRuntimeDirectory(version.ok ? runtimePath : "", "linux"),
+    cliVersion,
+    loginState: loginState(auth.output, auth.ok),
+    loginSummary: auth.output.split(/\r?\n/).find(Boolean) || "",
+    error: runtimePath && !version.ok ? "The detected Codex runtime could not be executed" : "",
+  };
+}
+
 async function runCodex(runtimePath, args, timeout) {
   if (!runtimePath) return { ok: false, output: "" };
   try {
@@ -190,6 +231,7 @@ function loginState(output, ok) {
 async function inspectCodex(scriptPath, options = {}) {
   const platform = options.platform || process.platform;
   if (platform === "darwin") return inspectMacCodex(options);
+  if (platform === "linux") return inspectLinuxCodex(options);
   if (platform !== "win32") {
     return {
       supported: false,
@@ -197,7 +239,7 @@ async function inspectCodex(scriptPath, options = {}) {
       runtimeFound: false,
       cliVersion: "",
       loginState: "unknown",
-      error: "Windows or macOS is required",
+      error: "Windows, macOS, or Linux is required",
     };
   }
 
@@ -251,9 +293,11 @@ module.exports = {
   firstExecutable,
   findMacBundleRuntime,
   inspectCodex,
+  inspectLinuxCodex,
   inspectMacCodex,
   inspectRuntimeDirectory,
   loginState,
+  linuxCodexCandidates,
   macCodexCandidates,
   parseJsonOutput,
 };

@@ -1,0 +1,4 @@
+mcp==1.26.0
+pillow==12.1.1
+rapidocr-onnxruntime==1.4.4
+numpy==2.4.3

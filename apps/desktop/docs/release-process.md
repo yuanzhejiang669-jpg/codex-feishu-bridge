@@ -1,23 +1,31 @@
 # Desktop Release Process
 
-GitHub Releases is the stable Windows and macOS distribution channel. Windows artifacts are unsigned unless a certificate is configured; macOS artifacts are intentionally unsigned and not notarized.
+GitHub Releases is the stable Windows, macOS, and Ubuntu distribution channel. Windows artifacts are unsigned unless a certificate is configured; macOS artifacts are intentionally unsigned and not notarized.
 
 ## Release contract
 
 1. Update `apps/desktop/package.json` and `package-lock.json` to the same semantic version.
 2. Update the implementation plan and execution log.
-3. Run `npm run check` and `npm run dist:win` from `apps/desktop`; the clean GitHub workflow also runs `npm run dist:mac` on macOS.
-4. Verify Windows `latest.yml`, NSIS assets, bundled engine content and checksums, plus macOS x64/arm64 DMG, ZIP, `latest-mac.yml`, bundled tools, engine dependencies and checksums.
+3. Run `npm run check` and `npm run dist:win` from `apps/desktop`; the clean GitHub workflow also runs `npm run dist:mac` on macOS and `npm run dist:linux` on Ubuntu.
+4. Verify Windows `latest.yml` and NSIS assets, macOS x64/arm64 DMG/ZIP assets, and the Ubuntu amd64 `.deb`, including bundled tools, engine dependencies and checksums.
 5. Commit and push the release source.
 6. Create and push the matching tag, for example `v0.7.5`.
-7. `.github/workflows/release-desktop.yml` builds and tests on clean Windows and macOS runners, then atomically publishes both platforms only after both jobs pass.
-8. Verify the GitHub Release is public, latest, and contains the required Windows assets plus x64/arm64 macOS DMG and ZIP assets.
+7. `.github/workflows/release-desktop.yml` builds and tests on clean Windows, macOS, and Ubuntu runners, then publishes only after all three jobs pass.
+8. Verify the GitHub Release is public, latest, and contains the required Windows, macOS, and Ubuntu assets.
 9. Fast-forward the old Windows device repository to the released source without overwriting unrelated local modifications, run the root checks, and restart only affected idle script-managed Bots.
 10. Restart affected idle script-managed Bots on the current device; never interrupt the Bot carrying the release task.
 11. Upgrade the installed Windows client from the verified stable Release and verify the installed version, persistent data, and managed-Bot recovery.
 12. Confirm the local repository, `origin/main`, old-device repository, stable Release, and installed Windows client all match the intended release before reporting completion.
 
-Windows keeps `Codex-Feishu-Bridge-Setup-<version>.exe`. macOS publishes `Codex-Feishu-Bridge-<version>-mac-<arch>.dmg` and `.zip` for `x64` and `arm64`.
+Windows keeps `Codex-Feishu-Bridge-Setup-<version>.exe`. macOS publishes `Codex-Feishu-Bridge-<version>-mac-<arch>.dmg` and `.zip` for `x64` and `arm64`. Ubuntu publishes `Codex-Feishu-Bridge-<version>-linux-amd64.deb`.
+
+## Ubuntu installation and maintenance
+
+- Install with `sudo apt install ./Codex-Feishu-Bridge-<version>-linux-amd64.deb` so APT resolves GTK, NSS, XDG, and Secret Service dependencies.
+- Launch from the desktop application menu. Login startup uses a marked file at `~/.config/autostart/codex-feishu-bridge.desktop` and refuses to overwrite an unrelated entry.
+- Provider keys require an available Linux Secret Service backend such as GNOME libsecret; `basic_text` is rejected.
+- Persistent client data remains under the user's application-data directory, outside `/opt/Codex Feishu Bridge`.
+- Linux automatic in-app update is not enabled; upgrades are explicit package installations and must not interrupt active Bots.
 
 The Windows updater compares the packaged application version with the latest stable GitHub Release. The build command always passes `--publish never`; only the final workflow step may create or upload a Release, preventing electron-builder's tag-triggered implicit publishing from producing partial assets.
 

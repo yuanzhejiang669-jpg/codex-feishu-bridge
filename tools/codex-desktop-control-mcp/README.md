@@ -1,6 +1,6 @@
 # Codex Desktop Control MCP
 
-这是一个 Windows 与 macOS 桌面控制 MCP server，面向 Codex 的真实桌面自动化。它优先提供可诊断、可降级的操作路径，而不是只依赖单一截图或坐标方法。
+这是一个 Windows、macOS 与 Linux 桌面控制 MCP server，面向 Codex 的真实桌面自动化。它优先提供可诊断、可降级的操作路径，而不是只依赖单一截图或坐标方法。
 
 ## 能力
 
@@ -14,6 +14,16 @@
 - 连续执行与观察：`codex_desktop_control_workflow`、`codex_desktop_control_observe`
 
 macOS 核心后端使用系统 `screencapture`、System Events、Accessibility、CoreGraphics、AppleScript 和 `pbcopy` / `pbpaste`，覆盖窗口、截图、完整鼠标输入、快捷键、直接文本输入、粘贴和语义控件操作。
+
+Linux 后端面向 Ubuntu GNOME/Wayland，使用 `gnome-screenshot`、`wl-clipboard` 和带本地 socket 的 `ydotoold` 提供截图、剪贴板与完整坐标输入；`wmctrl` 仅补充 XWayland 窗口枚举。原生 Wayland 不开放跨应用语义控件树，因此 Linux 会明确返回 UIA 不可用，并回退到 OCR、视觉检测和坐标操作。安装命令：
+
+```bash
+python3 -m venv .venv-linux
+.venv-linux/bin/pip install -r requirements-linux.txt
+sudo scripts/install_linux_runtime.sh <ydotool-1.0.4> <ydotoold-1.0.4> "$USER"
+```
+
+如需可选 YOLO UI 模型支持，再安装 `requirements-linux-vision.txt`；基础 Desktop Control 不依赖该大体积组件。
 
 `codex_desktop_control_workflow` 最多连续执行 50 步，默认在首个失败处停止，也可用 `continue_on_error=true` 继续。它不增加确认、白名单或应用限制。`observe_changes=true` 会返回整个工作流执行前后的像素变化比例和变化区域。
 

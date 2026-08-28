@@ -1,0 +1,2 @@
+-r requirements-linux.txt
+ultralytics==8.4.41

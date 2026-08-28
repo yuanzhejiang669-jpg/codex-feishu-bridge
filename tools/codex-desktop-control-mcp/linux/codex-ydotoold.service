@@ -1,0 +1,16 @@
+[Unit]
+Description=Codex Desktop Control ydotool input daemon
+After=systemd-udev-settle.service
+
+[Service]
+Type=simple
+User=root
+RuntimeDirectory=ydotoold
+RuntimeDirectoryMode=0755
+EnvironmentFile=/etc/default/codex-desktop-control
+ExecStart=/usr/local/sbin/ydotoold --socket-path=/run/ydotoold/socket --socket-perm=0660 --socket-own=${CODEX_DESKTOP_UID}:${CODEX_DESKTOP_GID}
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

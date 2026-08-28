@@ -1,6 +1,6 @@
 # Codex Feishu Bridge Desktop
 
-Windows and macOS desktop distribution for Codex Feishu Bridge. The packaged app is the recommended user-facing installation; root-level PowerShell scripts and the web control panel remain advanced compatibility tools.
+Windows, macOS, and Ubuntu desktop distribution for Codex Feishu Bridge. The packaged app is the recommended user-facing installation; root-level PowerShell scripts and the web control panel remain advanced compatibility tools.
 
 ## User workflow
 
@@ -12,7 +12,7 @@ Windows and macOS desktop distribution for Codex Feishu Bridge. The packaged app
 
 The application supports native login startup and close-to-tray behavior. A terminal process does not need to remain open. On Windows, the System page can check, download, and install stable GitHub Releases while protecting active tasks, then restore previously enabled managed Bots.
 
-Windows releases are currently unsigned and may trigger SmartScreen. macOS test releases are unsigned and unnotarized, so Gatekeeper may require explicit user approval. macOS in-app installation remains disabled until Developer ID signing and notarization are configured.
+Windows releases are currently unsigned and may trigger SmartScreen. macOS test releases are unsigned and unnotarized, so Gatekeeper may require explicit user approval. Ubuntu publishes an x64 `.deb`; install it with `sudo apt install ./Codex-Feishu-Bridge-<version>-linux-amd64.deb`. macOS and Linux in-app installation remain disabled.
 
 ## Current capabilities
 
@@ -22,7 +22,7 @@ Windows releases are currently unsigned and may trigger SmartScreen. macOS test 
 - Shared or isolated Codex Home selection and workspace factory queues.
 - OpenAI login, third-party Responses Providers, and Chat Completions Providers through the bundled mimo2codex adapter.
 - Minimal real Provider validation, model and reasoning selection, and protected whole-space source switching.
-- Windows DPAPI and macOS Keychain-backed Provider credential encryption.
+- Windows DPAPI, macOS Keychain, and Linux Secret Service-backed Provider credential encryption. Linux refuses Electron's insecure `basic_text` fallback.
 - Selective MCP and Skills source/target preview and migration.
 - Bundled Node.js, lark-cli, and version-matched Bridge engine.
 - Bot start, active-run-aware stop/restart, login startup, tray operation, and rate-limited crash recovery.
@@ -43,6 +43,7 @@ npm run pack
 npm run smoke:packaged-engine
 npm run dist:win
 npm run dist:mac
+npm run dist:linux
 ```
 
 Build output is generated under:

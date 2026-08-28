@@ -8,16 +8,21 @@ const workflow = fs.readFileSync(
   "utf8",
 );
 
-test("stable GitHub releases publish verified Windows and macOS desktop assets", () => {
+test("stable GitHub releases publish verified Windows, macOS, and Linux desktop assets", () => {
   assert.match(workflow, /^\s{2}build-windows:\s*$/m);
   assert.match(workflow, /^\s{2}build-macos:\s*$/m);
-  assert.match(workflow, /^\s{4}needs: \[build-windows, build-macos\]\s*$/m);
+  assert.match(workflow, /^\s{2}build-linux:\s*$/m);
+  assert.match(workflow, /^\s{4}needs: \[build-windows, build-macos, build-linux\]\s*$/m);
   assert.match(workflow, /npm run dist:mac/);
   assert.match(workflow, /CSC_IDENTITY_AUTO_DISCOVERY: "false"/);
   assert.match(workflow, /macos-release/);
   assert.match(workflow, /latest-mac\.yml/);
   assert.match(workflow, /checksums-macos\.txt/);
   assert.match(workflow, /Codex-Feishu-Bridge-\*-mac-\*\.dmg/);
+  assert.match(workflow, /npm run dist:linux/);
+  assert.match(workflow, /linux-release/);
+  assert.match(workflow, /checksums-linux\.txt/);
+  assert.match(workflow, /Codex-Feishu-Bridge-\*-linux-amd64\.deb/);
   assert.match(workflow, /Missing required release asset/);
 });
 

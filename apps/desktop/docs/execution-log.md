@@ -1837,3 +1837,29 @@ Adversarial review covered the three most likely release regressions:
 1. One platform could publish while the other failed. The publish job now depends on both build jobs and checks every required asset before creating the Release.
 2. A package could contain the wrong Node or Lark CLI architecture. The existing macOS verifier identifies both bundled executables with `/usr/bin/file` and requires verified x64 and arm64 application bundles.
 3. Users could mistake the public macOS package for a notarized build or expect silent in-app updates. Release documentation now states the unsigned trust model and first-launch approval flow; the existing updater continues to reject unsigned macOS automatic installation.
+
+## 2026-08-28 - Ubuntu 24.04 x64 client on isolated branch
+
+- Created the independent `linux/ubuntu-client` worktree from `origin/main` 0.8.19; the dirty Pi branch and `main` were not modified.
+- Added Linux Codex CLI discovery, XDG login autostart, Linux Secret Service credential protection, bundled x64 Node/Lark tools, Debian packaging, checksums, package extraction verification, and an independent Linux release job.
+- Windows verification passed 200/203 tests with three expected platform skips. The physical Ubuntu 24.04 device passed 194/203 tests with nine Windows/macOS skips and no failures.
+- A real Ubuntu build first validated the 0.8.19 packaging path. The branch package version was then separated as `0.8.19-linux.1` so it cannot be mistaken for the unchanged main release. The verifier extracts the `.deb` and checks version, architecture, executability, bundled Node/Lark tools, Bridge engine, formula dependencies, and an isolated packaged-engine load; a systemd user-session smoke also exits successfully.
+- Installed `0.8.19-linux.1` on the physical Ubuntu 24.04 x64 device and verified the installed compatibility report with Bridge protocol 1, bundled Node 24.18.0, bundled lark-cli 1.0.69, and Codex CLI 0.150.1. The Debian artifact is `/home/yzj666/Codex-Feishu-Bridge-0.8.19-linux.1-linux-amd64.deb` with SHA-256 `eacb877c8babcddc4f6a2dce3ea6a0152f08c979ac3390116715e65b3a447575` for the initial validated build; the release artifact will be rebuilt from the final branch commit before publication.
+- Configured passwordless sudo through `/etc/sudoers.d/90-yzj666-nopasswd` with mode `0440` and a successful `visudo` validation. Configured a fixed bottom GNOME dock and XDG login startup for the client.
+- Installed and exercised Browser Control, Ubuntu Desktop Control, Tavily, Firecrawl, and MinerU. Browser Control completed a real Chrome screenshot, Desktop Control performed real Ubuntu input and screenshot operations, Tavily completed a real search, and MinerU parsed two real PDF smoke inputs. Firecrawl routing and tests pass, but all six currently supplied API keys return upstream HTTP 402 and remain an external quota blocker.
+- Configured the shared global Codex Home `/home/yzj666/.codex` with encrypted Backup API and DeepSeek credentials and no plaintext key in repository configuration. All five Bots use `backup-api/gpt-5.6-sol` by default.
+- Registered `codex-ubuntu-1` through `codex-ubuntu-5` sequentially. Each Bot has an independent workspace under `/home/yzj666/Documents/Codex/workspaces/feishu-bridge-codex-ubuntu-N`, while all five share `/home/yzj666/.codex`. Final readiness verification reports 41/41 recommended permissions, verified Lark user identity, a verified `im.message.receive_v1` event, a healthy Provider and Codex runtime, and an online Bridge for every Bot. Exactly five event consumers are running and every Bot is idle with zero active runs.
+
+Adversarial review targets the three most likely failures after three months:
+
+1. A clean Ubuntu install could lack Electron runtime libraries. A real first build exposed that a custom `deb.depends` list replaced the defaults; the override was removed and release verification now requires GTK, NSS, XDG, and Secret Service dependencies.
+2. A client upgrade could leave login startup pointing to an obsolete executable. Startup rewrites only its own marked XDG entry atomically on launch and refuses to overwrite unrelated files; enable, refresh, disable, quoting, and collision tests pass.
+3. Linux credential storage could silently fall back to plaintext. The client inspects Electron's selected backend, rejects `basic_text`, exposes the failure in system state, and has explicit accept/reject regression tests.
+
+Deployment adversarial review added after physical-device acceptance:
+
+1. A reboot could start the desktop but not recover the five Bots. The installed client owns an XDG login entry, every Bot has `autoStart` enabled, and the system page reports five startup Bots. Readiness and process inspection independently confirm five live Bridge PIDs and five event consumers.
+2. Shared global configuration could accidentally collapse Bot isolation. Each Bot has a distinct managed configuration, Lark profile, runtime root, log directory, state directory, and workspace; only the intended `/home/yzj666/.codex` configuration space is shared. Five distinct App IDs and five single consumers were verified.
+3. A package could be published from a tree different from the reviewed source. Publication is deferred until the branch is committed and pushed; the `.deb` will then be rebuilt from that exact commit, verified by the Linux package verifier, checksummed, and uploaded only to a Linux prerelease without changing `main` or the stable `v0.8.19` Release.
+
+- Final pre-publication verification on Windows passed all 117 Bridge tests and 200/203 Desktop tests, with only the three expected macOS platform skips. `git diff --check` reports no whitespace errors. The physical Ubuntu readiness audit remains green for all five Bots with zero active runs.

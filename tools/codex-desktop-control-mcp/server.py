@@ -19,8 +19,12 @@ from workflow_runtime import compare_images as _compare_images
 from workflow_runtime import execute_workflow as _execute_workflow
 
 IS_MACOS = sys.platform == 'darwin'
+IS_LINUX = sys.platform.startswith('linux')
+IS_WINDOWS = sys.platform == 'win32'
 if IS_MACOS:
     import macos_backend as _macos
+elif IS_LINUX:
+    import linux_backend as _linux
 else:
     import windows_input as _windows_input
 
@@ -97,6 +101,8 @@ def _import_win32():
 def _get_screen_info() -> dict[str, Any]:
     if IS_MACOS:
         return _macos.screen_info()
+    if IS_LINUX:
+        return _linux.screen_info()
     win32api, win32con, _win32gui, _win32ui, _clip, windll = _import_win32()
     from ctypes import c_int, c_void_p
 
@@ -265,6 +271,8 @@ def _trace_self_check(label: str) -> None:
 def _client_rect_on_screen(hwnd: int) -> tuple[int, int, int, int]:
     if IS_MACOS:
         return tuple(int(value) for value in _macos.resolve_window(hwnd)['rect'])
+    if IS_LINUX:
+        return tuple(int(value) for value in _linux.resolve_window(hwnd)['rect'])
     _api, _con, win32gui, _ui, _clip, _windll = _import_win32()
     left, top = win32gui.ClientToScreen(hwnd, (0, 0))
     _client_left, _client_top, width, height = win32gui.GetClientRect(hwnd)
@@ -274,6 +282,8 @@ def _client_rect_on_screen(hwnd: int) -> tuple[int, int, int, int]:
 def _capture_window(hwnd: int, client_area: bool = False):
     if IS_MACOS:
         return _macos.capture_window(hwnd, client_area=client_area)
+    if IS_LINUX:
+        return _linux.capture_window(hwnd, client_area=client_area)
     Image, ImageGrab = _import_pil()
     _win32api, _win32con, win32gui, win32ui, _clip, windll = _import_win32()
     window_left, window_top, window_right, window_bottom = win32gui.GetWindowRect(hwnd)
@@ -315,6 +325,8 @@ def _capture_window(hwnd: int, client_area: bool = False):
 def _capture_screen(bbox=None):
     if IS_MACOS:
         return _macos.capture_screen(bbox)
+    if IS_LINUX:
+        return _linux.capture_screen(bbox)
     _Image, ImageGrab = _import_pil()
     if bbox is not None:
         return ImageGrab.grab(bbox=bbox, all_screens=True)
@@ -334,6 +346,8 @@ def _window_matches(title: str, title_contains: str | None) -> bool:
 def _list_windows(title_contains: str | None = None, visible_only: bool = True) -> list[dict[str, Any]]:
     if IS_MACOS:
         return _macos.list_windows(title_contains=title_contains, visible_only=visible_only)
+    if IS_LINUX:
+        return _linux.list_windows(title_contains=title_contains, visible_only=visible_only)
     _api, _con, win32gui, _ui, _clip, _windll = _import_win32()
     windows: list[dict[str, Any]] = []
 
@@ -369,6 +383,8 @@ def _resolve_hwnd(hwnd: int | None = None, title_contains: str | None = None) ->
 def _activate(hwnd: int) -> dict[str, Any]:
     if IS_MACOS:
         return _macos.activate_window(hwnd)
+    if IS_LINUX:
+        return _linux.activate_window(hwnd)
     win32api, _con, win32gui, _ui, _clip, windll = _import_win32()
     if win32gui.IsIconic(hwnd):
         win32gui.ShowWindow(hwnd, 9)
@@ -408,6 +424,8 @@ def _activate(hwnd: int) -> dict[str, Any]:
 def _foreground_window_info() -> dict[str, Any]:
     if IS_MACOS:
         return _macos.foreground_window_info()
+    if IS_LINUX:
+        return _linux.foreground_window_info()
     _api, _con, win32gui, _ui, _clip, _windll = _import_win32()
     hwnd = win32gui.GetForegroundWindow()
     if not hwnd:
@@ -620,6 +638,8 @@ def _capture_source(
         resolved = _resolve_hwnd(hwnd=hwnd, title_contains=title_contains)
         if IS_MACOS:
             left, top, right, bottom = _macos.resolve_window(resolved)['rect']
+        elif IS_LINUX:
+            left, top, right, bottom = _linux.resolve_window(resolved)['rect']
         else:
             _api, _con, win32gui, _ui, _clip, _windll = _import_win32()
             left, top, right, bottom = _client_rect_on_screen(resolved) if client_area else win32gui.GetWindowRect(resolved)
@@ -638,6 +658,9 @@ def _capture_source(
 def _send_hotkey(keys: list[str], delay_seconds: float = 0.02) -> None:
     if IS_MACOS:
         _macos.send_hotkey(keys, delay_seconds=delay_seconds)
+        return
+    if IS_LINUX:
+        _linux.send_hotkey(keys, delay_seconds=delay_seconds)
         return
     win32api, win32con, _gui, _ui, _clip, _windll = _import_win32()
     key_map = {
@@ -743,6 +766,16 @@ def _uia_status_payload() -> dict[str, Any]:
             'backend': 'macos-accessibility',
             'accessibility_permission': bool(accessibility.get('available')),
             'reason': accessibility.get('reason'),
+            'fallbacks': ['ocr', 'visual_fallback', 'coordinate_actions'],
+        }
+    if IS_LINUX:
+        backend = _linux.backend_status()
+        return {
+            'ok': True,
+            'available': False,
+            'backend': None,
+            'reason': 'Linux Wayland semantic UI automation is unavailable',
+            'linux_backend': backend,
             'fallbacks': ['ocr', 'visual_fallback', 'coordinate_actions'],
         }
     modules = {name: _module_available(name) for name in UIA_OPTIONAL_MODULES}
@@ -1003,12 +1036,12 @@ def _status_payload() -> dict[str, Any]:
         ('ultralytics', 'ultralytics'),
         ('torch', 'torch'),
     ]
-    if not IS_MACOS:
+    if IS_WINDOWS:
         dependency_modules.append(('pywin32', 'win32gui'))
     for name, module in dependency_modules:
         dependencies[name] = _module_available(module)
     dependencies['numpy'] = _NUMPY is not None
-    if not IS_MACOS:
+    if IS_WINDOWS:
         for module in UIA_OPTIONAL_MODULES:
             dependencies[module] = _module_available(module)
     try:
@@ -1031,7 +1064,7 @@ def _status_payload() -> dict[str, Any]:
             'restore_text_formats_supported': True,
             'restore_non_text_formats_supported': False,
         },
-        'permissions': _macos.accessibility_status() if IS_MACOS else None,
+        'permissions': _macos.accessibility_status() if IS_MACOS else (_linux.backend_status() if IS_LINUX else None),
         'uia': _uia_status_payload(),
         'error_codes': [
             'VALIDATION_ERROR',
@@ -1105,6 +1138,8 @@ def codex_desktop_control_uia_find(
                 title_contains=title_contains, exact=exact, limit=limit,
             )
             return {'ok': True, 'backend': 'macos-accessibility', 'count': len(found), 'matches': found}
+        if IS_LINUX:
+            raise RuntimeError('Linux Wayland semantic UI automation is unavailable; use OCR or coordinate actions')
         found = _uia_find_controls(
             query=query,
             name_contains=name_contains,
@@ -1150,6 +1185,8 @@ def codex_desktop_control_uia_tree(
                 'children': elements,
             }
             return {'ok': True, 'backend': 'macos-accessibility', 'tree': root, 'truncated': len(elements) >= int(limit)}
+        if IS_LINUX:
+            raise RuntimeError('Linux Wayland semantic UI automation is unavailable; use OCR or coordinate actions')
         root = _uia_root(hwnd=hwnd, title_contains=title_contains)
         max_depth = max(0, min(int(max_depth), 8))
         limit_state = {'remaining': max(0, min(int(limit), 500))}
@@ -1204,6 +1241,8 @@ def codex_desktop_control_uia_click(
                     delay_seconds=float(verify_delay_ms) / 1000.0,
                 )
             return result
+        if IS_LINUX:
+            raise RuntimeError('Linux Wayland semantic UI automation is unavailable; use OCR or coordinate actions')
         found = _uia_find_controls(
             query=query,
             name_contains=name_contains,
@@ -1247,6 +1286,8 @@ def codex_desktop_control_self_check() -> dict[str, Any]:
         if not checks['uia'].get('available'):
             if IS_MACOS:
                 warnings.append('macOS semantic Accessibility-tree controls are unavailable; window, screenshot, OCR, visual, and coordinate tools remain available.')
+            elif IS_LINUX:
+                warnings.append('Linux Wayland semantic controls are unavailable; screenshot, OCR, visual fallback, clipboard, and coordinate input remain available.')
             else:
                 warnings.append('UI Automation semantic controls are not available; install the optional uiautomation package to enable name/AutomationId/control-type actions.')
     except Exception as exc:
@@ -1293,6 +1334,10 @@ def codex_desktop_control_self_check() -> dict[str, Any]:
     try:
         if IS_MACOS:
             clipboard = _macos.clipboard_read_text()
+            if not clipboard.get('ok'):
+                raise RuntimeError(clipboard.get('error') or 'clipboard is not readable')
+        elif IS_LINUX:
+            clipboard = _linux.clipboard_read_text()
             if not clipboard.get('ok'):
                 raise RuntimeError(clipboard.get('error') or 'clipboard is not readable')
         else:
@@ -1761,6 +1806,8 @@ def _mouse_button_payload(
             return _fail('action must be click, down, or up', 'VALIDATION_ERROR')
         if IS_MACOS:
             _macos.mouse_button(ix, iy, button=normalized_button, action=normalized_action, clicks=clicks)
+        elif IS_LINUX:
+            _linux.mouse_button(ix, iy, button=normalized_button, action=normalized_action, clicks=clicks)
         else:
             _windows_input.mouse_button(ix, iy, button=normalized_button, action=normalized_action, clicks=clicks)
         return {
@@ -1855,6 +1902,8 @@ def codex_desktop_control_move_mouse(
         ix, iy, screen = _screen_point(x, y)
         if IS_MACOS:
             _macos.move_mouse(ix, iy, duration_ms=max(0, int(duration_ms)))
+        elif IS_LINUX:
+            _linux.move_mouse(ix, iy, duration_ms=max(0, int(duration_ms)))
         else:
             _windows_input.move_mouse(ix, iy, duration_ms=max(0, int(duration_ms)))
         return {'ok': True, 'x': ix, 'y': iy, 'duration_ms': max(0, int(duration_ms)), 'coordinate_system': screen['coordinate_system']}
@@ -1882,10 +1931,14 @@ def codex_desktop_control_scroll(
             ix, iy, _screen = _screen_point(x, y)
             if IS_MACOS:
                 _macos.move_mouse(ix, iy)
+            elif IS_LINUX:
+                _linux.move_mouse(ix, iy)
             else:
                 _windows_input.move_mouse(ix, iy)
         if IS_MACOS:
             _macos.scroll(int(delta_y), int(delta_x))
+        elif IS_LINUX:
+            _linux.scroll(int(delta_y), int(delta_x))
         else:
             _windows_input.scroll(int(delta_y), int(delta_x))
         return {'ok': True, 'delta_y': int(delta_y), 'delta_x': int(delta_x), 'x': x, 'y': y}
@@ -1916,6 +1969,8 @@ def codex_desktop_control_drag(
             return _fail('button must be left, right, or middle', 'VALIDATION_ERROR')
         if IS_MACOS:
             _macos.drag(sx, sy, ex, ey, duration_ms=max(0, int(duration_ms)), button=normalized_button)
+        elif IS_LINUX:
+            _linux.drag(sx, sy, ex, ey, duration_ms=max(0, int(duration_ms)), button=normalized_button)
         else:
             _windows_input.drag(sx, sy, ex, ey, duration_ms=max(0, int(duration_ms)), button=normalized_button)
         return {
@@ -2044,6 +2099,8 @@ def codex_desktop_control_type_text(
                     time.sleep(int(interval_ms) / 1000.0)
             else:
                 _macos.type_text(text)
+        elif IS_LINUX:
+            _linux.type_text(text, interval_ms=max(0, int(interval_ms)))
         else:
             _windows_input.type_text(text, interval_ms=max(0, int(interval_ms)))
         return {'ok': True, 'length': len(text), 'interval_ms': max(0, int(interval_ms)), 'method': 'direct_unicode_input'}
@@ -2078,6 +2135,10 @@ def codex_desktop_control_paste_text(
             if restore_clipboard:
                 clipboard_snapshot = _macos.clipboard_read_text()
             _macos.clipboard_write_text(text)
+        elif IS_LINUX:
+            if restore_clipboard:
+                clipboard_snapshot = _linux.clipboard_read_text()
+            _linux.clipboard_write_text(text)
         else:
             _api, win32con, _gui, _ui, win32clipboard, _windll = _import_win32()
             _open_clipboard_with_retry()
@@ -2115,6 +2176,12 @@ def codex_desktop_control_paste_text(
                 if IS_MACOS:
                     if clipboard_snapshot.get('ok'):
                         _macos.clipboard_write_text(clipboard_snapshot.get('text') or '')
+                        restored = {'ok': True, 'restored_format_count': 1}
+                    else:
+                        restored = _fail(clipboard_snapshot.get('error') or 'clipboard snapshot failed', 'CLIPBOARD_RESTORE_FAILED')
+                elif IS_LINUX:
+                    if clipboard_snapshot.get('ok'):
+                        _linux.clipboard_write_text(clipboard_snapshot.get('text') or '')
                         restored = {'ok': True, 'restored_format_count': 1}
                     else:
                         restored = _fail(clipboard_snapshot.get('error') or 'clipboard snapshot failed', 'CLIPBOARD_RESTORE_FAILED')

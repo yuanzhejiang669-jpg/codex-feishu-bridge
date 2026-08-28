@@ -111,8 +111,53 @@ jobs:
             apps/desktop/out/latest-mac.yml
             apps/desktop/out/checksums-macos.txt
 
+  build-linux:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: apps/desktop
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            apps/desktop/package-lock.json
+            apps/desktop/proxy-runtime/package-lock.json
+
+      - name: Verify tag matches package version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          test "$GITHUB_REF_NAME" = "v$version"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test desktop client
+        run: npm run check
+
+      - name: Build and verify Ubuntu release
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: npm run dist:linux
+
+      - name: Upload Linux assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-release
+          if-no-files-found: error
+          path: |
+            apps/desktop/out/Codex-Feishu-Bridge-*-linux-amd64.deb
+            apps/desktop/out/checksums-linux.txt
+
   publish:
-    needs: [build-windows, build-macos]
+    needs: [build-windows, build-macos, build-linux]
     runs-on: ubuntu-latest
     steps:
       - name: Download verified assets
@@ -141,6 +186,8 @@ jobs:
             "Codex-Feishu-Bridge-${version}-mac-arm64.dmg"
             "Codex-Feishu-Bridge-${version}-mac-arm64.zip"
             "latest-mac.yml"
+            "checksums-linux.txt"
+            "Codex-Feishu-Bridge-${version}-linux-amd64.deb"
           )
           for name in "${required[@]}"; do
             if [[ ! -f "release-assets/$name" ]]; then
@@ -152,7 +199,7 @@ jobs:
           for asset in "${assets[@]}"; do
             name="$(basename "$asset")"
             case "$name" in
-              checksums-windows.txt|checksums.txt|checksums-macos.txt|latest.yml|latest-mac.yml|Codex-Feishu-Bridge-Setup-"${version}".exe|Codex-Feishu-Bridge-Setup-"${version}".exe.blockmap|Codex-Feishu-Bridge-"${version}"-mac-x64.dmg|Codex-Feishu-Bridge-"${version}"-mac-x64.zip|Codex-Feishu-Bridge-"${version}"-mac-x64.zip.blockmap|Codex-Feishu-Bridge-"${version}"-mac-arm64.dmg|Codex-Feishu-Bridge-"${version}"-mac-arm64.zip|Codex-Feishu-Bridge-"${version}"-mac-arm64.zip.blockmap) ;;
+              checksums-windows.txt|checksums.txt|checksums-macos.txt|checksums-linux.txt|latest.yml|latest-mac.yml|Codex-Feishu-Bridge-Setup-"${version}".exe|Codex-Feishu-Bridge-Setup-"${version}".exe.blockmap|Codex-Feishu-Bridge-"${version}"-mac-x64.dmg|Codex-Feishu-Bridge-"${version}"-mac-x64.zip|Codex-Feishu-Bridge-"${version}"-mac-x64.zip.blockmap|Codex-Feishu-Bridge-"${version}"-mac-arm64.dmg|Codex-Feishu-Bridge-"${version}"-mac-arm64.zip|Codex-Feishu-Bridge-"${version}"-mac-arm64.zip.blockmap|Codex-Feishu-Bridge-"${version}"-linux-amd64.deb) ;;
               *) echo "Unexpected release asset: $name" >&2; exit 1 ;;
             esac
           done

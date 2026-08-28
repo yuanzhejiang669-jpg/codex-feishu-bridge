@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { cleanVersion, findMacBundleRuntime, firstExecutable, inspectCodex, inspectMacCodex, inspectRuntimeDirectory, loginState, macCodexCandidates, parseJsonOutput } = require("../src/main/services/environment.cjs");
+const { cleanVersion, findMacBundleRuntime, firstExecutable, inspectCodex, inspectLinuxCodex, inspectMacCodex, inspectRuntimeDirectory, linuxCodexCandidates, loginState, macCodexCandidates, parseJsonOutput } = require("../src/main/services/environment.cjs");
 
 test("parseJsonOutput tolerates a BOM and diagnostic prefix", () => {
   assert.deepEqual(parseJsonOutput("\uFEFFdiagnostic\n{\"packageFound\":true}\n"), { packageFound: true });
@@ -54,6 +54,26 @@ test("macOS Codex candidates include current ChatGPT and legacy Codex bundles", 
 
 test("firstExecutable ignores missing candidates", () => {
   assert.equal(firstExecutable([path.join(os.tmpdir(), "missing-codex"), process.execPath]), process.execPath);
+});
+
+test("Linux Codex candidates include explicit, system, and user-local installations", () => {
+  const candidates = linuxCodexCandidates("/home/tester", {
+    CODEX_CLI_BIN: "/opt/codex/bin/codex",
+    PATH: "/custom/bin:/usr/bin",
+  });
+  assert.equal(candidates[0], "/opt/codex/bin/codex");
+  assert.ok(candidates.includes("/usr/local/bin/codex"));
+  assert.ok(candidates.includes("/home/tester/.local/bin/codex"));
+  assert.ok(candidates.includes("/custom/bin/codex"));
+});
+
+test("Linux Codex inspection accepts an executable CLI candidate", async () => {
+  const result = await inspectLinuxCodex({ candidates: [process.execPath] });
+  assert.equal(result.supported, true);
+  assert.equal(result.platform, "linux");
+  assert.equal(result.runtimeFound, true);
+  assert.equal(result.runtimePath, process.execPath);
+  assert.match(result.cliVersion, /^\d+\.\d+\.\d+/);
 });
 
 test("Windows inspection never executes the protected source runtime without a cache", { skip: process.platform !== "win32" }, async () => {
