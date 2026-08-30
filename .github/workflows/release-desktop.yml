@@ -14,6 +14,7 @@ concurrency:
 
 jobs:
   build-windows:
+    if: ${{ !contains(github.ref_name, '-linux.') }}
     runs-on: windows-latest
     defaults:
       run:
@@ -63,6 +64,7 @@ jobs:
             apps/desktop/out/checksums-windows.txt
 
   build-macos:
+    if: ${{ !contains(github.ref_name, '-linux.') }}
     runs-on: macos-15
     defaults:
       run:
@@ -158,6 +160,7 @@ jobs:
 
   publish:
     needs: [build-windows, build-macos, build-linux]
+    if: ${{ !contains(github.ref_name, '-linux.') }}
     runs-on: ubuntu-latest
     steps:
       - name: Download verified assets
@@ -208,4 +211,34 @@ jobs:
           else
             gh release create "$GITHUB_REF_NAME" "${assets[@]}" --repo "$GITHUB_REPOSITORY" \
               --title "Codex Feishu Bridge $GITHUB_REF_NAME" --generate-notes --latest
+          fi
+
+  publish-linux:
+    needs: [build-linux]
+    if: ${{ contains(github.ref_name, '-linux.') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download verified Ubuntu assets
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-release
+          path: release-assets
+
+      - name: Publish isolated Ubuntu prerelease
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          deb="release-assets/Codex-Feishu-Bridge-${version}-linux-amd64.deb"
+          checksums="release-assets/checksums-linux.txt"
+          test -f "$deb"
+          test -f "$checksums"
+          grep -F "  $(basename "$deb")" "$checksums" >/dev/null
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "$deb" "$checksums" --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$GITHUB_REF_NAME" "$deb" "$checksums" --repo "$GITHUB_REPOSITORY" \
+              --title "Codex Feishu Bridge ${version} Ubuntu" --generate-notes --prerelease
           fi

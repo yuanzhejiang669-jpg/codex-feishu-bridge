@@ -19,6 +19,18 @@ function assessUpdateSupport(options = {}) {
   if (!options.packaged) return { supported: false, reason: "开发模式不连接更新服务" };
   if (options.smokeTest || options.captureMode) return { supported: false, reason: "测试或截图模式不连接更新服务" };
   if (options.platform === "win32") return { supported: true, reason: "" };
+  if (options.platform === "linux") {
+    if (options.arch && options.arch !== "x64") return { supported: false, reason: "当前仅支持 Ubuntu x64 客户端内更新" };
+    const exists = options.exists || require("node:fs").existsSync;
+    const required = ["/bin/bash", "/usr/bin/apt-get", "/usr/bin/pkexec", "/usr/bin/sha256sum"];
+    if (!required.every((filePath) => exists(filePath))) {
+      return { supported: false, reason: "系统缺少 apt-get、PolicyKit 或 SHA-256 校验工具，无法安全更新" };
+    }
+    if (!String(options.executablePath || "").startsWith("/opt/Codex Feishu Bridge/")) {
+      return { supported: false, reason: "当前不是已安装的 Ubuntu DEB 客户端，无法使用客户端内更新" };
+    }
+    return { supported: true, reason: "" };
+  }
   if (options.platform !== "darwin") return { supported: false, reason: "当前操作系统暂不支持客户端内更新" };
 
   const appPath = macApplicationPath(options.executablePath);

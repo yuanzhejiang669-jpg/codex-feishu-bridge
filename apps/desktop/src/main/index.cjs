@@ -64,6 +64,7 @@ const { inspectDataSchema, migrateDesktopData } = require("./services/data-migra
 const { assessCompatibility } = require("./services/compatibility.cjs");
 const { createUpdaterService } = require("./services/updater.cjs");
 const { assessUpdateSupport } = require("./services/update-support.cjs");
+const { createLinuxReleaseUpdater } = require("./services/linux-release-updater.cjs");
 const {
   clearRecoveryMarker,
   restoreUpdateBots,
@@ -394,12 +395,28 @@ function createDesktopUpdater() {
     smokeTest,
     captureMode: Boolean(capturePath),
     platform: process.platform,
+    arch: process.arch,
     executablePath: process.execPath,
   });
+  const platformUpdater = process.platform === "linux"
+    ? createLinuxReleaseUpdater({
+        currentVersion: app.getVersion(),
+        cacheRoot: path.join(app.getPath("userData"), "updates"),
+        helperPath: app.isPackaged
+          ? path.join(process.resourcesPath, "scripts", "install-linux-update.sh")
+          : path.join(__dirname, "..", "..", "resources", "scripts", "install-linux-update.sh"),
+        executablePath: process.execPath,
+        logPath: path.join(managedDataRoot(), "logs", "linux-update.log"),
+        quit: () => {
+          isQuitting = true;
+          app.quit();
+        },
+      })
+    : autoUpdater;
   return createUpdaterService({
     supported: updateSupport.supported,
     unsupportedReason: updateSupport.reason,
-    updater: autoUpdater,
+    updater: platformUpdater,
     currentVersion: app.getVersion(),
     inspectBots: async () => inspectManagedBots(managedDataRoot(), runtimeLocalAppData()),
     prepareInstall: prepareUpdateInstall,

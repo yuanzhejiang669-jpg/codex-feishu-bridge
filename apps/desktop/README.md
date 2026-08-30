@@ -10,9 +10,9 @@ Windows, macOS, and Ubuntu desktop distribution for Codex Feishu Bridge. The pac
 4. Create a Bot with existing Feishu credentials or in-client QR registration, or adopt a compatible legacy Bot.
 5. Configure Providers and selectively migrate MCP servers and Skills into isolated Codex Homes.
 
-The application supports native login startup and close-to-tray behavior. A terminal process does not need to remain open. On Windows, the System page can check, download, and install stable GitHub Releases while protecting active tasks, then restore previously enabled managed Bots.
+The application supports native login startup and close-to-tray behavior. A terminal process does not need to remain open. On Windows and installed Ubuntu x64 DEB clients, the System page can check, download, verify, and install matching GitHub Releases while protecting active tasks, then restore previously enabled managed Bots. Ubuntu installation uses a normal PolicyKit administrator prompt and does not require permanent passwordless sudo.
 
-Windows releases are currently unsigned and may trigger SmartScreen. macOS test releases are unsigned and unnotarized, so Gatekeeper may require explicit user approval. Ubuntu publishes an x64 `.deb`; install it with `sudo apt install ./Codex-Feishu-Bridge-<version>-linux-amd64.deb`. macOS and Linux in-app installation remain disabled.
+Windows releases are currently unsigned and may trigger SmartScreen. macOS test releases are unsigned and unnotarized, so Gatekeeper may require explicit user approval. Ubuntu publishes an x64 `.deb`; the first installation uses `sudo apt install ./Codex-Feishu-Bridge-<version>-linux-amd64.deb`, and later versions can be installed from the System page after SHA-256 verification. macOS in-app installation remains disabled until packages have formal Developer ID signing and notarization.
 
 ## Current capabilities
 

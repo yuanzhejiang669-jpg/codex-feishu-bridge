@@ -43,9 +43,11 @@ try {
   const manifestPath = path.join(resources, "tools", "manifest.json");
   const bridgePath = path.join(resources, "engine", "codex-feishu-bridge.mjs");
   const proxyLicense = path.join(resources, "proxy", "node_modules", "mimo2codex", "LICENSE");
-  for (const required of [nodePath, larkPath, manifestPath, bridgePath, proxyLicense]) {
+  const updateHelper = path.join(resources, "scripts", "install-linux-update.sh");
+  for (const required of [nodePath, larkPath, manifestPath, bridgePath, proxyLicense, updateHelper]) {
     if (!fs.existsSync(required)) throw new Error(`Packaged Linux item is missing: ${required}`);
   }
+  execFileSync("/bin/bash", ["-n", updateHelper], { stdio: "inherit" });
   for (const executable of [nodePath, larkPath]) fs.accessSync(executable, fs.constants.X_OK);
   const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
   if (manifest.platform !== "linux" || manifest.architecture !== "x64") {

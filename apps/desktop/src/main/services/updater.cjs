@@ -52,7 +52,16 @@ function createUpdaterService(options) {
     try {
       transaction = await options.prepareInstall(plan.restartNames, state.latestVersion);
       publish({ status: "installing", progress: 100, error: "", activeBots: [] });
-      setImmediate(() => updater.quitAndInstall(true, true));
+      await new Promise((resolve, reject) => {
+        setImmediate(() => {
+          try {
+            updater.quitAndInstall(true, true);
+            resolve();
+          } catch (error) {
+            reject(error);
+          }
+        });
+      });
     } catch (error) {
       await transaction?.rollback?.();
       publish({ status: "downloaded", error: String(error?.message || error), activeBots: [] });
