@@ -301,7 +301,7 @@ export function createFormulaImageService({
         args: ["--disable-gpu", "--hide-scrollbars"],
         timeout: renderTimeoutMs,
       });
-      const page = await browser.newPage({ viewport: { width: 1200, height: 900 }, deviceScaleFactor: 1 });
+      const page = await browser.newPage({ viewport: { width: 1200, height: 900 }, deviceScaleFactor: 2 });
       page.setDefaultTimeout(renderTimeoutMs);
 
       for (const plans of blockPlans) {
@@ -333,7 +333,8 @@ export function createFormulaImageService({
           try {
             const html = formulaCaptureHtml(plan, katex, markdown);
             await page.setContent(html, { waitUntil: "load", timeout: Math.max(1_000, deadline - Date.now()) });
-            await page.locator(".capture").screenshot({
+            await prepareFormulaCapture(page, { timeoutMs: Math.max(1_000, deadline - Date.now()) });
+            await page.locator(".cf-formula-capture").screenshot({
               path: imagePath,
               type: "png",
               timeout: Math.max(1_000, deadline - Date.now()),
@@ -574,39 +575,74 @@ function pushOutputBlock(output, plan) {
   else output.push({ kind: "text", content, streaming: false });
 }
 
-function formulaCaptureHtml(plan, katex, markdown) {
+export function formulaCaptureHtml(plan, katex, markdown) {
   const body = plan.mode === "block"
-    ? katex.renderToString(plan.formulas[0].latex, { displayMode: true, throwOnError: false, strict: "ignore" })
+    ? katex.renderToString(plan.formulas[0].latex, { displayMode: true, throwOnError: true, strict: "ignore" })
     : renderMixedHtml(plan.content, katex, markdown);
   const css = embeddedKatexCss();
   const compact = plan.mode === "block";
+  const width = compact ? 640 : containsMarkdownTable(plan.content) ? 1100 : 800;
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <style>
 ${css}
-*{box-sizing:border-box}
 html,body{margin:0;padding:0;background:transparent}
 body{font-family:"Microsoft YaHei","PingFang SC","Segoe UI",sans-serif;color:#1f2329}
-.capture{width:1200px;padding:${compact ? "28px 42px" : "30px 44px"};background:#f5f8ff}
-.inner{width:1112px;padding:${compact ? "34px 40px" : "28px 34px"};background:#fff;border:1px solid #d9e2ff;border-left:7px solid #4e83fd;border-radius:18px;font-size:${compact ? "28px" : "29px"};line-height:${compact ? "1.5" : "1.9"}}
-.block{display:flex;align-items:center;justify-content:center;min-height:150px}
-.paragraph{white-space:normal;overflow-wrap:anywhere}
-.paragraph strong{font-weight:700}
-.paragraph h1,.paragraph h2,.paragraph h3{margin:.35em 0 .25em;font-weight:700;line-height:1.35}
-.paragraph h1{font-size:1.28em}.paragraph h2{font-size:1.18em}.paragraph h3{font-size:1.1em}
-.paragraph table{width:100%;margin:8px 0;border-collapse:collapse;table-layout:auto;font-size:.9em;line-height:1.55}
-.paragraph th,.paragraph td{padding:12px 14px;border:1px solid #c8d3e8;text-align:left;vertical-align:top;overflow-wrap:anywhere}
-.paragraph th{background:#eef3ff;font-weight:700}
-.paragraph tr:nth-child(even) td{background:#fafcff}
-  .display-formula{display:flex;align-items:center;justify-content:center;min-height:140px;margin:18px 0;padding:24px 18px 36px;background:#f8faff;border-radius:12px;overflow:visible}
+.cf-formula-capture{box-sizing:border-box;width:${width}px;padding:16px;background:#f5f8ff}
+.cf-formula-card{box-sizing:border-box;width:100%;padding:${compact ? "16px 24px" : "24px"};background:#fff;border:1px solid #d9e2ff;border-left:5px solid #4e83fd;border-radius:14px;font-size:${compact ? "28px" : "23px"};line-height:1.8}
+.cf-formula-block{display:flex;align-items:center;justify-content:center}
+.cf-formula-paragraph{white-space:normal;overflow-wrap:anywhere}
+.cf-formula-paragraph strong{font-weight:700}
+.cf-formula-paragraph h1,.cf-formula-paragraph h2,.cf-formula-paragraph h3{margin:.35em 0 .25em;font-weight:700;line-height:1.35}
+.cf-formula-paragraph h1{font-size:1.28em}.cf-formula-paragraph h2{font-size:1.18em}.cf-formula-paragraph h3{font-size:1.1em}
+.cf-formula-paragraph table{width:100%;margin:8px 0;border-collapse:collapse;table-layout:auto;font-size:.9em;line-height:1.55}
+.cf-formula-paragraph th,.cf-formula-paragraph td{padding:12px 14px;border:1px solid #c8d3e8;text-align:left;vertical-align:top;overflow-wrap:anywhere}
+.cf-formula-paragraph th{background:#eef3ff;font-weight:700}
+.cf-formula-paragraph tr:nth-child(even) td{background:#fafcff}
+  .cf-display-formula{display:flex;align-items:center;justify-content:center;margin:12px 0;padding:16px 8px 24px;background:#f8faff;border-radius:12px;overflow:visible}
   .katex{font-size:1.02em}
   .katex-display{margin:0;padding:.15em .2em .45em}
 </style>
 </head>
-<body><div class="capture"><div class="inner ${compact ? "block" : "paragraph"}">${body}</div></div></body>
+<body><div class="cf-formula-capture"><div class="cf-formula-card ${compact ? "cf-formula-block" : "cf-formula-paragraph"}">${body}</div></div></body>
 </html>`;
+}
+
+// Reject unusable images rather than uploading a successful but clipped PNG.
+export async function prepareFormulaCapture(page, { timeoutMs = 20_000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    // Force layout first so fonts used by the formula are requested.
+    await page.locator(".cf-formula-capture").boundingBox();
+    await page.waitForFunction(() => document.fonts.status === "loaded", null, {
+      timeout: Math.max(1, deadline - Date.now()),
+    });
+    const result = await page.evaluate(() => {
+      if (document.querySelector(".katex-error")) throw new Error("Formula parse error");
+      if ([...document.fonts].some((font) => font.status === "error")) {
+        throw new Error("Formula font failed to load");
+      }
+      const capture = document.querySelector(".cf-formula-capture");
+      const box = capture.getBoundingClientRect();
+      const elements = [...document.querySelectorAll(".katex-html .base, table")];
+      const overflow = elements.some((element) => {
+        const owner = element.closest("td,th,.cf-display-formula,.cf-formula-card");
+        const parent = owner.getBoundingClientRect();
+        const rect = element.getBoundingClientRect();
+        return rect.left < parent.left - 1 || rect.right > parent.right + 1;
+      });
+      return { width: box.width, height: box.height, overflow };
+    });
+    if (result.height > 6000) throw new Error("Formula image exceeds safe height");
+    if (!result.overflow) return result;
+    if (result.width >= 1600 || Date.now() >= deadline) break;
+    await page.locator(".cf-formula-capture").evaluate((element, width) => {
+      element.style.width = `${width}px`;
+    }, Math.min(1600, Math.ceil(result.width * 1.35)));
+  }
+  throw new Error("Formula exceeds safe image width; retaining source instead");
 }
 
 export function renderMixedHtml(content, katex, markdown) {
@@ -619,10 +655,10 @@ export function renderMixedHtml(content, katex, markdown) {
     protectedMarkdown += content.slice(cursor, formula.start);
     const rendered = katex.renderToString(formula.latex, {
       displayMode: formula.display,
-      throwOnError: false,
+      throwOnError: true,
       strict: "ignore",
     });
-    renderedFormulas.push(formula.display ? `<span class="display-formula">${rendered}</span>` : rendered);
+    renderedFormulas.push(formula.display ? `<span class="cf-display-formula">${rendered}</span>` : rendered);
     protectedMarkdown += `${markerPrefix}${index}END`;
     cursor = formula.end;
   }

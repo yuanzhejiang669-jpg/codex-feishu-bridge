@@ -26,8 +26,8 @@ try {
       assert.deepEqual([...bytes.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10]);
       const width = bytes.readUInt32BE(16);
       const height = bytes.readUInt32BE(20);
-      assert.equal(width, 1200);
-      assert.ok(height > 100 && height < 12_000);
+      assert.ok(width >= 1280 && width <= 3200);
+      assert.ok(height > 100 && height <= 12_000);
       uploads.push({ bytes: bytes.length, file: path.basename(imagePath), width, height });
       return `img_smoke_${uploads.length}`;
     },
