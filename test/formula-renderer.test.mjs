@@ -241,7 +241,7 @@ test("formula service exposes shared warmup and display formulas reserve subscri
   assert.equal(first.warmed, false);
 
   const source = fs.readFileSync(new URL("../src/feishu/cards/formula-renderer.mjs", import.meta.url), "utf8");
-  assert.match(source, /\.display-formula\{[^\n]*padding:24px 18px 36px[^\n]*overflow:visible/);
+  assert.match(source, /\.cf-display-formula\{[^\n]*padding:16px 8px 24px[^\n]*overflow:visible/);
   assert.match(source, /\.katex-display\{margin:0;padding:\.15em \.2em \.45em\}/);
 });
 
