@@ -23,6 +23,16 @@ export function createSingleInstanceLock({
       } catch (error) {
         if (error?.code !== "EEXIST") throw error;
         const current = readJsonFile(lockPath);
+        // Another process may have created the exclusive file but not written JSON yet.
+        // Never unlink a fresh, partially initialized lock.
+        if (!current) {
+          let lockStat;
+          try { lockStat = fs.statSync(lockPath); }
+          catch (statError) { if (statError.code === 'ENOENT') continue; throw statError; }
+          if (lockStat.isFile() && Date.now() - lockStat.mtimeMs < 5000) {
+            throw new Error(`Bridge lock is being initialized: ${lockPath}`);
+          }
+        }
         if (isActive(current)) {
           log("ERROR", "another bridge instance is already running for this state dir", {
             currentPid: current.pid,
@@ -55,13 +65,8 @@ export function createSingleInstanceLock({
   }
 
   function isActive(current) {
-    if (!current?.pid || !processAlive(current.pid)) return false;
-    try {
-      return fs.existsSync(pidPath)
-        && fs.readFileSync(pidPath, "utf8").trim() === String(current.pid);
-    } catch {
-      return false;
-    }
+    // bridge.pid is written only after acquire(); requiring it here creates a race.
+    return Boolean(current?.pid && processAlive(current.pid));
   }
 
   return { acquire, isActive, release };

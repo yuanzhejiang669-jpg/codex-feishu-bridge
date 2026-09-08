@@ -567,7 +567,11 @@ test("starts and stops through the direct macOS launcher contract", async () => 
       platform: process.platform === "win32" ? "linux" : "darwin",
       larkProfileHome: path.join(value.root, ".cfb-lark-profile"),
     };
-    const started = await startManagedBot("assistant-1", options);
+    const [started, concurrent] = await Promise.all([
+      startManagedBot("assistant-1", options), startManagedBot("assistant-1", options),
+    ]);
+    assert.equal(concurrent.processId, started.processId);
+    assert.equal(discoveries, 1, 'concurrent starts share one discovery and spawn');
     assert.equal(started.online, true);
     assert.notEqual(started.processId, process.pid);
     const launch = JSON.parse(fs.readFileSync(path.join(started.runtimeRoot, "state", "launch-config.json"), "utf8"));

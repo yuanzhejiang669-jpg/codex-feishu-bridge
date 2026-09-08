@@ -397,7 +397,18 @@ function setManagedBotAutoStart(name, enabled, options) {
   }
 }
 
+const pendingBotStarts = new Map();
+
 async function startManagedBot(name, options) {
+  const key = JSON.stringify([path.resolve(options.dataRoot), path.resolve(options.localAppData), name]);
+  if (pendingBotStarts.has(key)) return pendingBotStarts.get(key);
+  const pending = startManagedBotOnce(name, options);
+  pendingBotStarts.set(key, pending);
+  try { return await pending; }
+  finally { if (pendingBotStarts.get(key) === pending) pendingBotStarts.delete(key); }
+}
+
+async function startManagedBotOnce(name, options) {
   const bot = findManagedBot(name, options);
   const current = inspectManagedBots(options.dataRoot, options.localAppData).find((item) => item.name === name);
   if (current?.online) return current;
