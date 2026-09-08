@@ -189,7 +189,7 @@ function loginState(output, ok) {
 
 async function inspectCodex(scriptPath, options = {}) {
   const platform = options.platform || process.platform;
-  const engineRoot = options.engineRoot || (process.resourcesPath
+  const engineRoot = options.engineRoot || (process.resourcesPath && fs.existsSync(path.join(process.resourcesPath, 'engine/src/codex/installed-runtime.cjs'))
     ? path.join(process.resourcesPath, 'engine') : path.resolve(__dirname, '../../../../..'));
   const resolveInstalledRuntime = options.resolveInstalledRuntime
     || require(path.join(engineRoot, 'src/codex/installed-runtime.cjs')).resolveInstalledRuntime;
