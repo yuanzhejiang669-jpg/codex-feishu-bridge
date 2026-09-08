@@ -1,5 +1,35 @@
 # Codex CLI 优先后端：执行记录
 
+## 最新验收结论（2026-09-08 22:12）
+
+以下矩阵是当前结论；后文保留过程中的失败、重试和旧状态，不能把历史“待恢复”当作最终结果。
+
+| 设备 | 官方独立 CLI | 已安装 Bridge | Bot 验收 | 状态 |
+|---|---|---|---|---|
+| 当前 Windows / LAPTOP-S8RAA9LG | 0.153.4 | 0.8.20；0.8.22 已校验并待安装 | 26个仍运行；本次对话活跃 | 等所有Bot空闲后自动安装与验收，尚不能报告完成 |
+| 旧 Windows / DESKTOP-NV7373U | 0.153.4 | 0.8.22.0 | 17/17，配置不变、独立CLI、各一个event consumer、无额外Bot进程 | 完成 |
+| Mac / CathydeMacBook-Pro.local | 0.153.4 | 0.8.22 | 6/6，配置不变、独立CLI、各一个event consumer、无额外Bot进程 | 完成 |
+| Ubuntu / yzj666-System-Product-Name | 0.153.4 | 0.8.22~linux.1 | 5/5，配置不变、独立CLI、各一个event consumer、无额外Bot进程 | 完成 |
+
+- Mac助手2结束任务后，守候程序完成正式安装及6项验收，时间22:06:44，PID85261、85298、85317、85336、85355、85374。旧Windows22:07完成17项验收，追加进程审查全部通过；旧机源码检查126/126，临时下载任务已注销。
+- 正式发布：[v0.8.22](https://github.com/yuanzhejiang669-jpg/codex-feishu-bridge/releases/tag/v0.8.22)、[v0.8.22-linux.1](https://github.com/yuanzhejiang669-jpg/codex-feishu-bridge/releases/tag/v0.8.22-linux.1)。使用正式包与正常桌面入口，不是dev启动或后台专用模式。Mac仍遵循项目现有unsigned发行渠道，未绕过系统安全设置。
+- 已验证四设备10个唯一Codex Home的独立CLI初始化、模型列表及最小真实回复，全部OK；未改模型、Provider、auth、MCP/Skills或既有会话。旧Windows原有三处源码改动、当前Pi分支、Mac原有本地提交均保留。Tailscale已恢复原hotmail账号。
+- 未完成项：当前Windows必须在这轮对话结束后才能安全安装；尚未对新安装的当前Windows进行人工界面与飞书续聊/附件/审批的端到端验收。协议、附件上下文、审批响应、公式与会话相关自动回归通过，不把自动测试等同于这些人工验收。
+
+### 当前Windows交接检查
+
+1. 任务：`CodexFeishuBridge-Upgrade-0822`，InteractiveToken、Limited、隐藏部署脚本；最终正常打开已安装快捷方式，无`--background`。
+2. 安装包与脚本：`C:\Users\yzjiang\AppData\Local\CodexFeishuBridgeDesktop\pending-upgrades\cli-0.8.22\installer.exe`、同目录`upgrade-windows.ps1`。
+3. 结果：同目录`upgrade-result.json`，必须为`status=complete`、`version=0.8.22`，26个checks的Online/PidChanged/ConfigPreserved/IndependentCli均true，且desktopPids对应交互桌面进程。`before.json`与`upgrade.log`提供前后证据。没有结果文件表示尚未完成，不要凭计划任务存在判成功。
+4. 若失败，先读日志与当前进程，不重复执行安装、不强杀活动Bot；脚本会尝试正常重新打开仍存在的客户端。保持官方CLI完整目录；桌面提取后端仍为受支持备用。
+5. 当前Windows安装完成后，再核对系统页“检测到”与“实际运行”后端并做一次正常飞书续聊。磁盘CLI升级不会替换已运行进程，重启对应空闲Bot后才重新探测；重启一个Bot不表示所有Bot都切换。
+
+### 可恢复与产物索引
+
+- 所有最终报告、临时下载/分段、截图、helper和安装树路径见本机 `.codex-work/cli-upgrade/0.8.22/` 中的`*-artifact-files.txt`与`docs/codex-cli-backend-upgrade-artifacts-2026-09-08.md`。安装树清单含未变化文件，不声称每个枚举文件都被修改；保留报告用于交接。
+- Mac原0.8.19/0.8.21应用分别在`/tmp/cfb-cli-upgrade.XYakJW/previous.app`、`/tmp/cfb-upgrade-0822.XsaAua/previous.app`，仅作本次升级回滚。Ubuntu与Windows原官方安装包仍保留，现有CLI旧安装未删；这些不是配置备份。
+- 清理已完成：旧Windows失效Bot的两个PID/lock标记、一次多余Mac Bot进程、被取代/完成的计划任务，以及测试自行清理的临时目录。下载与安装证据先保留到当前Windows验收完成；后续只清理本次登记的临时路径，不扫描删除用户资料。
+
 ## 2026-09-08 开始
 
 - 用户授权：规划、实现、记录、正式发布，以及当前 Windows、旧 Windows、Mac、Ubuntu 的 CLI/Bridge 更新与安全重启。
@@ -44,6 +74,17 @@
 - 新增部署工具 `.codex-work/deploy-guard.cjs`、`.codex-work/upgrade-windows.ps1`；当前 Windows pending-upgrades/cli-0.8.21 内有 helper、已验证 installer.exe，运行时生成 upgrade.log、before.json、upgrade-result.json。Ubuntu临时目录增加 bridge.deb、deploy-guard.cjs、before.json、before-retry.json；安装器生成/替换 /opt/Codex Feishu Bridge 全套应用文件及 dpkg 标准状态。Mac临时目录新增 install-mac-cli.sh、bridge.zip/bridge-direct.zip 未完成下载、bridge-mirror.zip 与 download.log。
 
 ### 对抗性审查验证条目
+
+- 22:05 Ubuntu 0.8.22~linux.1 最终验收完成：5/5 Bot 新PID82504、82873、83114、83354、83595；配置哈希不变、独立CLI全部确认，每Bot恰好一个event consumer，无多余主进程。正式GUI通过cfb-upgrade-launch-0822.service正常启动；报告 `/tmp/cfb-upgrade-0822.umhYc2/final-verification.json`，本机副本 `.codex-work/cli-upgrade/0.8.22/ubuntu-final-verification.json`，产物清单ubuntu-artifact-files.txt。
+- Mac助手2有真实活动任务，新增wait-mac-upgrade.cjs空闲守候程序：连续空闲20秒才调用已校验安装流程，安装后逐项核验6个Bot及唯一event consumer。最长等待12小时，不强杀任务，状态见 `/tmp/cfb-upgrade-0822.XsaAua/upgrade.log`；失败写upgrade-error.json，验收写final-verification.json。旧0.8.21仍在工作，尚不能标记0.8.22完成。
+- 分段下载的几个尾部块因网络超时，Ubuntu使用resume-release.cjs仅补缺少的部分并核验整包成功；新增finish-ubuntu.sh、wait-mac-upgrade.cjs及远程副本。多余Mac下载进程77453已停止，未停止任何Bot或浏览器MCP。
+
+- 0.8.22/0.8.22-linux.1 已正式发布，CI 34233152195、34233376245 全部成功。主线提交9df7748，Linux提交dbcab30；Linux本地补齐锁定依赖后核心检查与桌面213通过、3平台跳过。
+- 新版官方 SHA256：Windows EXE c7630650ebac4b618c5536fef3edfb7f2dd9b562391917d9a949212951f09b64；Mac arm64 ZIP d63d6d4bfe6789517537232ffea7f1e71c830fd0850e134371d809b6ccf08705；Ubuntu DEB 97ec4aa9ac7f9722ee217a4d9e3a7ed805a60544f16da7e8d02d8724e86f0562。
+- 全量下载突然降到几十KB/s，先尝试有界分段下载，再利用官方 blockmap 复用已验证0.8.21发行包，Windows只下载696258字节变化、Mac12662090字节变化。重建后必须匹配完整新版官方SHA256；本机EXE和Mac ZIP均已匹配，不是修改旧安装目录冒充升级。
+- 新建本机pending-upgrades/cli-0.8.22与InteractiveToken任务CodexFeishuBridge-Upgrade-0822；0821等待任务已注销。本轮当前Bot仍活跃，因此当前Windows仍未安装，任务等待所有Bot空闲。验证记录额外检查各Bot最新启动日志是否指向独立npm CLI。
+- 旧Windows新包校验通过，已开始0822正式安装。临时下载任务自动注销曾被拒绝，需要SSH验收时清理；不影响已启动的升级任务。Mac首次0822安装预检检测到活动Bot，主动拒绝退出，旧版继续工作，待空闲重试。
+- 新增工作产物：本机 `.codex-work/cli-upgrade/0.8.22` 下checksum、blockmap、完整/未完成安装包、分段目录；helper download-release.cjs、download-delta.cjs、schedule-upgrade.ps1、download-and-schedule-oldpc.ps1、start-download-oldpc.ps1、status-upgrade.ps1、verify-posix-final.cjs、upgrade-ubuntu.sh、stop-downloads.cjs。Mac新临时目录 `/tmp/cfb-upgrade-0822.XsaAua`，Ubuntu新目录 `/tmp/cfb-upgrade-0822.umhYc2`，旧Windows新pending-upgrades/cli-0.8.22与Temp helper副本；最终清单将登记全部路径。
 
 - 0.8.22 发布前复测：核心检查126/126；桌面195通过、3平台跳过。初始化锁保护只针对普通文件，保留目录型损坏锁原有明确报错行为；现有架构边界测试与新增竞争测试均通过。
 
