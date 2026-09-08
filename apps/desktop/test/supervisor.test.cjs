@@ -506,6 +506,32 @@ test("bounds macOS login Provider environment retries", async () => {
   assert.deepEqual(result.missingNames, ["LTHOME_API_KEY"]);
 });
 
+test('invalid upgraded CLI never stops a currently running Bot', async () => {
+  let stopped = false;
+  await assert.rejects(() => restartSelectedManagedBots({
+    resolveCodex: async () => ({ runtimeFound: false, error: 'broken package' }),
+    stopBot: async () => { stopped = true; },
+  }), /未停止任何 Bot/);
+  assert.equal(stopped, false);
+});
+
+test('runtime snapshots reject another Bridge PID and corrupted backend lists', () => {
+  const value = fixture();
+  try {
+    const stateDir = path.join(managedRuntimeRoot(value.localAppData, 'assistant-1'), 'state');
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.writeFileSync(path.join(stateDir, 'bridge.pid'), String(process.pid));
+    const snapshot = path.join(stateDir, 'runtime-backends.json');
+    const inspect = () => inspectManagedBots(value.dataRoot, value.localAppData)[0].backends;
+    fs.writeFileSync(snapshot, JSON.stringify({ bridgePid: process.pid + 1, backends: [{ pid: process.pid }] }));
+    assert.deepEqual(inspect(), []);
+    fs.writeFileSync(snapshot, JSON.stringify({ bridgePid: process.pid, backends: 'invalid' }));
+    assert.deepEqual(inspect(), []);
+    fs.writeFileSync(snapshot, JSON.stringify({ bridgePid: process.pid, backends: [{ pid: process.pid, version: '0.1.0' }] }));
+    assert.equal(inspect()[0].version, '0.1.0');
+  } finally { fs.rmSync(value.root, { recursive: true, force: true }); }
+});
+
 test("starts and stops through the direct macOS launcher contract", async () => {
   const value = fixture();
   try {
@@ -526,7 +552,9 @@ test("starts and stops through the direct macOS launcher contract", async () => 
       '  if (fs.existsSync(path.join(state, "bridge.stop"))) { clearInterval(timer); process.exit(0); }',
       '}, 50);',
     ].join("\n"), "utf8");
+    let discoveries = 0;
     const options = {
+      resolveCodex: async () => { discoveries++; return { runtimePath: process.execPath, runtimeFound: true, runtimeSource: 'installed-cli' }; },
       dataRoot: value.dataRoot,
       localAppData: value.localAppData,
       engineRoot,
@@ -546,6 +574,9 @@ test("starts and stops through the direct macOS launcher contract", async () => 
     assert.equal(launch.larkProfile, "assistant-1");
     const stopped = await stopManagedBot("assistant-1", options);
     assert.equal(stopped.online, false);
+    await startManagedBot('assistant-1', options);
+    assert.equal(discoveries, 2, 'every restart must resolve again');
+    await stopManagedBot('assistant-1', options);
   } finally {
     fs.rmSync(value.root, { recursive: true, force: true });
   }

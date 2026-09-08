@@ -21,6 +21,9 @@ function inspectManagedBots(dataRoot, localAppData) {
       try { return fs.readFileSync(path.join(stateDir, "bridge.pid"), "utf8").trim(); } catch { return ""; }
     })();
     const processId = /^\d+$/.test(processIdText) ? Number(processIdText) : null;
+    const runtimeState = readJson(path.join(stateDir, 'runtime-backends.json'));
+    const backends = runtimeState?.bridgePid === processId && isProcessAlive(processId)
+      ? (Array.isArray(runtimeState.backends) ? runtimeState.backends : []).filter((item) => item && isProcessAlive(item.pid)) : [];
     const active = readJson(path.join(stateDir, "active-runs.json"));
     const seenEventsPath = path.join(stateDir, "seen-events.json");
     const seenEvents = readJson(seenEventsPath);
@@ -33,6 +36,7 @@ function inspectManagedBots(dataRoot, localAppData) {
       ...bot,
       runtimeRoot,
       processId,
+      backends,
       online: isProcessAlive(processId),
       activeRunCount: activeRunCount(active),
       messageEventVerified,
@@ -140,6 +144,7 @@ function processEnvironment(options, bot = null) {
     environment[bot.provider.envKey] = apiKey;
   }
   if (options.codexPath) environment.CODEX_CLI_BIN = options.codexPath;
+  if (options.codexSource) environment.CODEX_BRIDGE_RUNTIME_SOURCE = options.codexSource;
   return environment;
 }
 
@@ -396,6 +401,11 @@ async function startManagedBot(name, options) {
   const bot = findManagedBot(name, options);
   const current = inspectManagedBots(options.dataRoot, options.localAppData).find((item) => item.name === name);
   if (current?.online) return current;
+  // Resolve again for every start: a long-lived desktop may have a stale snapshot.
+  if (options.resolveCodex) {
+    const runtime = await options.resolveCodex();
+    options = { ...options, codexPath: runtime.runtimePath || '', codexSource: runtime.runtimeSource || '', codexAvailable: runtime.runtimeFound === true };
+  }
   if (!fs.existsSync(options.nodePath) || !fs.existsSync(options.larkCliPath)) {
     throw new Error("客户端内置运行时不完整，请重新安装客户端");
   }
@@ -458,6 +468,10 @@ async function stopManagedBotAndDisableAutoStart(name, options) {
 }
 
 async function restartSelectedManagedBots(options) {
+  if (options.resolveCodex) {
+    const runtime = await options.resolveCodex();
+    if (!runtime.runtimeFound) throw new Error('新 Codex 后端不可用，未停止任何 Bot：' + (runtime.error || '未检测到 CLI'));
+  }
   const inspectBots = options.inspectBots || (() => inspectManagedBots(options.dataRoot, options.localAppData));
   const stopBot = options.stopBot || ((name, mode) => stopManagedBot(name, { ...options, force: mode.force }));
   const startBot = options.startBot || ((name) => startManagedBot(name, options));

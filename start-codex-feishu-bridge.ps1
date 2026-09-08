@@ -194,6 +194,10 @@ function Test-IsBridgeOfficialCodexCliCache([string]$PathValue) {
 }
 
 function Resolve-CodexCliBin {
+  $installed = & node (Join-Path $PSScriptRoot 'scripts/resolve-installed-codex.cjs')
+  if ($LASTEXITCODE -eq 2) { throw 'Explicit Codex runtime is unavailable; correct CODEX_CLI_BIN before starting.' }
+  if ($LASTEXITCODE -ne 0) { throw 'Codex CLI discovery failed.' }
+  if ($installed) { return ([string]$installed).Trim() }
   $officialCandidate = Resolve-OfficialCodexCliBin
 
   if ($env:CODEX_CLI_BIN) {

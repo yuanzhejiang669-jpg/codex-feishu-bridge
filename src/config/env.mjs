@@ -1,12 +1,15 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import installedRuntime from '../codex/installed-runtime.cjs';
 
 export function resolveDefaultTools() {
+  const installed = installedRuntime.resolveInstalledRuntime();
+  const installedTool = installed.runtimeFound ? { command: installed.runtimePath, argsPrefix: [] } : null;
   if (process.platform !== "win32") {
     return {
       larkCli: { command: "lark-cli", argsPrefix: [] },
-      codexCli: { command: "codex", argsPrefix: [] },
+      codexCli: installedTool || { command: "codex", argsPrefix: [] },
     };
   }
 
@@ -18,9 +21,9 @@ export function resolveDefaultTools() {
     larkCli: fs.existsSync(larkEntry)
       ? { command: process.execPath, argsPrefix: [larkEntry] }
       : { command: "cmd.exe", argsPrefix: ["/d", "/s", "/c", "lark-cli.cmd"] },
-    codexCli: fs.existsSync(codexEntry)
+    codexCli: installedTool || (fs.existsSync(codexEntry)
       ? { command: process.execPath, argsPrefix: [codexEntry] }
-      : { command: "cmd.exe", argsPrefix: ["/d", "/s", "/c", "codex.cmd"] },
+      : { command: "cmd.exe", argsPrefix: ["/d", "/s", "/c", "codex.cmd"] }),
   };
 }
 
