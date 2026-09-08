@@ -4949,6 +4949,25 @@ async function initializeAppServerClient(client) {
     capabilities: { experimentalApi: true },
   }, 60_000);
   client.notify("initialized");
+  // Record the server's own handshake, not --version from a possibly upgraded disk file.
+  try {
+    const target = path.join(CONFIG.stateDir, 'runtime-backends.json');
+    let previous;
+    try { previous = JSON.parse(fs.readFileSync(target, 'utf8')); } catch {}
+    const backends = previous?.bridgePid === process.pid ? (previous.backends || []) : [];
+    const live = backends.filter((item) => {
+      if (item.pid === client.child?.pid) return false;
+      try { process.kill(item.pid, 0); return true; } catch { return false; }
+    });
+    live.push({ pid: client.child?.pid, path: client.tool.command,
+      source: process.env.CODEX_BRIDGE_RUNTIME_SOURCE || 'configured',
+      userAgent: initialized.userAgent || '',
+      version: String(initialized.userAgent || '').match(/\d+\.\d+\.\d+(?:[-+][\w.-]+)?/)?.[0] || '',
+      initializedAt: new Date().toISOString() });
+    const temporary = `${target}.${process.pid}.tmp`;
+    fs.writeFileSync(temporary, JSON.stringify({ bridgePid: process.pid, backends: live }), 'utf8');
+    fs.renameSync(temporary, target);
+  } catch (error) { log('WARN', 'Could not record backend handshake', { error: String(error) }); }
   return initialized;
 }
 

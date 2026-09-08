@@ -189,7 +189,18 @@ function loginState(output, ok) {
 
 async function inspectCodex(scriptPath, options = {}) {
   const platform = options.platform || process.platform;
-  if (platform === "darwin") return inspectMacCodex(options);
+  const engineRoot = options.engineRoot || (process.resourcesPath
+    ? path.join(process.resourcesPath, 'engine') : path.resolve(__dirname, '../../../../..'));
+  const resolveInstalledRuntime = options.resolveInstalledRuntime
+    || require(path.join(engineRoot, 'src/codex/installed-runtime.cjs')).resolveInstalledRuntime;
+  const installed = resolveInstalledRuntime(options);
+  if (installed.runtimeFound || installed.explicit) {
+    const auth = await runCodex(installed.runtimePath, ['login', 'status'], 10000);
+    return { supported: true, platform, packageFound: false, ...installed,
+      ...inspectRuntimeDirectory(installed.runtimePath, platform),
+      loginState: loginState(auth.output, auth.ok), loginSummary: auth.output.split(/\r?\n/).find(Boolean) || '' };
+  }
+  if (platform === "darwin") return { ...await inspectMacCodex(options), runtimeSource: 'desktop-fallback', fallbackReason: installed.error || '未找到独立 CLI' };
   if (platform !== "win32") {
     return {
       supported: false,
@@ -225,6 +236,8 @@ async function inspectCodex(scriptPath, options = {}) {
     return {
       supported: true,
       ...inspection,
+      runtimeSource: 'desktop-fallback',
+      fallbackReason: installed.error || '未找到独立 CLI',
       runtimeFound: Boolean(runtimePath),
       runtimeCandidatePath,
       runtimePath,

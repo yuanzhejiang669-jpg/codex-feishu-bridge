@@ -68,7 +68,7 @@ test("Windows inspection never executes the protected source runtime without a c
       runtimeFound: false,
     }).replaceAll("'", "''");
     fs.writeFileSync(detector, `[Console]::Out.Write('${payload}')\n`, "utf8");
-    const result = await inspectCodex(detector);
+    const result = await inspectCodex(detector, { resolveInstalledRuntime: () => ({ runtimeFound: false }) });
     assert.equal(result.packageFound, true);
     assert.equal(result.runtimeFound, false);
     assert.equal(result.runtimePath, "");
@@ -92,7 +92,7 @@ test("Windows inspection rejects a corrupt cached runtime", { skip: process.plat
       runtimeFound: true,
     }).replaceAll("'", "''");
     fs.writeFileSync(detector, `[Console]::Out.Write('${payload}')\n`, "utf8");
-    const result = await inspectCodex(detector);
+    const result = await inspectCodex(detector, { resolveInstalledRuntime: () => ({ runtimeFound: false }) });
     assert.equal(result.runtimeFound, false);
     assert.equal(result.runtimePath, "");
     assert.equal(result.runtimeCandidatePath, corruptRuntime);

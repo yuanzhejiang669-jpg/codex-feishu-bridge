@@ -215,6 +215,7 @@ function setupOptions() {
 
 function supervisorOptions() {
   return {
+    resolveCodex: () => inspectCodex(detectorScriptPath(), { home: app.getPath('home') }),
     dataRoot: managedDataRoot(),
     localAppData: runtimeLocalAppData(),
     engineRoot: currentState?.engine?.engineRoot || "",

@@ -226,13 +226,13 @@ function pathLine(label, value) {
 }
 
 function renderCodex(codex, provider) {
-  const good = codex.packageFound && codex.runtimeFound;
+  const good = codex.runtimeFound;
   const status = good ? "可用" : "不可用";
   elements.codexSummary.textContent = status;
   elements.codexBadge.textContent = status;
   elements.codexBadge.className = badgeClass(good ? "good" : "bad");
   elements.codexDetails.innerHTML = detailRows([
-    ["桌面端", codex.packageFound ? `OpenAI.Codex ${text(codex.packageVersion)}` : "未检测到"],
+    ["桌面端", codex.packageFound ? `OpenAI.Codex ${text(codex.packageVersion)}` : (codex.runtimeFound ? '当前选择独立 CLI / 指定路径，不依赖桌面端' : '未检测到')],
     ["Codex CLI", text(codex.cliVersion, codex.runtimeFound ? "版本未知" : "不可用")],
     ["模型来源", provider.configured ? `${text(provider.id)} · ${text(provider.model, "模型未设置")}` : "未配置"],
     ["Provider 凭据", provider.envKey ? (provider.credentialAvailable ? `${provider.envKey} 可用` : `${provider.envKey} 未找到`) : "不需要或未知"],
@@ -480,12 +480,24 @@ function renderUpdater(update = {}) {
 
 function renderSystemPaths(currentState) {
   const permissionPolicy = currentState.setup.permissionPolicy || {};
+  const sourceLabels = { 'installed-cli': '独立 Codex CLI（直接使用完整安装）', explicit: '用户指定路径', 'desktop-fallback': '桌面客户端后备运行时' };
+  const runningRows = (currentState.setup.managedBots || []).filter((bot) => bot.online).map((bot) => {
+    const backends = bot.backends || [];
+    return [`Bot ${bot.label || bot.name} · 实际后端`, backends.length ? backends.map((item) => {
+      const differs = item.path !== currentState.codex.runtimePath || (item.version && item.version !== currentState.codex.cliVersion);
+      return `${item.version || item.userAgent || '版本未知'} · PID ${item.pid} · ${item.path}${differs ? ' · 与当前检测不同，空闲后重启生效' : ''}`;
+    }).join('\n') : '尚无存活后端握手记录（空闲或旧版本 Bot）；不以磁盘版本冒充运行版本'];
+  });
   elements.systemPaths.innerHTML = detailRows([
     ["Bridge 数据", currentState.bridge.root],
     ["Codex 安装包", currentState.codex.installLocation],
     ["Codex 运行时入口", currentState.codex.runtimePath],
     ["Codex 运行时目录", currentState.codex.runtimeDirectory],
-    ["Codex 运行时组件", `${currentState.codex.runtimeExecutableCount || 0} 个 EXE`],
+    ['检测到的 Codex 版本', currentState.codex.cliVersion || '未知'],
+    ['后端来源', sourceLabels[currentState.codex.runtimeSource] || '未知'],
+    ['后备原因', currentState.codex.fallbackReason || '无'],
+    ['依赖策略', '保留完整安装布局；入口目录文件数不代表完整能力'],
+    ...runningRows,
     ["客户端数据", currentState.setup.dataRoot],
     ["客户端 Bot 运行数据", currentState.setup.runtimeLocalAppData],
     ["数据 Schema", `${currentState.setup.dataSchema.currentVersion ?? "未初始化"} / ${currentState.setup.dataSchema.supportedVersion}`],

@@ -9,7 +9,7 @@
     "url": "git+ssh://git@github.com/yuanzhejiang669-jpg/codex-feishu-bridge.git"
   },
   "scripts": {
-    "check": "node scripts/check-syntax.mjs && node scripts/check-control-panel-static.mjs && node scripts/check-model-reasoning-capabilities.mjs && node --test test/*.test.mjs",
+    "check": "node scripts/check-syntax.mjs && node scripts/check-control-panel-static.mjs && node scripts/check-model-reasoning-capabilities.mjs && node --test test/*.test.mjs test/*.test.cjs",
     "smoke:app-server": "node scripts/smoke-app-server.mjs",
     "smoke:app-server-pool": "node scripts/smoke-app-server-pool.mjs",
     "smoke:formulas": "node scripts/smoke-formula-renderer.mjs",
