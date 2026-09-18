@@ -122,11 +122,17 @@ export function createEventDispatcher({
       + cancelInFlight(matches, { queuedOnly: true });
   }
 
+  function cancelForChat(chatId, { all = false } = {}) {
+    const target = String(chatId || "").trim();
+    return cancelInFlight((event) => all || (target && chatIdOf(event) === target));
+  }
+
   return {
     enqueue,
     drain,
     removeByMessageId,
     clearForChat,
+    cancelForChat,
     countForChat: (chatId) => queue.countForChat(chatId),
     summary: (chatId) => queue.summary(chatId),
     get activeJobs() {

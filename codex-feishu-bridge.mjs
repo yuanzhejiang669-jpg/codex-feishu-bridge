@@ -5601,6 +5601,8 @@ async function runGoalLoop(run, goalPatch) {
     mode: "app-server-goal",
     steerInFlight: null,
   };
+  let finishJob;
+  activeJob.finished = new Promise((resolve) => { finishJob = resolve; });
   activeCodexJobs.set(chatId, activeJob);
 
   const watchdog = createRunWatchdog("codex app-server goal", () => {
@@ -5609,16 +5611,23 @@ async function runGoalLoop(run, goalPatch) {
   });
 
   try {
+    appendHistory(session, "user", `/goal ${goalPatch.objective || run.goal?.objective || ""}`.trim());
     const initialized = await initializeAppServerClient(client);
     watchdog.touch();
     state.meta.model = initialized.userAgent || state.meta.model;
 
     const threadId = await startOrResumeAppServerThread(client, session);
+    if (stoppedJobs.has(messageId) || stoppedJobs.has(run.rootMessageId)) {
+      throw new Error("codex job stopped by user");
+    }
     watchdog.touch();
     run.threadId = threadId;
     state.threadId = threadId;
     activeJob.threadId = threadId;
 
+    if (stoppedJobs.has(messageId) || stoppedJobs.has(run.rootMessageId)) {
+      throw new Error("codex job stopped by user");
+    }
     const result = await client.request("thread/goal/set", { threadId, ...goalPatch }, 60_000);
     watchdog.touch();
     applyGoalRunNativeState(run, result?.goal || previewGoalFromPatch(session, goalPatch));
@@ -5712,7 +5721,6 @@ async function runGoalLoop(run, goalPatch) {
     if (!run.card || !run.finalCardFlushOk) {
       await sendMarkdown(chatId, goalRunResultMarkdown(run), "goal-done", messageId);
     }
-    appendHistory(session, "user", `/goal ${goalPatch.objective || run.goal?.objective || ""}`.trim());
     appendHistory(session, "assistant", finalText);
     stats.answered += 1;
   } catch (error) {
@@ -5753,6 +5761,7 @@ async function runGoalLoop(run, goalPatch) {
     if (currentRun === run) activeGoalRuns.delete(chatId);
     if (run.activeRunRecorded) clearActiveRunSafely(messageId, "goal-finally");
     await client.stop();
+    finishJob();
   }
 }
 
@@ -5940,10 +5949,7 @@ async function startOrResumeAppServerThread(client, session, options = {}) {
     const resumeInfo = await loadCodexThreadResumeInfo(previousThreadId);
     if (!resumeInfo.resumeable) {
       markSessionResumeFailure(session, resumeInfo);
-      session.codexThreadId = "";
-      session.updatedAt = Date.now();
-      saveSessions();
-      log("WARN", "app-server thread binding is not resumable; starting new thread", {
+      log("WARN", "app-server thread binding is not resumable; preserving session binding", {
         sessionId: session.id,
         threadId: previousThreadId,
         reason: resumeInfo.reason,
@@ -5951,6 +5957,7 @@ async function startOrResumeAppServerThread(client, session, options = {}) {
         hasRollout: resumeInfo.hasRollout,
         rolloutPath: resumeInfo.rolloutPath || "",
       });
+      throw errorFromFailure(missingRolloutFailureForThread(previousThreadId, resumeInfo.reason || ""));
     }
   }
 
@@ -6010,6 +6017,8 @@ async function runCodexAppServer(event, session, state = null, onState = null, o
     mode: "app-server",
     steerInFlight: null,
   };
+  let finishJob;
+  activeJob.finished = new Promise((resolve) => { finishJob = resolve; });
   activeCodexJobs.set(chatId, activeJob);
 
   const flushState = async () => {
@@ -6068,6 +6077,9 @@ async function runCodexAppServer(event, session, state = null, onState = null, o
     liveState.threadId = threadId;
     activeJob.threadId = threadId;
 
+    if (stoppedJobs.has(messageId) || stoppedJobs.has(activeJob.rootMessageId)) {
+      throw new Error("codex job stopped by user");
+    }
     const turn = await client.request("turn/start", appServerTurnParams(threadId, event, userContent, session, options), 60_000);
     const turnStartedAt = Date.now();
     watchdog.touch();
@@ -6247,6 +6259,7 @@ async function runCodexAppServer(event, session, state = null, onState = null, o
       discard: discardClient || client.closed,
       reason: discardClient ? "turn-failed" : "turn-completed",
     });
+    finishJob();
   }
 }
 
@@ -6283,19 +6296,9 @@ async function runCodex(event, session, state = null, onState = null) {
       return await runCodexAppServer(event, session, state, onState);
     } catch (error) {
       const failure = classifyCodexFailure(error);
-      const canFallback = CONFIG.runMode === "auto" || failure.kind === "empty_completion";
+      const canFallback = CONFIG.runMode === "auto";
       if (!canFallback) throw error;
       if (["auth", "quota", "rate_limit", "user_stop"].includes(failure.kind)) throw error;
-      if (failure.kind === "empty_completion" && session.codexThreadId) {
-        log("WARN", "clearing codex app-server thread after empty completion", {
-          messageId: event.message_id || event.id,
-          sessionId: session.id,
-          threadId: session.codexThreadId,
-        });
-        session.codexThreadId = "";
-        session.updatedAt = Date.now();
-        saveSessions();
-      }
       log("WARN", "app-server mode failed; falling back to codex exec", {
         messageId: event.message_id || event.id,
         sessionId: session.id,
@@ -6535,6 +6538,10 @@ function pendingEventsForChat(chatId) {
   return eventDispatcher.countForChat(chatId);
 }
 
+function cancelQueuedExecution(chatId, { all = false } = {}) {
+  return eventDispatcher.cancelForChat(chatId, { all });
+}
+
 function queueSummary(chatId) {
   return eventDispatcher.summary(chatId);
 }
@@ -6723,7 +6730,7 @@ async function handleEvent(rawEvent, dispatchControl = {}) {
     return;
   }
 
-  await syncChatSessionsWithCodex(chatId);
+  await syncChatSessionsWithCodex(chatId, { ensureRunnableCurrent: false, reason: "message-preflight" });
   const session = getSession(chatId);
   if (await maybeRouteMessageToGoal(chatId, event, session, userContent, messageId)) {
     return;
@@ -6817,9 +6824,9 @@ async function handleEvent(rawEvent, dispatchControl = {}) {
   })();
 
   try {
+    appendHistory(session, "user", userContent || `${event.attachments?.length || 0} attachment(s)`);
     const result = await runCodex(event, session, cardState, updateCard);
     await cardOpenPromise;
-    appendHistory(session, "user", userContent || `${event.attachments?.length || 0} attachment(s)`);
     appendHistory(session, "assistant", result.text);
     stats.answered += 1;
     if (!card || !finalCardFlushOk) {
@@ -6952,13 +6959,17 @@ async function handleCommand(event, command) {
       await handleSteerCommand(event, command.rest, messageId);
       return;
     case "/stop":
-      await stopCurrentJob(chatId, messageId, { clearMode: stopClearMode(command.rest) });
+    case "/stopall":
+      await stopCurrentJob(chatId, messageId, {
+        clearMode: command.name === "/stopall" ? "all" : stopClearMode(command.rest),
+      });
       return;
     case "/queue":
       await sendText(chatId, `当前队列：${queueSummary(chatId)}`, "queue", messageId);
       return;
     case "/clearqueue":
-      await clearQueueCommand(chatId, command.rest, messageId);
+    case "/clearqueueall":
+      await clearQueueCommand(chatId, command.name === "/clearqueueall" ? "all" : command.rest, messageId);
       return;
     case "/sessions":
     case "/list": {
@@ -8127,11 +8138,21 @@ function stopClearMode(rest) {
 async function clearQueueCommand(chatId, rest, messageId) {
   const mode = stopClearMode(rest) === "all" ? "all" : "chat";
   const removed = clearPendingEventsForChat(chatId, { all: mode === "all" });
+  const cancelledPreflight = cancelQueuedExecution(chatId, { all: mode === "all" });
+  const targetChats = mode === "all"
+    ? [...new Set([...activeGoalRuns.keys(), ...activeCodexJobs.keys()])]
+    : [chatId];
+  for (const targetChatId of targetChats) {
+    const run = activeGoalRuns.get(targetChatId);
+    if (run) run.pendingSteers = [];
+    const job = activeCodexJobs.get(targetChatId);
+    if (job) job.cancelSteers = true;
+  }
   await sendText(
     chatId,
     mode === "all"
-      ? `已清空全部等待队列：${removed} 条。`
-      : `已清空当前聊天等待队列：${removed} 条。当前队列：${queueSummary(chatId)}`,
+      ? `已清空全部等待队列：${removed} 条，并取消尚未提交的任务：${cancelledPreflight} 条。`
+      : `已清空当前聊天等待队列：${removed} 条，并取消尚未提交的任务：${cancelledPreflight} 条。当前队列：${queueSummary(chatId)}`,
     "clearqueue",
     messageId,
   );
@@ -8139,6 +8160,13 @@ async function clearQueueCommand(chatId, rest, messageId) {
 
 async function stopCurrentJob(chatId, messageId, { clearMode = "" } = {}) {
   const cleared = clearMode ? clearPendingEventsForChat(chatId, { all: clearMode === "all" }) : 0;
+  if (clearMode) {
+    cancelQueuedExecution(chatId, { all: clearMode === "all" });
+    const run = activeGoalRuns.get(chatId);
+    if (run) run.pendingSteers = [];
+    const currentJob = activeCodexJobs.get(chatId);
+    if (currentJob) currentJob.cancelSteers = true;
+  }
   const job = activeCodexJobs.get(chatId);
   if (!job) {
     try {
@@ -8168,6 +8196,7 @@ async function stopCurrentJob(chatId, messageId, { clearMode = "" } = {}) {
   }
   stoppedJobs.add(job.messageId);
   if (job.rootMessageId) stoppedJobs.add(job.rootMessageId);
+  await sendText(chatId, "Stopping", "stop-start", messageId);
 
   if (job.mode === "app-server-goal" && job.client && job.threadId) {
     try {
@@ -8209,12 +8238,9 @@ async function stopCurrentJob(chatId, messageId, { clearMode = "" } = {}) {
         const current = activeCodexJobs.get(chatId);
         if (current?.pid === job.pid) terminateProcessTree(job.pid, true);
       }, 5000).unref?.();
-      await sendText(
-        chatId,
-        `已请求 Codex 原生停止当前任务；如果没有及时结束，Bridge 会自动兜底强制停止。${clearMode ? `已清理等待队列 ${cleared} 条。` : ""}`,
-        "stop",
-        messageId,
-      );
+      if (job.finished) await Promise.race([job.finished, new Promise((resolve) => setTimeout(resolve, 15_000))]);
+      const ended = activeCodexJobs.get(chatId) !== job;
+      await sendText(chatId, ended ? `Stopped${clearMode ? `；已清理等待队列 ${cleared} 条。` : "。"}` : "停止失败：当前 Codex 任务仍未结束。", "stop", messageId);
       return;
     } catch (error) {
       log("WARN", "codex turn interrupt failed; falling back to process termination", {
@@ -8234,12 +8260,9 @@ async function stopCurrentJob(chatId, messageId, { clearMode = "" } = {}) {
         const current = activeCodexJobs.get(chatId);
         if (current?.pid === job.pid) terminateProcessTree(job.pid, true);
       }, 5000).unref?.();
-      await sendText(
-        chatId,
-        `已暂停 Codex goal 并请求停止当前 turn；如果没有及时结束，Bridge 会自动兜底强制停止。${clearMode ? `已清理等待队列 ${cleared} 条。` : ""}`,
-        "stop",
-        messageId,
-      );
+      if (job.finished) await Promise.race([job.finished, new Promise((resolve) => setTimeout(resolve, 15_000))]);
+      const ended = activeCodexJobs.get(chatId) !== job;
+      await sendText(chatId, ended ? `Stopped${clearMode ? `；已清理等待队列 ${cleared} 条。` : "。"}` : "停止失败：当前 Codex goal 仍未结束。", "stop", messageId);
       return;
     } catch (error) {
       log("WARN", "codex goal turn interrupt failed; falling back to process termination", {
@@ -8254,7 +8277,9 @@ async function stopCurrentJob(chatId, messageId, { clearMode = "" } = {}) {
 
   terminateProcessTree(job.pid, false);
   setTimeout(() => terminateProcessTree(job.pid, true), 5000).unref?.();
-  await sendText(chatId, `已停止当前 Codex 任务。${clearMode ? `已清理等待队列 ${cleared} 条。` : ""}`, "stop", messageId);
+  if (job.finished) await Promise.race([job.finished, new Promise((resolve) => setTimeout(resolve, 15_000))]);
+  const ended = activeCodexJobs.get(chatId) !== job;
+  await sendText(chatId, ended ? `Stopped${clearMode ? `；已清理等待队列 ${cleared} 条。` : "。"}` : "停止失败：当前 Codex 任务仍未结束。", "stop", messageId);
 }
 
 async function handleSteerCommand(event, rest, messageId) {
@@ -8320,6 +8345,7 @@ async function handleSteerCommand(event, rest, messageId) {
   event.attachments = steerAttachments;
   const previous = job.steerInFlight || Promise.resolve();
   const current = previous.catch(() => {}).then(async () => {
+    if (job.cancelSteers) throw new Error("补充指令已被 /clearqueue 取消");
     if (
       activeCodexJobs.get(chatId) !== job
       || !job.client
@@ -8468,9 +8494,9 @@ function helpMarkdown() {
     "`/reset` — 清空当前会话上下文",
     "`/stop` — 停止当前 Codex 任务",
     "`/stop queue` — 停止当前任务，并清空当前聊天的等待队列",
-    "`/stop all` — 停止当前任务，并清空本 Bot 全部等待队列",
+    "`/stop all` / `/stopall` — 停止当前任务，并清空本 Bot 全部等待队列",
     "`/queue` — 查看等待队列",
-    "`/clearqueue [all]` — 清空当前聊天或全部等待队列",
+    "`/clearqueue [all]` / `/clearqueueall` — 清空当前聊天或全部等待队列",
     "`/list` — 同 `/sessions`",
     "",
     "直接发送文本会进入当前会话。群聊里可以 @codex助手 后发送文本。",

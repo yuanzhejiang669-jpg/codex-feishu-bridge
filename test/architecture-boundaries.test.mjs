@@ -473,6 +473,30 @@ test("event dispatcher clear does not cancel a queued event after commit", async
   await waitFor(() => dispatcher.activeJobs === 0);
 });
 
+test("event dispatcher cancelForChat cancels dequeued work before commit", async () => {
+  let release;
+  let entered;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const started = new Promise((resolve) => { entered = resolve; });
+  let committed = false;
+  const dispatcher = createEventDispatcher({
+    maxConcurrent: 1,
+    chatIdOf: (event) => event.chatId,
+    messageIdOf: (event) => event.messageId,
+    handleEvent: async (_event, control) => {
+      entered();
+      await gate;
+      committed = control.commit();
+    },
+  });
+  dispatcher.enqueue({ chatId: "chat-a", messageId: "message-1" });
+  await started;
+  assert.equal(dispatcher.cancelForChat("chat-a"), 1);
+  release();
+  await waitFor(() => dispatcher.activeJobs === 0);
+  assert.equal(committed, false);
+});
+
 test("event dispatcher recall cancels an uncommitted event in preflight", async () => {
   let releasePreflight;
   let enterPreflight;
