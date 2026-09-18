@@ -31,6 +31,7 @@ const { createRecoverySupervisor } = require("./services/recovery-supervisor.cjs
 const { readDesktopSettings, writeDesktopSettings } = require("./services/desktop-settings.cjs");
 const { createDesktopStartup } = require("./services/windows-startup.cjs");
 const { createCredentialStore, waitForCredentialStoreHydration } = require("./services/credential-store.cjs");
+const { assertSecureStorage, inspectSecureStorage } = require("./services/secure-storage.cjs");
 const { applyCapabilityMigration, previewCapabilityMigration } = require("./services/capability-migration.cjs");
 const { inspectProvider, testProvider } = require("./services/provider-setup.cjs");
 const { reasoningRegistry, resolveModelCapabilities } = require("./services/reasoning-effort.cjs");
@@ -63,6 +64,7 @@ const { inspectDataSchema, migrateDesktopData } = require("./services/data-migra
 const { assessCompatibility } = require("./services/compatibility.cjs");
 const { createUpdaterService } = require("./services/updater.cjs");
 const { assessUpdateSupport } = require("./services/update-support.cjs");
+const { createLinuxReleaseUpdater } = require("./services/linux-release-updater.cjs");
 const {
   clearRecoveryMarker,
   restoreUpdateBots,
@@ -111,13 +113,19 @@ const desktopStartup = createDesktopStartup(app);
 let providerCredentialStore = null;
 let batchRestartInFlight = false;
 
-async function initializeMacProviderCredentialStore() {
-  if (process.platform !== "darwin") return;
+async function initializeProtectedProviderCredentialStore() {
+  if (!new Set(["darwin", "linux"]).has(process.platform)) return;
   const credentialRoot = path.join(managedDataRoot(), "provider-credentials");
   providerCredentialStore = createCredentialStore({
     root: credentialRoot,
-    encrypt: (value) => safeStorage.encryptString(value),
-    decrypt: (value) => safeStorage.decryptString(value),
+    encrypt: (value) => {
+      assertSecureStorage(safeStorage, process.platform);
+      return safeStorage.encryptString(value);
+    },
+    decrypt: (value) => {
+      assertSecureStorage(safeStorage, process.platform);
+      return safeStorage.decryptString(value);
+    },
   });
   let hasStoredCredentials = false;
   try {
@@ -128,12 +136,12 @@ async function initializeMacProviderCredentialStore() {
   const result = await waitForCredentialStoreHydration({
     attempts: 61,
     delayMs: 1_000,
-    isAvailable: () => safeStorage.isEncryptionAvailable(),
+    isAvailable: () => inspectSecureStorage(safeStorage, process.platform).available,
     createStore: () => providerCredentialStore,
   });
   if (!result.ready) {
     const failedNames = result.hydration.failed.map((item) => item.name).filter(Boolean);
-    console.warn("macOS Provider credentials were not ready before startup timeout", {
+    console.warn("Provider credentials were not ready before startup timeout", {
       attempts: result.attempt,
       failedNames,
     });
@@ -196,6 +204,7 @@ function inspectDesktopSettings() {
 }
 
 function setupOptions() {
+  const secureStorage = inspectSecureStorage(safeStorage, process.platform);
   return {
     dataRoot: managedDataRoot(),
     workspaceRoot: workspaceRoot(),
@@ -206,10 +215,10 @@ function setupOptions() {
     larkCliPath: currentState?.engine?.larkCliPath || "",
     existingNames: currentState?.bridge?.instances?.map((item) => item.name) || [],
     encryptSecret: (value) => {
-      if (!safeStorage.isEncryptionAvailable()) throw new Error("系统安全存储暂不可用");
+      assertSecureStorage(safeStorage, process.platform);
       return safeStorage.encryptString(value);
     },
-    credentialStorage: process.platform === "darwin" ? "macos-keychain" : "windows-dpapi",
+    credentialStorage: secureStorage.id,
   };
 }
 
@@ -227,7 +236,7 @@ function supervisorOptions() {
     defaultCodexHome: path.join(app.getPath("home"), ".codex"),
     codexAvailable: Boolean(currentState?.codex?.runtimeFound),
     decryptSecret: (value) => {
-      if (!safeStorage.isEncryptionAvailable()) throw new Error("系统安全存储暂不可用");
+      assertSecureStorage(safeStorage, process.platform);
       return safeStorage.decryptString(value);
     },
   };
@@ -387,12 +396,28 @@ function createDesktopUpdater() {
     smokeTest,
     captureMode: Boolean(capturePath),
     platform: process.platform,
+    arch: process.arch,
     executablePath: process.execPath,
   });
+  const platformUpdater = process.platform === "linux"
+    ? createLinuxReleaseUpdater({
+        currentVersion: app.getVersion(),
+        cacheRoot: path.join(app.getPath("userData"), "updates"),
+        helperPath: app.isPackaged
+          ? path.join(process.resourcesPath, "scripts", "install-linux-update.sh")
+          : path.join(__dirname, "..", "..", "resources", "scripts", "install-linux-update.sh"),
+        executablePath: process.execPath,
+        logPath: path.join(managedDataRoot(), "logs", "linux-update.log"),
+        quit: () => {
+          isQuitting = true;
+          app.quit();
+        },
+      })
+    : autoUpdater;
   return createUpdaterService({
     supported: updateSupport.supported,
     unsupportedReason: updateSupport.reason,
-    updater: autoUpdater,
+    updater: platformUpdater,
     currentVersion: app.getVersion(),
     inspectBots: async () => inspectManagedBots(managedDataRoot(), runtimeLocalAppData()),
     prepareInstall: prepareUpdateInstall,
@@ -461,6 +486,7 @@ async function loadState() {
     ...managedBots.map((bot) => bot.codexHome),
   ]);
   const providerCatalog = inspectProviderCatalog(path.join(app.getPath("home"), ".codex"));
+  const secureStorage = inspectSecureStorage(safeStorage, process.platform);
   currentState = {
     generatedAt: new Date().toISOString(),
     app: {
@@ -468,7 +494,9 @@ async function loadState() {
       packaged: app.isPackaged,
       platform: process.platform,
       arch: process.arch,
-      credentialStorage: process.platform === "darwin" ? "macOS Keychain" : "Windows user environment / DPAPI",
+      credentialStorage: secureStorage.label,
+      credentialStorageAvailable: secureStorage.available,
+      credentialStorageError: secureStorage.error,
     },
     codex,
     bridge,
@@ -628,7 +656,7 @@ if (!singleInstance) {
         desktopSettings = readDesktopSettings(managedDataRoot());
         if (desktopSettings.error) throw new Error(`客户端设置损坏：${desktopSettings.error}`);
         await Promise.all([
-          initializeMacProviderCredentialStore(),
+          initializeProtectedProviderCredentialStore(),
           initializeMacProviderEnvironment(),
         ]);
         if (desktopSettings.launchAtLogin && desktopStartup.supported()) desktopStartup.setEnabled(true);

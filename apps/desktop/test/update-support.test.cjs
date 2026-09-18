@@ -43,3 +43,31 @@ test("enables notarized Developer ID macOS packages", () => {
   assert.equal(result.supported, true);
   assert.equal(calls.length, 2);
 });
+
+test("enables installed Ubuntu x64 DEB updates when required system tools exist", () => {
+  const result = assessUpdateSupport({
+    packaged: true,
+    platform: "linux",
+    arch: "x64",
+    executablePath: "/opt/Codex Feishu Bridge/codex-feishu-bridge",
+    exists: () => true,
+  });
+  assert.deepEqual(result, { supported: true, reason: "" });
+});
+
+test("blocks Linux updates outside the installed DEB and when PolicyKit is missing", () => {
+  assert.match(assessUpdateSupport({
+    packaged: true,
+    platform: "linux",
+    arch: "x64",
+    executablePath: "/tmp/codex-feishu-bridge",
+    exists: () => true,
+  }).reason, /DEB/);
+  assert.match(assessUpdateSupport({
+    packaged: true,
+    platform: "linux",
+    arch: "x64",
+    executablePath: "/opt/Codex Feishu Bridge/codex-feishu-bridge",
+    exists: (filePath) => !filePath.endsWith("pkexec"),
+  }).reason, /PolicyKit/);
+});

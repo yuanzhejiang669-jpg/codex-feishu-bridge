@@ -74,3 +74,26 @@ test("prepares and invokes the installer only after every Bot is idle", async ()
     service.stop();
   }
 });
+
+test("rolls back stopped Bots when launching an installer fails", async () => {
+  const updater = fakeUpdater();
+  updater.quitAndInstall = () => { throw new Error("installer launch failed"); };
+  let rolledBack = false;
+  const service = createUpdaterService({
+    supported: true,
+    updater,
+    currentVersion: "0.2.0",
+    checkDelayMs: 60_000,
+    inspectBots: async () => [{ name: "assistant-1", online: true, activeRunCount: 0 }],
+    prepareInstall: async () => ({ rollback: async () => { rolledBack = true; } }),
+  });
+  service.start();
+  try {
+    updater.emit("update-downloaded", { version: "0.2.1" });
+    await assert.rejects(service.install(), /installer launch failed/);
+    assert.equal(rolledBack, true);
+    assert.equal(service.snapshot().status, "downloaded");
+  } finally {
+    service.stop();
+  }
+});
