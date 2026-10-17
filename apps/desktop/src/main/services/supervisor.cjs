@@ -131,6 +131,8 @@ function processEnvironment(options, bot = null) {
     LOCALAPPDATA: options.localAppData,
     USERPROFILE: profileHome,
     HOME: profileHome,
+    CODEX_FEISHU_OPENAI_ACCOUNTS_ROOT: path.join(options.defaultCodexHome || path.join(os.homedir(), ".codex"), "bridge-openai-accounts"),
+    CODEX_FEISHU_OPENAI_DEFAULT_ACCOUNT: bot?.openaiAccount || "",
     LARK_CLI_BIN: options.larkCliPath,
     PATH: [...toolDirs, process.env.PATH || ""].join(path.delimiter),
   };

@@ -178,7 +178,7 @@ function inspectSessionOverrides(sessionPaths = []) {
     let count = 0;
     for (const chat of Object.values(data.chats || {})) {
       for (const session of Array.isArray(chat?.sessions) ? chat.sessions : []) {
-        if (String(session?.providerOverride || "").trim() || String(session?.providerBundleOverride || "").trim()) count += 1;
+        if (String(session?.providerOverride || "").trim() || String(session?.providerBundleOverride || "").trim() || String(session?.openaiAccountOverride || "").trim()) count += 1;
       }
     }
     overrideCount += count;
@@ -197,8 +197,9 @@ function clearSessionOverrides(sessionPaths = [], options = {}) {
     let changed = 0;
     for (const chat of Object.values(data.chats || {})) {
       for (const session of Array.isArray(chat?.sessions) ? chat.sessions : []) {
-        if (String(session?.providerOverride || "").trim() || String(session?.providerBundleOverride || "").trim()) changed += 1;
+        if (String(session?.providerOverride || "").trim() || String(session?.providerBundleOverride || "").trim() || String(session?.openaiAccountOverride || "").trim()) changed += 1;
         session.providerOverride = "";
+        session.openaiAccountOverride = "";
         session.providerBundleOverride = "";
       }
     }

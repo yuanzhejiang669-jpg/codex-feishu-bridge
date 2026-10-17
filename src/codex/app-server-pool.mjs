@@ -21,6 +21,7 @@ export function createAppServerPool({
     const client = createClient(options);
     const entry = {
       client,
+      accountAlias: options.accountAlias || "",
       busy: false,
       initialized: false,
       initializationResult: null,
@@ -55,9 +56,9 @@ export function createAppServerPool({
     await entry.client?.stop?.();
   }
 
-  function reusableEntry() {
+  function reusableEntry(options = {}) {
     for (const entry of entries) {
-      if (!entry.busy && !entry.client?.closed) return entry;
+      if (!entry.busy && !entry.client?.closed && entry.accountAlias === (options.accountAlias || "")) return entry;
     }
     return null;
   }
@@ -130,8 +131,9 @@ export function createAppServerPool({
   function acquire(options = {}) {
     if (closed) return Promise.reject(new Error("App-server pool is closed"));
     pruneClosedEntries();
-    const reusable = reusableEntry();
+    const reusable = reusableEntry(options);
     if (reusable) return Promise.resolve(createLease(reusable));
+    retireMismatchedIdle(options);
     if (entries.size < capacity) {
       try {
         return Promise.resolve(createLease(createEntry(options)));
@@ -152,7 +154,8 @@ export function createAppServerPool({
     }
     pruneClosedEntries();
     while (waiters.length) {
-      let entry = reusableEntry();
+      let entry = reusableEntry(waiters[0].options);
+      if (!entry) retireMismatchedIdle(waiters[0].options);
       if (!entry && entries.size < capacity) {
         const waiter = waiters.shift();
         try {
@@ -166,6 +169,16 @@ export function createAppServerPool({
       if (!entry) return;
       const waiter = waiters.shift();
       waiter.resolve(createLease(entry));
+    }
+  }
+
+  function retireMismatchedIdle(options) {
+    if (entries.size < capacity) return;
+    for (const entry of entries) {
+      if (!entry.busy && entry.accountAlias !== (options.accountAlias || "")) {
+        void stopEntry(entry, "account-changed");
+        return;
+      }
     }
   }
 

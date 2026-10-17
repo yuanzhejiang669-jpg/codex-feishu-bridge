@@ -16,6 +16,9 @@ export class AppServerClient {
     spawnProcess = spawn,
     maxStderrBytes = DEFAULT_MAX_STDERR_BYTES,
     stopGraceMs = 5000,
+    environment = {},
+    accountAlias = "",
+    refreshAccountTokens = null,
   } = {}) {
     if (!tool?.command) throw new Error("Codex app-server command is required");
     this.tool = tool;
@@ -39,6 +42,9 @@ export class AppServerClient {
     this.stopGraceMs = Math.max(0, Number(stopGraceMs) || 0);
     this.stopEscalationTimer = null;
     this.closed = false;
+    this.environment = environment;
+    this.accountAlias = accountAlias;
+    this.refreshAccountTokens = refreshAccountTokens;
   }
 
   start() {
@@ -49,6 +55,7 @@ export class AppServerClient {
         ...process.env,
         CODEX_HOME: this.codexHome,
         CODEX_FEISHU_BRIDGE: "1",
+        ...this.environment,
       },
       windowsHide: true,
       stdio: ["pipe", "pipe", "pipe"],
@@ -124,6 +131,17 @@ export class AppServerClient {
   }
 
   respondToServerRequest(message) {
+    if (message.method === "account/chatgptAuthTokens/refresh") {
+      void Promise.resolve().then(async () => {
+        if (!this.refreshAccountTokens) throw new Error("该进程没有可刷新的独立账号");
+        const result = await this.refreshAccountTokens({ ...(message.params || {}), previousToken: this.currentAccountToken || "" });
+        this.currentAccountToken = result.accessToken;
+        this.write({ id: message.id, result });
+      }).catch(() => {
+        try { this.write({ id: message.id, error: { code: -32000, message: "账号刷新失败，请在 Bridge 客户端重新登录所选账号" } }); } catch {}
+      });
+      return;
+    }
     this.write({
       id: message.id,
       result: appServerRequestResult(message.method, this.workspace),

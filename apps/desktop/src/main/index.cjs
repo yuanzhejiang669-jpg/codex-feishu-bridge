@@ -77,6 +77,7 @@ const {
   registerFactoryBot,
 } = require("./services/workspace-factory.cjs");
 const { readTrustedCodexHomes } = require("./services/trusted-codex-homes.cjs");
+const { startAccountLogin, setBotAccount, forgetAccount } = require("./services/openai-accounts.cjs");
 const { createWindowReadiness } = require("./services/window-readiness.cjs");
 
 const smokeTest = process.argv.includes("--smoke-test");
@@ -818,6 +819,20 @@ if (!singleInstance) {
       const result = startDesktopOpenAiLogin(codexHome, modelSourceOptions());
       await loadState();
       return result;
+    });
+    ipcMain.handle("desktop:add-openai-account", (_event, input) => {
+      assertStartupReady();
+      return startAccountLogin(input || {}, modelSourceOptions());
+    });
+    ipcMain.handle("desktop:set-bot-openai-account", async (_event, input) => {
+      assertStartupReady();
+      const result = await setBotAccount(input, modelSourceOptions());
+      await loadState(); return result;
+    });
+    ipcMain.handle("desktop:forget-openai-account", async (_event, input) => {
+      assertStartupReady();
+      const result = await forgetAccount(input, modelSourceOptions());
+      await loadState(); return result;
     });
     ipcMain.handle("desktop:trust-codex-home", async (_event, codexHome) => {
       assertStartupReady();

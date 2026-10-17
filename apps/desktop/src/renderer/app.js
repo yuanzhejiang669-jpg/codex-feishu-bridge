@@ -85,6 +85,9 @@ const elements = {
   providerSyncApply: document.querySelector("#provider-sync-apply-button"),
   providerOperationResult: document.querySelector("#provider-operation-result"),
   modelSourceCount: document.querySelector("#model-source-count"),
+  addOpenAiAccount: document.querySelector("#add-openai-account"),
+  openaiAccountList: document.querySelector("#openai-account-list"),
+  openaiAccountBindings: document.querySelector("#openai-account-bindings"),
   modelSourceList: document.querySelector("#model-source-list"),
   modelSourceResult: document.querySelector("#model-source-result"),
   createWorkspaceFactory: document.querySelector("#create-workspace-factory-button"),
@@ -649,11 +652,12 @@ function loginJobPresentation(job) {
 }
 
 function renderModelSources(modelSources = {}) {
+  renderOpenAiAccounts(modelSources);
   const homes = modelSources.homes || [];
   elements.modelSourceCount.textContent = `${homes.length} 个 Codex Home`;
   elements.modelSourceList.innerHTML = homes.length ? homes.map((home, index) => {
     const loginClass = badgeClass(home.login?.state === "signed-in" ? "good" : home.login?.state === "signed-out" ? "warn" : "info");
-    const loginText = home.login?.state === "signed-in" ? "OpenAI 已登录" : home.login?.state === "signed-out" ? "OpenAI 未登录" : "登录状态未知";
+    const loginText = home.login?.state === "signed-in" ? `OpenAI 已登录${home.login.email ? ` · ${escapeHtml(home.login.email)}` : ""}` : home.login?.state === "signed-out" ? "OpenAI 未登录" : "登录状态未知";
     const active = (home.bots || []).reduce((sum, bot) => sum + Number(bot.activeRunCount || 0), 0);
     const readOnly = home.manageable !== true;
     const loginJob = loginJobPresentation(home.loginJob);
@@ -701,8 +705,59 @@ function renderModelSources(modelSources = {}) {
     }
   });
   clearTimeout(modelSourcePollTimer);
-  if (homes.some((home) => home.loginJob?.status === "running")) modelSourcePollTimer = setTimeout(refresh, 2000);
+  if (homes.some((home) => home.loginJob?.status === "running") || ["running", "finishing"].includes(modelSources.accountLoginJob?.status)) modelSourcePollTimer = setTimeout(refresh, 2000);
 }
+
+function renderOpenAiAccounts(modelSources) {
+  const accounts = modelSources.accounts || [];
+  const bots = modelSources.accountBots || [];
+  const job = modelSources.accountLoginJob;
+  elements.addOpenAiAccount.disabled = ["running", "finishing"].includes(job?.status);
+  const jobText = job?.status === "running" ? "等待浏览器登录…" : job?.status === "finishing" ? "正在保存账号…" : job?.status === "failed" ? `登录失败：${job.error || "请重试"}` : job?.status === "timed-out" ? "登录已超时，请重试" : "";
+  elements.openaiAccountList.innerHTML = (jobText ? `<p>${escapeHtml(jobText)}</p>` : "") + (accounts.length ? accounts.map((account, index) => {
+    const bound = bots.filter((bot) => bot.accountAlias === account.alias).map((bot) => bot.label);
+    return `<div class="model-source-row" data-account-index="${index}"><div class="model-source-main"><strong>${escapeHtml(account.alias)}</strong><span>${escapeHtml(account.email || "未提供邮箱")}</span></div><div class="model-source-status"><span class="${badgeClass(account.state === "saved" ? "good" : "warn")}">${account.state === "saved" ? "已保存登录" : "需要重新登录"}</span><span>${escapeHtml(bound.length ? `Bot 默认：${bound.join("、")}` : "未设为 Bot 默认；可在飞书会话中选择")}</span></div><div class="inline-actions"><button class="secondary-button" data-account-action="login" type="button">重新登录</button><button class="secondary-button" data-account-action="remove" type="button">移除保存</button></div></div>`;
+  }).join("") : '<p class="empty-row">尚未保存账号。点击“添加 OpenAI 账号”后在浏览器完成登录。</p>');
+  // Keep in-progress selections across the automatic status refresh.
+  const drafts = new Map([...elements.openaiAccountBindings.querySelectorAll("[data-account-bot]")].map((row) => [row.dataset.accountBot, row.querySelector("select").value]));
+  elements.openaiAccountBindings.innerHTML = bots.length ? `<h3>机器人默认账号</h3><p class="model-source-hint">只更改所选 Bot；已有飞书会话覆盖仍优先。任务执行中不能切换，在线 Bot 会在保存后重启。</p>` + bots.map((bot) => `<div class="inline-actions" data-account-bot="${escapeHtml(bot.name)}"><span>${escapeHtml(bot.label)}</span><select><option value="">跟随原有配置</option>${accounts.map((account) => `<option value="${escapeHtml(account.alias)}" ${account.state === "saved" ? "" : "disabled"}>${escapeHtml(account.alias)}</option>`).join("")}</select><button type="button" class="secondary-button" data-account-bind>保存默认账号</button><span>当前：${escapeHtml(bot.accountAlias || "跟随原有配置")}</span></div>`).join("") : "";
+  for (const row of elements.openaiAccountBindings.querySelectorAll("[data-account-bot]")) {
+    const bot = bots.find((item) => item.name === row.dataset.accountBot);
+    const wanted = drafts.get(bot.name) ?? bot.accountAlias;
+    if ([...row.querySelector("select").options].some((option) => option.value === wanted)) row.querySelector("select").value = wanted;
+  }
+}
+
+elements.addOpenAiAccount.addEventListener("click", async () => {
+  try { await window.bridgeDesktop.addOpenAiAccount({}); await refresh(); }
+  catch (error) { showModelSourceResult("添加账号失败", error.message, "bad"); }
+});
+elements.openaiAccountList.addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-account-action]");
+  if (!button) return;
+  const account = state?.modelSources?.accounts?.[Number(button.closest("[data-account-index]").dataset.accountIndex)];
+  if (!account) return;
+  try {
+    if (button.dataset.accountAction === "login") await window.bridgeDesktop.addOpenAiAccount({ alias: account.alias });
+    else {
+      if (!window.confirm(`移除保存的 ${account.alias}？选择该账号的会话将提示重新选择；原有 Home 登录不受影响。`)) return;
+      await window.bridgeDesktop.forgetOpenAiAccount({ alias: account.alias });
+    }
+    await refresh();
+  } catch (error) { showModelSourceResult("账号操作失败", error.message, "bad"); }
+});
+elements.openaiAccountBindings.addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-account-bind]");
+  if (!button) return;
+  const row = button.closest("[data-account-bot]");
+  button.disabled = true;
+  try {
+    await window.bridgeDesktop.setBotOpenAiAccount({ name: row.dataset.accountBot, alias: row.querySelector("select").value });
+    showModelSourceResult("默认账号已保存", "仅影响所选 Bot；已有会话覆盖保持不变。", "good");
+    await refresh();
+  } catch (error) { showModelSourceResult("切换失败", error.message, "bad"); }
+  finally { button.disabled = false; }
+});
 
 function showModelSourceResult(title, detail, kind = "good") {
   elements.modelSourceResult.innerHTML = `<strong>${escapeHtml(title)}</strong><span>${escapeHtml(detail)}</span>`;

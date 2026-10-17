@@ -50,6 +50,7 @@ import {
   createServiceTierPolicy,
 } from "./src/config/service-tier.mjs";
 import { AppServerClient } from "./src/codex/app-server-client.mjs";
+import openaiAccounts from "./src/codex/openai-accounts.cjs";
 import { createAppServerPool } from "./src/codex/app-server-pool.mjs";
 import { createAppServerProtocol } from "./src/codex/app-server-protocol.mjs";
 import {
@@ -561,12 +562,14 @@ function cleanOverride(value) {
 
 function effectiveSessionSettings(session) {
   const model = cleanOverride(session?.modelOverride) || CONFIG.codexModel || resolveCodexConfigValue("model") || "";
-  const provider = cleanOverride(session?.providerOverride) || resolveCodexConfigValue("model_provider") || "openai";
+  const provider = cleanOverride(session?.providerOverride) || (process.env.CODEX_FEISHU_OPENAI_DEFAULT_ACCOUNT ? "openai" : resolveCodexConfigValue("model_provider")) || "openai";
   const requestedReasoning = cleanOverride(session?.reasoningOverride) || CONFIG.codexReasoning || resolveCodexConfigValue("model_reasoning_effort") || MODEL_REASONING_REGISTRY.defaultRequestedEffort;
   const reasoningMapping = mapReasoningEffort({ provider, model, effort: requestedReasoning }, MODEL_REASONING_REGISTRY);
   const reasoning = reasoningMapping.supported ? reasoningMapping.effectiveEffort : "";
   const serviceTier = cleanOverride(session?.serviceTierOverride) || resolveCodexConfigValue("service_tier") || "";
-  return { model, provider, requestedReasoning, reasoning, reasoningMapping, serviceTier };
+  const accountAlias = provider === "openai"
+    ? cleanOverride(session?.openaiAccountOverride) || (!session?.providerOverride ? process.env.CODEX_FEISHU_OPENAI_DEFAULT_ACCOUNT || openaiAccounts.defaultAccount(CONFIG.codexHome) : "") : "";
+  return { model, provider, accountAlias, requestedReasoning, reasoning, reasoningMapping, serviceTier };
 }
 
 function assertReasoningSupported(settings) {
@@ -578,7 +581,7 @@ function assertReasoningSupported(settings) {
 function settingsSummary(session) {
   const settings = effectiveSessionSettings(session);
   return [
-    `provider ${settings.provider || "默认"}`,
+    `provider ${settings.accountAlias || settings.provider || "默认"}`,
     `model ${settings.model || "默认"}`,
     `reasoning ${settings.requestedReasoning || "默认"}${settings.reasoningMapping.mapped ? ` → ${settings.reasoning}` : ""}`,
     `speed ${displayServiceTier(settings.serviceTier) || "默认"}`,
@@ -667,6 +670,7 @@ function normalizeSessionData(session) {
     modelOverride: cleanOverride(session?.modelOverride),
     reasoningOverride: cleanOverride(session?.reasoningOverride),
     providerOverride: cleanOverride(session?.providerOverride),
+    openaiAccountOverride: cleanOverride(session?.openaiAccountOverride),
     providerBundleOverride: cleanOverride(session?.providerBundleOverride),
     serviceTierOverride: cleanOverride(session?.serviceTierOverride),
   };
@@ -4911,9 +4915,11 @@ async function syncCodexSidebarThread({ event, session, promptFile, outFile, std
   await ensureAppServerThreadVisible(threadId, "exec/completed");
 }
 
-function startAppServerClient({ cwd = CONFIG.workspace, label = "codex-app-server" } = {}) {
+function startAppServerClient({ cwd = CONFIG.workspace, label = "codex-app-server", accountAlias = "" } = {}) {
+  let previousToken = "";
+  const root = openaiAccounts.accountsRoot();
   return new AppServerClient({
-    tool: CONFIG.codexCli,
+    tool: accountAlias ? { ...CONFIG.codexCli, argsPrefix: [...CONFIG.codexCli.argsPrefix, "-c", 'cli_auth_credentials_store="ephemeral"'] } : CONFIG.codexCli,
     codexHome: CONFIG.codexHome,
     workspace: CONFIG.workspace,
     cwd,
@@ -4922,6 +4928,15 @@ function startAppServerClient({ cwd = CONFIG.workspace, label = "codex-app-serve
     log,
     formatError: errorText,
     terminateProcessTree,
+    accountAlias,
+    environment: accountAlias ? { OPENAI_API_KEY: undefined, CODEX_API_KEY: undefined, CODEX_ACCESS_TOKEN: undefined } : {},
+    refreshAccountTokens: accountAlias ? async (params) => {
+      const identity = openaiAccounts.readAccountAuth(root, accountAlias).identity;
+      if (params.previousAccountId && params.previousAccountId !== identity.accountId) throw new Error("账号身份不匹配");
+      const tokens = await openaiAccounts.accountTokens(root, accountAlias, { codexPath: CONFIG.codexCli.command, force: true, previousToken: params.previousToken || previousToken });
+      previousToken = tokens.accessToken;
+      return tokens;
+    } : null,
   }).start();
 }
 
@@ -4950,6 +4965,7 @@ async function initializeAppServerClient(client) {
     capabilities: { experimentalApi: true },
   }, 60_000);
   client.notify("initialized");
+  await synchronizeAppServerAccount(client);
   // Record the server's own handshake, not --version from a possibly upgraded disk file.
   try {
     const target = path.join(CONFIG.stateDir, 'runtime-backends.json');
@@ -4970,6 +4986,17 @@ async function initializeAppServerClient(client) {
     fs.renameSync(temporary, target);
   } catch (error) { log('WARN', 'Could not record backend handshake', { error: String(error) }); }
   return initialized;
+}
+
+async function synchronizeAppServerAccount(client) {
+  if (!client.accountAlias) return;
+  // Revalidate even a warm client: a removed or reauthenticated account must not
+  // keep using credentials cached in its process on the next turn.
+  const tokens = await openaiAccounts.accountTokens(openaiAccounts.accountsRoot(), client.accountAlias, { codexPath: CONFIG.codexCli.command });
+  if (client.currentAccountToken !== tokens.accessToken) {
+    await client.request("account/login/start", { type: "chatgptAuthTokens", ...tokens }, 15_000);
+    client.currentAccountToken = tokens.accessToken;
+  }
 }
 
 function observeAppServerSessionEvent(session, message) {
@@ -5012,7 +5039,7 @@ function createRunWatchdog(label, onTimeout, {
 }
 
 async function compactAppServerThread(session) {
-  const client = startAppServerClient({ cwd: CONFIG.workspace });
+  const client = startAppServerClient({ cwd: CONFIG.workspace, accountAlias: effectiveSessionSettings(session).accountAlias });
   const startedAt = Date.now();
   const watchdog = createRunWatchdog("codex app-server compaction", () => {
     void client.stop();
@@ -5076,7 +5103,7 @@ async function withAppServerThread(session, { createIfMissing = true, timeoutMs 
     throw new Error("当前会话还没有创建 Codex 原生 thread。");
   }
 
-  const client = startAppServerClient({ cwd: CONFIG.workspace });
+  const client = startAppServerClient({ cwd: CONFIG.workspace, accountAlias: effectiveSessionSettings(session).accountAlias });
   try {
     await initializeAppServerClient(client);
     const threadId = createIfMissing
@@ -5588,7 +5615,7 @@ function isActiveTurnRaceError(error) {
 async function runGoalLoop(run, goalPatch) {
   const { chatId, messageId, session, state } = run;
   const startedAt = Date.now();
-  const client = startAppServerClient({ cwd: CONFIG.workspace });
+  const client = startAppServerClient({ cwd: CONFIG.workspace, accountAlias: effectiveSessionSettings(session).accountAlias });
   run.client = client;
   const activeJob = {
     pid: client.child.pid,
@@ -5766,8 +5793,8 @@ async function runGoalLoop(run, goalPatch) {
   }
 }
 
-async function withConfigClient(fn) {
-  const client = startAppServerClient({ cwd: CONFIG.workspace });
+async function withConfigClient(fn, session = null) {
+  const client = startAppServerClient({ cwd: CONFIG.workspace, accountAlias: effectiveSessionSettings(session).accountAlias });
   try {
     await initializeAppServerClient(client);
     return await fn(client);
@@ -5780,11 +5807,11 @@ async function writeCodexConfigValue(keyPath, value) {
   return writeTopLevelCodexConfigValue(keyPath, value);
 }
 
-async function listCodexModels() {
+async function listCodexModels(session = null) {
   return await withConfigClient(async (client) => {
     const result = await client.request("model/list", { includeHidden: false, limit: 50 }, 60_000);
     return Array.isArray(result?.data) ? result.data : [];
-  });
+  }, session);
 }
 
 async function listCurrentProviderModels(session) {
@@ -5800,7 +5827,7 @@ async function listCurrentProviderModels(session) {
         source: "codex",
         provider,
         settings,
-        models: await listCodexModels(),
+        models: await listCodexModels(session),
       };
     }
     throw new Error(`provider ${provider.id} 未配置 base_url，无法查询 /models。`);
@@ -6003,7 +6030,7 @@ async function runCodexAppServer(event, session, state = null, onState = null, o
   const userContent = userTextFromContent(event.content);
   const liveState = state || createRunState(session, event, userContent);
   const poolWaitStartedAt = Date.now();
-  const lease = await appServerPool.acquire({ cwd: CONFIG.workspace });
+  const lease = await appServerPool.acquire({ cwd: CONFIG.workspace, accountAlias: effectiveSessionSettings(session).accountAlias });
   const poolWaitMs = Date.now() - poolWaitStartedAt;
   const client = lease.client;
   const activeJob = {
@@ -6057,6 +6084,7 @@ async function runCodexAppServer(event, session, state = null, onState = null, o
     });
 
     const initialization = await lease.ensureInitialized(initializeAppServerClient);
+    if (initialization.warm) await synchronizeAppServerAccount(client);
     const initialized = initialization.result;
     const initializedAt = Date.now();
     const initializeStartedAt = initializedAt - initialization.durationMs;
@@ -6292,12 +6320,13 @@ function appServerNotificationMatchesRun(message, threadId, turnId) {
 }
 
 async function runCodex(event, session, state = null, onState = null) {
-  if (CONFIG.runMode === "app-server" || CONFIG.runMode === "auto") {
+  const selectedAccount = effectiveSessionSettings(session).accountAlias;
+  if (selectedAccount || CONFIG.runMode === "app-server" || CONFIG.runMode === "auto") {
     try {
       return await runCodexAppServer(event, session, state, onState);
     } catch (error) {
       const failure = classifyCodexFailure(error);
-      const canFallback = CONFIG.runMode === "auto";
+      const canFallback = !selectedAccount && CONFIG.runMode === "auto";
       if (!canFallback) throw error;
       if (["auth", "quota", "rate_limit", "user_stop"].includes(failure.kind)) throw error;
       log("WARN", "app-server mode failed; falling back to codex exec", {
@@ -7679,6 +7708,7 @@ function commandArgs(rest) {
 }
 
 async function handleProviderCommand(chatId, rest, messageId) {
+  await openaiAccounts.discoverAccount(openaiAccounts.accountsRoot(), CONFIG.codexHome);
   await syncChatSessionsWithCodex(chatId);
   const session = getSession(chatId);
   const args = commandArgs(rest);
@@ -7705,7 +7735,9 @@ async function handleProviderCommand(chatId, rest, messageId) {
   }
 
   if (["clear", "default", "reset"].includes(action)) {
+    if (activeCodexJobs.has(chatId)) { await sendText(chatId, "当前会话有任务正在执行，请在任务结束后切换账号或 Provider。", "provider-busy", messageId); return; }
     setSessionOverride(session, "providerOverride", "");
+    setSessionOverride(session, "openaiAccountOverride", "");
     clearProviderBundleOverride(session);
     saveSessions();
     await sendMarkdown(chatId, providerStatusMarkdown(session, "已清除当前会话的 provider 覆盖，后续使用 Codex 配置默认 provider。"), "provider-clear", messageId);
@@ -7714,6 +7746,25 @@ async function handleProviderCommand(chatId, rest, messageId) {
 
   const persist = action === "save";
   const providerId = persist ? args[1] : args[0];
+  if (activeCodexJobs.has(chatId)) { await sendText(chatId, "当前会话有任务正在执行，请在任务结束后切换账号或 Provider。", "provider-busy", messageId); return; }
+  const accountRoot = openaiAccounts.accountsRoot();
+  const savedAccount = openaiAccounts.listAccounts(accountRoot).find((account) => account.alias === providerId);
+  if (savedAccount) {
+    try {
+      openaiAccounts.readAccountAuth(accountRoot, savedAccount.alias);
+      if (persist) {
+        const previous = openaiAccounts.defaultAccount(CONFIG.codexHome);
+        openaiAccounts.setDefaultAccount(CONFIG.codexHome, savedAccount.alias);
+        try { await writeCodexConfigValue("model_provider", "openai"); }
+        catch (error) { openaiAccounts.setDefaultAccount(CONFIG.codexHome, previous); throw error; }
+      }
+      clearProviderBundleOverride(session);
+      session.providerOverride = "openai";
+      setSessionOverride(session, "openaiAccountOverride", savedAccount.alias);
+      await sendMarkdown(chatId, providerStatusMarkdown(session, `已切换${persist ? "并保存为该 Home 默认账号" : "当前飞书会话"}：\`${savedAccount.alias}\``), "provider-set", messageId);
+    } catch (error) { await sendMarkdown(chatId, runtimeCommandErrorMarkdown("账号切换失败", error), "provider-error", messageId); }
+    return;
+  }
   const bundle = findProviderBundle(providerId);
   const provider = bundle ? findCodexProvider(bundle.provider) : findCodexProvider(providerId);
   if (!provider) {
@@ -7734,6 +7785,8 @@ async function handleProviderCommand(chatId, rest, messageId) {
       clearProviderBundleOverride(session);
       setSessionOverride(session, "providerOverride", provider.id);
     }
+    if (persist && provider.id === "openai") openaiAccounts.setDefaultAccount(CONFIG.codexHome, "");
+    setSessionOverride(session, "openaiAccountOverride", "");
     await sendMarkdown(
       chatId,
       providerStatusMarkdown(
@@ -7758,7 +7811,7 @@ function providerStatusMarkdown(session, title = "Codex provider") {
     `**${title}**`,
     "",
     `当前会话：\`${session.title || "未命名会话"}\` (${session.id})`,
-    `当前 provider：\`${settings.provider || "默认"}\`${session.providerOverride ? "（会话覆盖）" : "（配置默认）"}`,
+    `当前 provider：\`${settings.accountAlias || settings.provider || "默认"}\`${session.providerOverride ? "（会话覆盖）" : "（配置默认）"}`,
     bundle ? `当前组合：\`${bundle.id}\`；${providerBundleLabel(bundle)}` : "",
     provider ? providerDetailLine(provider) : "provider 未在当前 config.toml 中找到；如果它来自 profile 或外部配置，请确认 Bridge 启动参数也选择了对应配置。",
     "",
@@ -7774,8 +7827,15 @@ function providerListMarkdown(session, title = "Codex provider 列表") {
   const providers = listCodexProviders();
   const lines = [`**${title}**`, ""];
   for (const provider of providers) {
-    const marker = provider.id === settings.provider ? " ← 当前" : "";
+    const marker = !settings.accountAlias && provider.id === settings.provider ? " ← 当前" : "";
     lines.push(`- \`${provider.id}\`${marker}：${provider.name || provider.id}；${providerDetailLine(provider)}`);
+  }
+  for (const account of openaiAccounts.listAccounts(openaiAccounts.accountsRoot())) {
+    const marker = account.alias === settings.accountAlias ? " ← 当前" : "";
+    lines.push(`- \`${account.alias}\`${marker}：OpenAI 官方账号；${account.state === "saved" ? "已保存登录" : "需要重新登录"}`);
+  }
+  if (settings.accountAlias && !openaiAccounts.listAccounts(openaiAccounts.accountsRoot()).some((item) => item.alias === settings.accountAlias)) {
+    lines.push(`- \`${settings.accountAlias}\` ← 当前：账号已移除或不可用；请重新选择，不会自动使用其他账号`);
   }
   lines.push("");
   lines.push("只切当前飞书会话：`/provider <providerId>`");

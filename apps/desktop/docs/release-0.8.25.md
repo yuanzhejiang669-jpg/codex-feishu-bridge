@@ -1,0 +1,19 @@
+# Codex Feishu Bridge Desktop 0.8.25
+
+Save multiple OpenAI accounts in the desktop Provider center, then select an account in Feishu with `/provider openai-email@example.com`. `/provider list` displays each saved email and the current selection. Adding an account uses a separate official browser login and preserves previous logins. A second workspace with the same email receives a stable identity suffix.
+
+Desktop users can add, reauthenticate, remove saved accounts, and set a default account for each Bot. Existing conversation overrides take priority. Online Bot default changes refuse active work and restart only the selected idle Bot. `/provider save <account>` sets the Codex Home default; `/provider clear` follows the configured default again.
+
+Conversation account selection survives restarts while its original Codex Home, workspace, MCP, Skills, and thread history remain in use. An account-specific app-server receives process-scoped official `chatgptAuthTokens` credentials with ephemeral credential storage. No aliases are written as native Codex provider IDs. Account expiry, removal, or failed refresh does not trigger another account or exec fallback. The experimental official account protocol is required; unsupported runtimes report an error.
+
+Saved OAuth credentials use the official file credential format under the user's `.codex/bridge-openai-accounts` directory. Renderer state, logs, and commands do not contain tokens. Previously logged-in Homes are registered as references; removing such a reference does not log out its source Home. New browser logins are copied into their own account directory. Accounts are local to the device and are not synchronized between computers.
+
+## Three-month adversarial review
+
+1. **Expired credentials and overlapping refreshes.** Per-account filesystem locks serialize refresh across Bridge processes; each waiter re-reads rotated credentials. Dead-process locks recover, and a disappearing lock no longer crashes contention handling. Refresh uses official managed `account/read`, with bounded callback time. Tests cover four actual Node processes racing a single refresh, expired tokens, refresh failure, and an abandoned lock.
+2. **Wrong account from a warm process or restart.** Pools separate account identities, including queued work. Every reused client validates account presence and injects newly rotated credentials before its next turn. Removed accounts fail closed even when a process retains old tokens. Tests cover A/B/native pool transitions, two independent conversation selections, normalization/persistence, warm removal, token replacement, and disabled exec fallback. A native Codex 0.163.0 handshake confirmed process-scoped login without inheriting or changing the original auth file.
+3. **Interrupted login or competing saves.** Completed staging logins recover after desktop restart; simultaneous status requests share one import operation. Abandoned staging files expire. Reauthentication with a different identity cannot overwrite an account. Bot binding changes reject overlapping operations, preserve externally modified configuration, and roll back when restart fails. The renderer polls pending logins automatically. Service tests and a real Electron renderer smoke check cover labels, account choice, and add/bind events.
+
+The review changes only account storage, account routing, account UI, and their tests. It does not alter unrelated tools or automatically log the user into additional accounts.
+
+Validation: root checks pass 147/147; desktop checks pass 217 with three platform skips. Fourteen focused account tests pass. The real Electron renderer smoke confirms two email labels and the add-account and Bot-binding controls. The stable release workflow builds and verifies Windows, macOS, and Ubuntu before publication; device installation waits for idle Bots.

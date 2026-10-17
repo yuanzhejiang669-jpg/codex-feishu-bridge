@@ -3,6 +3,7 @@ const path = require("node:path");
 const { readManagedBots } = require("./bot-setup.cjs");
 const { inspectManagedBots, startManagedBot, stopManagedBot } = require("./supervisor.cjs");
 const { isTrustedCodexHome, trustCodexHome } = require("./trusted-codex-homes.cjs");
+const { accountState } = require("./openai-accounts.cjs");
 
 const managers = new Map();
 
@@ -93,7 +94,12 @@ async function listDesktopModelSources(options) {
       sessionOverrideCount: shared.inspectSessionOverrides(bots.map((item) => item.sessionsPath)).overrideCount,
     });
   }
-  return { codexPath: options.codexPath, homes };
+  const accountDetails = await accountState(options, homes);
+  const accounts = require(path.join(options.engineRoot, "src", "codex", "openai-accounts.cjs"));
+  for (const home of homes) {
+    try { home.login.email = accounts.authIdentity(JSON.parse(fs.readFileSync(path.join(home.codexHome, "auth.json"), "utf8"))).email; } catch {}
+  }
+  return { codexPath: options.codexPath, homes, ...accountDetails };
 }
 
 function startDesktopOpenAiLogin(codexHome, options) {

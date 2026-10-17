@@ -22,6 +22,7 @@ function fixture() {
   const sharedTarget = path.join(engineRoot, "src", "codex", "model-source.cjs");
   fs.mkdirSync(path.dirname(sharedTarget), { recursive: true });
   fs.copyFileSync(path.resolve(__dirname, "..", "..", "..", "src", "codex", "model-source.cjs"), sharedTarget);
+  fs.copyFileSync(path.resolve(__dirname, "..", "..", "..", "src", "codex", "openai-accounts.cjs"), path.join(path.dirname(sharedTarget), "openai-accounts.cjs"));
   fs.mkdirSync(defaultCodexHome, { recursive: true });
   fs.mkdirSync(drawing, { recursive: true });
   fs.mkdirSync(future, { recursive: true });

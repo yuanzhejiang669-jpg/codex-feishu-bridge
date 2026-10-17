@@ -159,8 +159,12 @@
 
       <section id="providers-view" class="view hidden">
         <section class="content-section">
-          <div class="section-heading"><h2>OpenAI 官方登录</h2><span id="model-source-count" class="section-meta"></span></div>
-          <p class="readiness-summary">为每个 Codex Home 建立官方账号认证。整空间默认 Provider 切换保留在高级管理中；日常切换请在飞书使用。</p>
+            <div class="section-heading"><h2>OpenAI 账号</h2><button id="add-openai-account" class="primary-button" type="button">添加 OpenAI 账号</button></div>
+            <p class="readiness-summary">分别保存多个 ChatGPT 账号，飞书使用 /provider list 查看和切换。添加账号不会覆盖已有登录。</p>
+            <div id="openai-account-list" class="model-source-list"></div>
+            <div id="openai-account-bindings" class="model-source-list"></div>
+            <div class="section-heading"><h3>配置空间与原有登录</h3><span id="model-source-count" class="section-meta"></span></div>
+            <p class="readiness-summary">下方登录会替换对应空间的原有登录；保存多个账号请使用上方“添加 OpenAI 账号”。</p>
           <div id="model-source-list" class="model-source-list"></div>
           <div id="model-source-result" class="operation-result hidden" aria-live="polite"></div>
         </section>
