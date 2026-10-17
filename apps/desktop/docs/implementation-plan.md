@@ -608,3 +608,11 @@ These risks are addressed with protocol versioning, active-run guards, transacti
 - Publish macOS artifacts only when both platform jobs pass and every required asset is present; reject unexpected files.
 - Keep Apple signing and notarization explicitly out of scope. Document the first-launch warning instead of weakening or bypassing macOS system controls.
 - Keep managed physical-Mac installation through Tailscale and SSH as an explicit maintenance path; do not restart Bots while the Mac is offline.
+
+## 2026-10-17 - 0.8.24 forwarded card references
+
+- Read incoming interactive cards regardless of whether the user forwards them to the original bot or another bot.
+- Support the CLI card envelope and received/classic/schema 2.0 JSON; preserve visible text, links, and table values with bounded extraction.
+- Treat the content as a reference in the receiving conversation, isolate slash commands and quoted resource keys, and explain unreadable or partial content.
+- Verify parser behavior and the actual message-handler preflight, then run root and packaged Windows desktop checks.
+- Prepare the stable 0.8.24 candidate. Commit, push, publication, cross-device synchronization, and installed-client replacement remain explicit pending rollout steps; preserve active runs.

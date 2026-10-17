@@ -31,6 +31,7 @@ import {
   messageIdOf,
 } from "./src/feishu/events.mjs";
 import { createLarkClient } from "./src/feishu/lark-cli.mjs";
+import { parseEventCommand, prepareCardEvent } from "./src/feishu/card-content.mjs";
 import { createManagedCardClass } from "./src/feishu/cards/managed-card.mjs";
 import { createFormulaImageService } from "./src/feishu/cards/formula-renderer.mjs";
 import {
@@ -516,7 +517,7 @@ const eventDispatcher = createEventDispatcher({
   eventIdOf,
   isRecallEvent,
   isMessageRecalled,
-  parseCommand: (event) => parseCommand(event?.content),
+  parseCommand: (event) => parseEventCommand(event, parseCommand),
   isOutOfBandCommand,
   handleRecallEvent,
   handleOutOfBandCommand,
@@ -6627,7 +6628,7 @@ async function handleEvent(rawEvent, dispatchControl = {}) {
     return;
   }
 
-  const event = await enrichEvent(rawEvent);
+  const event = prepareCardEvent(await enrichEvent(rawEvent));
   if (event?.recalled || isMessageRecalled(messageId)) {
     rememberRecalledMessage(messageId, { chatId: chatIdOf(event), eventId: eventIdOf(event), reason: event?.recallReason || "preflight" });
     dropPendingAttachmentsForMessage(messageId, chatIdOf(event));
@@ -6645,7 +6646,7 @@ async function handleEvent(rawEvent, dispatchControl = {}) {
   }
 
   const userContent = userTextFromContent(event.content);
-  const command = parseCommand(event.content);
+  const command = parseEventCommand(event, parseCommand);
   if (command) {
     if (dispatchControl.commit && !dispatchControl.commit()) {
       log("INFO", "queued command cleared during preflight", { messageId, chatId, command: command.name });
@@ -6666,7 +6667,12 @@ async function handleEvent(rawEvent, dispatchControl = {}) {
     return;
   }
 
-  const downloadedAttachments = [
+  if (event.cardReference && !event.cardReadable) {
+    await sendText(chatId, "收到了卡片，但飞书没有返回可读取的正文。请复制卡片文字，或发送卡片截图后再告诉我要做什么。", "card-unreadable", messageId);
+    return;
+  }
+
+  const downloadedAttachments = event.cardReference ? [] : [
     ...(await downloadImageAttachments(event)),
     ...(await downloadFileAttachments(event)),
   ];
@@ -6725,7 +6731,7 @@ async function handleEvent(rawEvent, dispatchControl = {}) {
   const pendingAttachments = takePendingAttachments(chatId);
   event.attachments = [...pendingAttachments, ...downloadedAttachments];
 
-  if (event.message_type && event.message_type !== "text" && event.message_type !== "post" && !event.attachments.length) {
+  if (event.message_type && event.message_type !== "text" && event.message_type !== "post" && !event.cardReadable && !event.attachments.length) {
     await sendText(chatId, `我收到了 ${event.message_type} 消息，但当前桥接版本还不能处理这种类型。`, "unsupported", messageId);
     return;
   }
