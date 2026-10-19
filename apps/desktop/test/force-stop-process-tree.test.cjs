@@ -6,6 +6,7 @@ const { spawn, spawnSync } = require("node:child_process");
 const test = require("node:test");
 
 const { stopManagedBot } = require("../src/main/services/supervisor.cjs");
+const { windowsProcesses } = require("../../../src/runtime/bridge-process-identity.cjs");
 
 function isAlive(processId) {
   try { process.kill(processId, 0); return true; } catch { return false; }
@@ -31,10 +32,10 @@ async function waitForExit(processId, timeoutMs = 5_000) {
 
 function writeProcessTreeFixture(root) {
   const childPidPath = path.join(root, "child.pid");
-  const parentScript = path.join(root, "parent.cjs");
+  const parentScript = path.join(root, "codex-feishu-bridge.mjs");
   fs.writeFileSync(parentScript, `
-    const fs = require("node:fs");
-    const { spawn } = require("node:child_process");
+    import fs from "node:fs";
+    import { spawn } from "node:child_process";
     const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
     fs.writeFileSync(${JSON.stringify(childPidPath)}, String(child.pid), "utf8");
     setInterval(() => {}, 1000);
@@ -43,7 +44,7 @@ function writeProcessTreeFixture(root) {
     detached: process.platform === "darwin",
     stdio: "ignore",
   });
-  return { childPidPath, parent };
+  return { childPidPath, parent, parentScript };
 }
 
 test("forced Windows stop terminates the complete Bridge process tree", {
@@ -54,11 +55,16 @@ test("forced Windows stop terminates the complete Bridge process tree", {
   const name = "force-tree-test";
   const stateDir = path.join(root, "CodexFeishuBridge", "instances", name, "state");
   fs.mkdirSync(stateDir, { recursive: true });
-  const { childPidPath, parent } = writeProcessTreeFixture(root);
+  const { childPidPath, parent, parentScript } = writeProcessTreeFixture(root);
+  let childPid;
   try {
     await waitForFile(childPidPath);
-    const childPid = Number(fs.readFileSync(childPidPath, "utf8"));
+    childPid = Number(fs.readFileSync(childPidPath, "utf8"));
     fs.writeFileSync(path.join(stateDir, "bridge.pid"), String(parent.pid), "utf8");
+    const [info] = windowsProcesses([parent.pid]);
+    fs.writeFileSync(path.join(stateDir, "bridge.lock.json"), JSON.stringify({
+      pid: parent.pid, entryPath: parentScript, processStartTime: info.createdAt, startedAt: Date.now(),
+    }), "utf8");
     const stopScript = path.resolve(__dirname, "..", "..", "..", "stop-codex-feishu-bridge.ps1");
     const result = spawnSync("powershell.exe", ["-NoProfile", "-File", stopScript, "-Name", name, "-Force"], {
       env: { ...process.env, LOCALAPPDATA: root },
@@ -70,6 +76,7 @@ test("forced Windows stop terminates the complete Bridge process tree", {
     await waitForExit(childPid);
   } finally {
     try { process.kill(parent.pid, "SIGKILL"); } catch {}
+    if (childPid) { try { process.kill(childPid, "SIGKILL"); } catch {} }
     fs.rmSync(root, { recursive: true, force: true });
   }
 });

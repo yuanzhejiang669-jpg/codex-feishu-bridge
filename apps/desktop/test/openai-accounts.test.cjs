@@ -6,6 +6,13 @@ const path = require("node:path");
 const { EventEmitter } = require("node:events");
 const service = require("../src/main/services/openai-accounts.cjs");
 const accounts = require("../../../src/codex/openai-accounts.cjs");
+// Bridge subprocesses inherit this override; fixtures must never use the live account store.
+const inheritedAccountRoot = process.env.CODEX_FEISHU_OPENAI_ACCOUNTS_ROOT;
+delete process.env.CODEX_FEISHU_OPENAI_ACCOUNTS_ROOT;
+test.after(() => {
+  if (inheritedAccountRoot === undefined) delete process.env.CODEX_FEISHU_OPENAI_ACCOUNTS_ROOT;
+  else process.env.CODEX_FEISHU_OPENAI_ACCOUNTS_ROOT = inheritedAccountRoot;
+});
 function fixture(t) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "cfb-account-ui-test-"));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));

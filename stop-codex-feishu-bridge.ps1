@@ -26,6 +26,14 @@ $stateDir = Join-Path $dataRoot "state"
 $pidFile = Join-Path $stateDir "bridge.pid"
 $stopFile = Join-Path $stateDir "bridge.stop"
 
+function Get-BridgeIdentity {
+  $result = & node.exe (Join-Path $PSScriptRoot 'src/runtime/bridge-process-identity.cjs') --state $stateDir
+  $resultExit = $LASTEXITCODE
+  $identity = $result | ConvertFrom-Json
+  if ($resultExit -ne 0 -and $resultExit -ne 3) { throw $identity.error }
+  return $identity
+}
+
 if (-not (Test-Path $pidFile)) {
   Write-Host "Codex Feishu Bridge is not running: no PID file found. Instance: $(if ($safeName) { $safeName } else { 'default' })"
   exit 0
@@ -38,21 +46,33 @@ if ($pidText -notmatch '^\d+$') {
   exit 0
 }
 
-$process = Get-Process -Id ([int]$pidText) -ErrorAction SilentlyContinue
-if (-not $process) {
+$identity = Get-BridgeIdentity
+if ($identity.status -eq 'stale') {
   Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue
-  Write-Host "Bridge process was not running. Removed stale PID file."
+  Write-Host "Bridge process was not running. Removed stale PID file; unrelated processes were left running."
   exit 0
+}
+$pidText = [string]$identity.pid
+$expectedStartTime = $identity.createdAt
+
+function Test-OriginalBridgeAlive {
+  $current = Get-BridgeIdentity
+  if ($current.status -eq 'stale') { return $false }
+  if ([string]$current.pid -ne $pidText -or $current.createdAt -ne $expectedStartTime) {
+    throw 'Bridge ownership changed while stopping; the replacement process was left running.'
+  }
+  return $true
 }
 
 Set-Content -LiteralPath $stopFile -Value (Get-Date).ToString("o") -Encoding UTF8
 
 if ($Force) {
+  if (-not (Test-OriginalBridgeAlive)) { exit 0 }
   $taskkillArgs = @('/PID', $pidText, '/T', '/F')
   & taskkill.exe @taskkillArgs | Out-Null
   $taskkillExitCode = $LASTEXITCODE
   Start-Sleep -Milliseconds 500
-  if (Get-Process -Id ([int]$pidText) -ErrorAction SilentlyContinue) {
+  if (Test-OriginalBridgeAlive) {
     throw "Bridge process tree did not stop after taskkill. PID: $pidText; exit code: $taskkillExitCode"
   }
   Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue
@@ -63,8 +83,7 @@ if ($Force) {
 
 for ($i = 0; $i -lt 10; $i++) {
   Start-Sleep -Seconds 1
-  $process = Get-Process -Id ([int]$pidText) -ErrorAction SilentlyContinue
-  if (-not $process) {
+  if (-not (Test-OriginalBridgeAlive)) {
     Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $stopFile -Force -ErrorAction SilentlyContinue
     Write-Host "Codex Feishu Bridge stopped. Instance: $(if ($safeName) { $safeName } else { 'default' }); PID: $pidText"
@@ -73,6 +92,7 @@ for ($i = 0; $i -lt 10; $i++) {
 }
 
 Write-Warning "Bridge did not stop gracefully in 10 seconds; terminating process $pidText."
+if (-not (Test-OriginalBridgeAlive)) { exit 0 }
 Stop-Process -Id ([int]$pidText) -ErrorAction Stop
 Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $stopFile -Force -ErrorAction SilentlyContinue

@@ -44,6 +44,9 @@ export function createSingleInstanceLock({
           onDuplicate(current);
           return false;
         }
+        // Identity inspection can take time. A different contender may have
+        // replaced the stale owner while that inspection was in progress.
+        if (JSON.stringify(readJsonFile(lockPath)) !== JSON.stringify(current)) continue;
         try {
           fs.rmSync(lockPath, { force: true });
         } catch (removeError) {
@@ -66,7 +69,7 @@ export function createSingleInstanceLock({
 
   function isActive(current) {
     // bridge.pid is written only after acquire(); requiring it here creates a race.
-    return Boolean(current?.pid && processAlive(current.pid));
+    return Boolean(current?.pid && processAlive(current.pid, current));
   }
 
   return { acquire, isActive, release };

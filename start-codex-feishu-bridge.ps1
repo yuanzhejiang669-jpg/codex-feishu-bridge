@@ -231,15 +231,15 @@ function Resolve-CodexCliBin {
 }
 
 if (Test-Path $pidFile) {
-  $existingPid = (Get-Content -LiteralPath $pidFile -Raw).Trim()
-  if ($existingPid -match '^\d+$') {
-    $existing = Get-Process -Id ([int]$existingPid) -ErrorAction SilentlyContinue
-    if ($existing) {
-      Write-Host "Codex Feishu Bridge is already running. PID: $existingPid"
-      Write-Host "Log: $stdoutLog"
-      exit 0
-    }
+  $identityJson = & node.exe (Join-Path $PSScriptRoot 'src/runtime/bridge-process-identity.cjs') --state $stateDir
+  $identityExit = $LASTEXITCODE
+  $identity = $identityJson | ConvertFrom-Json
+  if ($identityExit -eq 0) {
+    Write-Host "Codex Feishu Bridge is already running. PID: $($identity.pid)"
+    Write-Host "Log: $stdoutLog"
+    exit 0
   }
+  if ($identityExit -ne 3) { throw $identity.error }
   Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue
 }
 

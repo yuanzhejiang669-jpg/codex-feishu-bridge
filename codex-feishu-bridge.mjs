@@ -62,6 +62,7 @@ import { createActiveRunStore } from "./src/runtime/active-runs.mjs";
 import { createEventDispatcher } from "./src/runtime/event-dispatcher.mjs";
 import { createEventReplayGuard } from "./src/runtime/event-replay-guard.mjs";
 import { createProcessRunner, isProcessAlive as isProcessAlivePid } from "./src/runtime/process-runner.mjs";
+import bridgeProcessIdentity from "./src/runtime/bridge-process-identity.cjs";
 import { createRecalledMessageStore } from "./src/runtime/recalled-messages.mjs";
 import { createRunWatchdog as createBaseRunWatchdog } from "./src/runtime/run-watchdog.mjs";
 import { createSingleInstanceLock } from "./src/runtime/single-instance-lock.mjs";
@@ -324,8 +325,10 @@ const singleInstanceLock = createSingleInstanceLock({
     codexHome: CONFIG.codexHome,
     larkProfile: CONFIG.larkProfile || "default",
     startedAt: Date.now(),
+    entryPath: path.resolve(process.argv[1]),
+    processStartTime: bridgeProcessIdentity.ownProcessStartTime(),
   },
-  processAlive: isProcessAlivePid,
+  processAlive: bridgeProcessIdentity.isBridgeOwnerAlive,
   log,
 });
 const {

@@ -4,6 +4,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { EventEmitter } = require("node:events");
 const { PassThrough } = require("node:stream");
+const { spawn } = require("node:child_process");
 const test = require("node:test");
 const {
   inspectManagedBots,
@@ -101,6 +102,45 @@ test("updates auto-start only for a client-managed Bot", () => {
     assert.equal(fs.readdirSync(path.dirname(disabled.configPath)).some((name) => /\.(tmp|bak)$/.test(name)), false);
     assert.throws(() => setManagedBotAutoStart("legacy-bot", true, { dataRoot: value.dataRoot }), /客户端管理/);
   } finally {
+    fs.rmSync(value.root, { recursive: true, force: true });
+  }
+});
+
+test("does not report an unrelated reused Windows PID as an online managed Bot", { skip: process.platform !== "win32" }, () => {
+  const value = fixture();
+  try {
+    const stateDir = path.join(managedRuntimeRoot(value.localAppData, "assistant-1"), "state");
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.writeFileSync(path.join(stateDir, "bridge.pid"), String(process.pid));
+    fs.writeFileSync(path.join(stateDir, "bridge.lock.json"), JSON.stringify({ pid: process.pid, startedAt: 1 }));
+    const [bot] = inspectManagedBots(value.dataRoot, value.localAppData);
+    assert.equal(bot.online, false);
+    assert.doesNotThrow(() => process.kill(process.pid, 0));
+  } finally { fs.rmSync(value.root, { recursive: true, force: true }); }
+});
+
+test("keeps different Bot ownership records separate when stale and live records share a PID", { skip: process.platform !== "win32" }, async () => {
+  const value = fixture();
+  const entry = path.join(value.root, "codex-feishu-bridge.mjs");
+  fs.writeFileSync(entry, "console.log('ready');setInterval(()=>{},1000);\n");
+  const child = spawn(process.execPath, [entry], { windowsHide: true, stdio: ["ignore", "pipe", "ignore"] });
+  try {
+    await new Promise((resolve, reject) => { child.stdout.once("data", resolve); child.once("error", reject); });
+    for (const [name, startedAt] of [["assistant-1", Date.now()], ["assistant-2", 1]]) {
+      const botRoot = path.join(value.dataRoot, "managed-bots", name);
+      fs.mkdirSync(botRoot, { recursive: true });
+      fs.writeFileSync(path.join(botRoot, "bot.json"), JSON.stringify({ name, profile: name, workspace: value.root }));
+      const stateDir = path.join(managedRuntimeRoot(value.localAppData, name), "state");
+      fs.mkdirSync(stateDir, { recursive: true });
+      fs.writeFileSync(path.join(stateDir, "bridge.pid"), String(child.pid));
+      fs.writeFileSync(path.join(stateDir, "bridge.lock.json"), JSON.stringify({ pid: child.pid, startedAt }));
+    }
+    const bots = inspectManagedBots(value.dataRoot, value.localAppData);
+    assert.equal(bots.find((bot) => bot.name === "assistant-1").online, true);
+    assert.equal(bots.find((bot) => bot.name === "assistant-2").online, false);
+  } finally {
+    child.kill();
+    await new Promise((resolve) => child.exitCode !== null || child.signalCode !== null ? resolve() : child.once("exit", resolve));
     fs.rmSync(value.root, { recursive: true, force: true });
   }
 });

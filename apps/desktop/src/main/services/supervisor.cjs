@@ -14,6 +14,20 @@ function managedRuntimeRoot(localAppData, name) {
 }
 
 function inspectManagedBots(dataRoot, localAppData) {
+  const owners = new Map();
+  if (process.platform === "win32") {
+    for (const bot of readManagedBots(dataRoot)) {
+      const owner = readJson(path.join(managedRuntimeRoot(localAppData, bot.name), "state", "bridge.lock.json"));
+      if (owner?.pid) owners.set(bot.name, owner);
+    }
+  }
+  const engineRoot = process.resourcesPath && fs.existsSync(path.join(process.resourcesPath, "engine", "src", "runtime", "bridge-process-identity.cjs"))
+    ? path.join(process.resourcesPath, "engine")
+    : path.resolve(__dirname, "..", "..", "..", "..", "..");
+  const identityResults = owners.size
+    ? require(path.join(engineRoot, "src", "runtime", "bridge-process-identity.cjs")).inspectBridgeOwners([...owners.values()])
+    : [];
+  const identities = new Map([...owners.keys()].map((name, index) => [name, identityResults[index]]));
   return readManagedBots(dataRoot).map((bot) => {
     const runtimeRoot = managedRuntimeRoot(localAppData, bot.name);
     const stateDir = path.join(runtimeRoot, "state");
@@ -21,8 +35,11 @@ function inspectManagedBots(dataRoot, localAppData) {
       try { return fs.readFileSync(path.join(stateDir, "bridge.pid"), "utf8").trim(); } catch { return ""; }
     })();
     const processId = /^\d+$/.test(processIdText) ? Number(processIdText) : null;
+    const owner = owners.get(bot.name);
+    const identity = identities.get(bot.name);
+    const online = identity ? identity.status === "alive" && processId === Number(owner.pid) : isProcessAlive(processId);
     const runtimeState = readJson(path.join(stateDir, 'runtime-backends.json'));
-    const backends = runtimeState?.bridgePid === processId && isProcessAlive(processId)
+    const backends = runtimeState?.bridgePid === processId && online
       ? (Array.isArray(runtimeState.backends) ? runtimeState.backends : []).filter((item) => item && isProcessAlive(item.pid)) : [];
     const active = readJson(path.join(stateDir, "active-runs.json"));
     const seenEventsPath = path.join(stateDir, "seen-events.json");
@@ -37,7 +54,7 @@ function inspectManagedBots(dataRoot, localAppData) {
       runtimeRoot,
       processId,
       backends,
-      online: isProcessAlive(processId),
+      online,
       activeRunCount: activeRunCount(active),
       messageEventVerified,
       messageEventVerifiedAt,

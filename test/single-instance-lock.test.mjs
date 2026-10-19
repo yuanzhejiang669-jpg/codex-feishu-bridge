@@ -24,3 +24,21 @@ test('dead owner and old corrupt lock can be reclaimed',()=>fixture(paths=>{
  fs.writeFileSync(paths.lockPath,'');const old=new Date(Date.now()-10000);fs.utimesSync(paths.lockPath,old,old);
  assert.equal(lock.acquire(),true);
 }));
+test('owner identity is available when deciding whether an existing PID still owns the lock',()=>fixture(paths=>{
+ const stale={pid:100,startedAt:123,processStartTime:120};
+ fs.writeFileSync(paths.lockPath,JSON.stringify(stale));
+ const lock=createSingleInstanceLock({...paths,owner:{pid:101},processAlive:(pid,owner)=>{
+  assert.equal(pid,100);assert.deepEqual(owner,stale);return false;
+ }});
+ assert.equal(lock.acquire(),true);assert.equal(lock.release(),true);
+}));
+test('does not unlink a new owner that appeared during stale-owner inspection',()=>fixture(paths=>{
+ fs.writeFileSync(paths.lockPath,JSON.stringify({pid:100}));
+ let first=true;let duplicate=false;
+ const lock=createSingleInstanceLock({...paths,owner:{pid:101},processAlive:(pid)=>{
+  if(first){first=false;fs.writeFileSync(paths.lockPath,JSON.stringify({pid:102}));return false;}
+  return pid===102;
+ },onDuplicate:()=>{duplicate=true}});
+ assert.equal(lock.acquire(),false);assert.equal(duplicate,true);
+ assert.equal(JSON.parse(fs.readFileSync(paths.lockPath)).pid,102);
+}));
