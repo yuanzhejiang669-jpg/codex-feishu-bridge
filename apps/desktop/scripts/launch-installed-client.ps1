@@ -22,7 +22,13 @@ if ($session -eq 0 -or -not $desktop.Count) {
 # The existing desktop shell launches the shortcut. Invoking it directly from
 # PowerShell can leave Electron attached to the maintenance terminal.
 $shell = New-Object -ComObject Shell.Application
-$shell.ShellExecute($shortcut, '', $link.WorkingDirectory, 'open', 1)
+$windowHandle = 0
+$desktopWindow = $shell.Windows().FindWindowSW(0, 0, 8, [ref]$windowHandle, 1)
+if (-not $desktopWindow) { throw 'The existing Explorer desktop automation object is unavailable.' }
+# Shell.Application itself may execute in the caller. Obtain the dispatch
+# object belonging to the real Explorer desktop so it creates the process.
+$desktopApplication = $desktopWindow.Document.Application
+$desktopApplication.ShellExecute($shortcut, '', $link.WorkingDirectory, 'open', 1)
 $deadline = (Get-Date).AddSeconds(20)
 do {
   Start-Sleep -Milliseconds 300
