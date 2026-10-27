@@ -85,9 +85,12 @@ MCP / Skills 页可以预览全局 Codex Home 与目标空间的差异，再选�
 /delete 2 4-6
 /confirm delete 1
 /provider list
+/model list
 ```
 
 `/delete` 只生成 threadId 快照，`/confirm delete` 才执行清理。删除范围限制在当前 Codex Home，不会跨空间删除会话。
+
+`/model list` 与 `/model refresh` 对已选中的 OpenAI 登录账号实时请求官方 Codex 模型目录，显示账号、查询时间和全部公开可选模型；查询失败直接报错，不用旧目录替代。第三方 Provider 查询其 `/models`。其他内置 Provider 的 app-server 目录会明确标注可能使用缓存。
 
 ## 高级与兼容模式
 

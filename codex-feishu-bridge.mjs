@@ -55,9 +55,11 @@ import { createAppServerPool } from "./src/codex/app-server-pool.mjs";
 import { createAppServerProtocol } from "./src/codex/app-server-protocol.mjs";
 import {
   codexRuntimeVersionLines,
+  parseCodexCliVersion,
   readCodexRuntimeVersionStatus,
 } from "./src/codex/runtime-version.mjs";
 import { createCodexProviderConfig } from "./src/providers/codex-config.mjs";
+import { fetchOpenaiModelCatalog } from "./src/providers/openai-model-catalog.mjs";
 import { createActiveRunStore } from "./src/runtime/active-runs.mjs";
 import { createEventDispatcher } from "./src/runtime/event-dispatcher.mjs";
 import { createEventReplayGuard } from "./src/runtime/event-replay-guard.mjs";
@@ -4918,11 +4920,18 @@ async function syncCodexSidebarThread({ event, session, promptFile, outFile, std
   await ensureAppServerThreadVisible(threadId, "exec/completed");
 }
 
-function startAppServerClient({ cwd = CONFIG.workspace, label = "codex-app-server", accountAlias = "" } = {}) {
+function startAppServerClient({ cwd = CONFIG.workspace, label = "codex-app-server", accountAlias = "", provider = "" } = {}) {
   let previousToken = "";
   const root = openaiAccounts.accountsRoot();
   return new AppServerClient({
-    tool: accountAlias ? { ...CONFIG.codexCli, argsPrefix: [...CONFIG.codexCli.argsPrefix, "-c", 'cli_auth_credentials_store="ephemeral"'] } : CONFIG.codexCli,
+    tool: {
+      ...CONFIG.codexCli,
+      argsPrefix: [
+        ...CONFIG.codexCli.argsPrefix,
+        ...(provider ? ["-c", `model_provider=${JSON.stringify(provider)}`] : []),
+        ...(accountAlias ? ["-c", 'cli_auth_credentials_store="ephemeral"'] : []),
+      ],
+    },
     codexHome: CONFIG.codexHome,
     workspace: CONFIG.workspace,
     cwd,
@@ -5797,7 +5806,8 @@ async function runGoalLoop(run, goalPatch) {
 }
 
 async function withConfigClient(fn, session = null) {
-  const client = startAppServerClient({ cwd: CONFIG.workspace, accountAlias: effectiveSessionSettings(session).accountAlias });
+  const settings = effectiveSessionSettings(session);
+  const client = startAppServerClient({ cwd: CONFIG.workspace, accountAlias: settings.accountAlias, provider: settings.provider });
   try {
     await initializeAppServerClient(client);
     return await fn(client);
@@ -5812,8 +5822,14 @@ async function writeCodexConfigValue(keyPath, value) {
 
 async function listCodexModels(session = null) {
   return await withConfigClient(async (client) => {
-    const result = await client.request("model/list", { includeHidden: false, limit: 50 }, 60_000);
-    return Array.isArray(result?.data) ? result.data : [];
+    const models = [];
+    let cursor;
+    do {
+      const result = await client.request("model/list", { includeHidden: false, limit: 100, ...(cursor ? { cursor } : {}) }, 60_000);
+      if (Array.isArray(result?.data)) models.push(...result.data);
+      cursor = result?.nextCursor;
+    } while (cursor);
+    return models;
   }, session);
 }
 
@@ -5824,6 +5840,12 @@ async function listCurrentProviderModels(session) {
     throw new Error(`当前 provider 未在 config.toml 中找到：${settings.provider || "默认"}`);
   }
   const url = providerModelsUrl(provider);
+  if (provider.id === "openai" && !url && settings.accountAlias) {
+    const tokens = await openaiAccounts.accountTokens(openaiAccounts.accountsRoot(), settings.accountAlias, { codexPath: CONFIG.codexCli.command });
+    const runtime = await runTool(CONFIG.codexCli, ["--version"], { timeoutMs: 5_000 });
+    const clientVersion = runtime.code === 0 ? parseCodexCliVersion(runtime.stdout) : "";
+    return { ...await fetchOpenaiModelCatalog({ tokens, clientVersion, timeoutMs: PROVIDER_MODEL_LIST_TIMEOUT_MS }), provider, settings };
+  }
   if (!url) {
     if (provider.builtIn || provider.requiresOpenaiAuth) {
       return {
@@ -8070,21 +8092,22 @@ async function modelListMarkdown(session) {
   const result = await listCurrentProviderModels(session);
   const models = result.models;
   const lines = [
-    result.source === "provider" ? "**当前 provider 模型列表**" : "**Codex model 列表**",
+    result.source === "codex" ? "**Codex model 目录**" : "**当前 provider 实时模型列表**",
     "",
-    `provider：\`${settings.provider || "默认"}\``,
+    `provider：\`${settings.accountAlias || settings.provider || "默认"}\``,
   ];
-  if (result.source === "provider") {
+  if (result.source !== "codex") {
     lines.push(`来源：\`${result.url}\``);
     if (result.provider?.envKey) lines.push(`鉴权：\`${result.provider.envKey}\``);
+    if (result.checkedAt) lines.push(`查询时间：${result.checkedAt}；全部 ${models.length} 个可选模型`);
   } else {
-    lines.push("来源：Codex app-server `model/list`（当前 provider 无 base_url 或为内置 provider）");
+    lines.push("来源：Codex app-server `model/list`（可能使用缓存或内置目录，不代表实时权限清单）");
   }
   lines.push("");
   if (!models.length) {
     lines.push("没有拿到模型 ID。");
   }
-  for (const model of models.slice(0, 30)) {
+  for (const model of models) {
     const id = model.id || model.model || "";
     if (!id) continue;
     const marker = id === settings.model ? " ← 当前" : model.isDefault ? " ← 默认" : "";
@@ -8104,12 +8127,11 @@ async function modelListMarkdown(session) {
       lines.push(`- \`${id}\`${marker}：${model.displayName || id}${efforts ? `；推理 ${efforts}` : ""}${fast}`);
     }
   }
-  if (models.length > 30) {
-    lines.push(`- 还有 ${models.length - 30} 个模型未显示。`);
-  }
   lines.push("");
   if (result.source === "provider") {
     lines.push("`/model list` 和 `/model refresh` 都会实时查询当前 provider 的 `/models`；模型切换和保存会再次核对这份实时列表。");
+  } else if (result.source === "openai-account") {
+    lines.push("`/model list` 和 `/model refresh` 每次都实时查询当前官方账号；不合并本地旧目录，隐藏的内部模型不展示。目录可见不保证每次请求都有可用额度。");
   }
   lines.push("切当前会话：`/model <模型ID> [推理强度]`，例如 `/model gpt-5.6-sol max`");
   lines.push("保存为全局默认：`/model save <模型ID> [推理强度]`");
