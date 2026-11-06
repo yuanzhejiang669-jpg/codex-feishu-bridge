@@ -119,12 +119,14 @@ th:nth-child(1) { width: 20%; } th:nth-child(2) { width: 11%; } th:nth-child(3) 
 .setting-row input { width: 17px; height: 17px; flex: 0 0 auto; }
 .setting-list + .readiness-summary { margin-top: 12px; margin-bottom: 0; }
 .two-column { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; }
-.provider-table th:nth-child(1) { width: 18%; }
-.provider-table th:nth-child(2) { width: 28%; }
-.provider-table th:nth-child(3) { width: 11%; }
-.provider-table th:nth-child(4) { width: 20%; }
-.provider-table th:nth-child(5) { width: 10%; }
-.provider-table th:nth-child(6) { width: 13%; }
+.provider-table th:nth-child(1) { width: 13%; }
+.provider-table th:nth-child(2) { width: 20%; }
+.provider-table th:nth-child(3) { width: 8%; }
+.provider-table th:nth-child(4) { width: 15%; }
+.provider-table th:nth-child(5) { width: 6%; }
+.provider-table th:nth-child(6) { width: 24%; }
+.provider-table th:nth-child(7) { width: 14%; }
+.provider-capacity small { display: block; color: #6c7783; margin-top: 4px; line-height: 1.5; }
 .provider-table td { height: auto; min-height: 48px; white-space: normal; overflow-wrap: anywhere; }
 .provider-table td:first-child strong, .provider-table td:first-child small { display: block; }
 .provider-table td:first-child small { margin-top: 3px; color: #6c7783; }

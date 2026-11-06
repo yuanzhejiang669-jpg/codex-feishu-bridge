@@ -52,6 +52,8 @@ const {
   providerSyncPlan,
   readUserEnvironmentVariable,
   replaceGlobalProviderKey,
+  refreshProviderCapacity,
+  refreshProviderCapacities,
 } = require("./services/provider-manager.cjs");
 const { createProtocolProxyService } = require("./services/protocol-proxy.cjs");
 const {
@@ -213,6 +215,7 @@ function setupOptions() {
     defaultCodexHome: path.join(app.getPath("home"), ".codex"),
     sourceCodexHome: path.join(app.getPath("home"), ".codex"),
     runtimeLocalAppData: runtimeLocalAppData(),
+    codexPath: currentState?.codex?.runtimePath || "",
     larkCliPath: currentState?.engine?.larkCliPath || "",
     existingNames: currentState?.bridge?.instances?.map((item) => item.name) || [],
     encryptSecret: (value) => {
@@ -256,6 +259,12 @@ function providerManagerOptions() {
     codexHome: path.join(app.getPath("home"), ".codex"),
     dataRoot: managedDataRoot(),
     timeoutMs: 30_000,
+    catalogTimeoutMs: 15_000,
+    codexPath: currentState?.codex?.runtimePath || "",
+    decryptSecret: (value) => {
+      assertSecureStorage(safeStorage, process.platform);
+      return safeStorage.decryptString(value);
+    },
     prepareProtocolProxyProvider: (provider, model, models) => protocolProxyService?.prepareProvider(provider, model, models),
     prepareProtocolProxyRemoval: (id) => protocolProxyService?.prepareProviderRemoval(id),
     restartProtocolProxy: (providerId) => providerId
@@ -796,6 +805,12 @@ if (!singleInstance) {
       await loadState();
       return result;
     });
+    ipcMain.handle("desktop:refresh-provider-capacity", async (_event, input) => {
+      assertStartupReady();
+      const result = await refreshProviderCapacity(input, providerManagerOptions());
+      await loadState();
+      return result;
+    });
     ipcMain.handle("desktop:preview-global-provider-removal", (_event, input) => (
       previewGlobalProviderRemoval(input, providerManagerOptions())
     ));
@@ -997,6 +1012,9 @@ if (!singleInstance) {
       } finally {
         runtimeInitializing = false;
         startupStatePromise = null;
+      }
+      if (!startupError) {
+        void refreshProviderCapacities(providerManagerOptions()).then(() => loadState()).catch(() => {});
       }
     }
   });

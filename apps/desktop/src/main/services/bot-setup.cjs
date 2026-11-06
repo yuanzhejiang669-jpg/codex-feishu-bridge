@@ -5,6 +5,7 @@ const path = require("node:path");
 const { execFile } = require("node:child_process");
 const { publicPermissionPolicy } = require("./permission-policy.cjs");
 const { prepareProviderConfiguration } = require("./provider-setup.cjs");
+const { discoverProviderCapacity, rememberCapacity } = require("./provider-capacity.cjs");
 
 const NAME_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,62}[A-Za-z0-9])?$/;
 
@@ -192,12 +193,20 @@ async function createManagedBot(raw, credentials, options) {
     fs.mkdirSync(preview.bot.codexHome, { recursive: true });
     fs.mkdirSync(profileHome, { recursive: true });
     if (resolved.target?.mode !== "space") {
+      const input = resolved.input.provider;
+      const capacity = input && (!input.mode || input.mode === "custom")
+        ? await discoverProviderCapacity(input, options) : null;
+      if (input?.modelCatalogUrl && capacity?.status !== "remote") {
+        throw new Error(`模型目录未通过检测：${capacity?.reason || "无法检测"}`);
+      }
       providerPlan = prepareProviderConfiguration(preview.bot, resolved.input.provider, {
         transactionRoot,
         encryptSecret: options.encryptSecret,
         sourceCodexHome: options.sourceCodexHome,
         env: options.env,
+        capacity,
       });
+      if (capacity) rememberCapacity(preview.bot.codexHome, input.id, input.baseUrl?.replace(/\/+$/, ""), capacity);
     }
     await runCli(options.larkCliPath, [
       "profile", "add", "--name", preview.bot.profile,

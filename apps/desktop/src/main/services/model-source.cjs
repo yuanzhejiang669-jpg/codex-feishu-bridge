@@ -4,6 +4,8 @@ const { readManagedBots } = require("./bot-setup.cjs");
 const { inspectManagedBots, startManagedBot, stopManagedBot } = require("./supervisor.cjs");
 const { isTrustedCodexHome, trustCodexHome } = require("./trusted-codex-homes.cjs");
 const { accountState } = require("./openai-accounts.cjs");
+const TOML = require("smol-toml");
+const { inspectProviderCapacity } = require("./provider-capacity.cjs");
 
 const managers = new Map();
 
@@ -80,8 +82,15 @@ async function listDesktopModelSources(options) {
     const bots = botStates(home, options);
     const trusted = isTrustedCodexHome(home.codexHome, options.dataRoot);
     const source = shared.inspectCodexHome(home.codexHome, { envValue: homeEnvValue(bots, options) });
+    let capacity = { status: "unchecked" };
+    try {
+      const config = TOML.parse(fs.readFileSync(source.configPath, "utf8").replace(/^\uFEFF/, ""));
+      capacity = inspectProviderCapacity(home.codexHome, source.currentProvider, config);
+      if (source.currentProvider === "openai" && !["manual", "local"].includes(capacity.status)) capacity = { status: "official" };
+    } catch { /* A missing Home remains visible and manageable through the existing flow. */ }
     homes.push({
       ...source,
+      capacity,
       label: path.resolve(home.codexHome).toLowerCase() === path.resolve(options.defaultCodexHome).toLowerCase()
         ? "全局配置"
         : path.basename(home.codexHome),

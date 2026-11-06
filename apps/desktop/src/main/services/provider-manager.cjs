@@ -4,6 +4,9 @@ const path = require("node:path");
 const { execFile } = require("node:child_process");
 const TOML = require("smol-toml");
 const { readManagedBots } = require("./bot-setup.cjs");
+const {
+  catalogUrl, checkProviderCapacity, discoverProviderCapacity, inspectProviderCapacity, rememberCapacity,
+} = require("./provider-capacity.cjs");
 
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
 const ENV_PATTERN = /^[A-Z_][A-Z0-9_]{0,127}$/;
@@ -39,6 +42,8 @@ function normalizeDefinition(raw = {}) {
     baseUrl,
     envKey,
     wireApi,
+    modelCatalogUrl: raw.modelCatalogUrl || raw.model_catalog_url
+      ? catalogUrl(raw.modelCatalogUrl || raw.model_catalog_url, baseUrl) : "",
     serviceTierPassthrough: raw.serviceTierPassthrough === true || raw.service_tier_passthrough === true,
   };
 }
@@ -51,6 +56,7 @@ function publicProvider(id, raw = {}, selectedId = "", env = process.env) {
     baseUrl: String(raw.base_url || ""),
     wireApi: String(raw.wire_api || ""),
     envKey,
+    modelCatalogUrl: String(raw.model_catalog_url || ""),
     credentialAvailable: envKey ? Boolean(env[envKey]) : null,
     serviceTierPassthrough: raw.service_tier_passthrough === true || raw.supports_service_tier === true,
     selected: id === selectedId,
@@ -70,7 +76,7 @@ function inspectProviderCatalog(codexHome, env = process.env) {
       selectedId,
       selectedModel: String(config.model || ""),
       providers: Object.entries(definitions)
-        .map(([id, raw]) => publicProvider(id, raw, selectedId, env))
+        .map(([id, raw]) => ({ ...publicProvider(id, raw, selectedId, env), capacity: inspectProviderCapacity(codexHome, id, config) }))
         .sort((left, right) => left.id.localeCompare(right.id)),
       error: "",
     };
@@ -87,6 +93,7 @@ function providerBlock(provider) {
     `base_url = ${value(provider.baseUrl)}`,
     `wire_api = ${value(provider.wireApi)}`,
     `env_key = ${value(provider.envKey)}`,
+    ...(provider.modelCatalogUrl ? [`model_catalog_url = ${value(provider.modelCatalogUrl)}`] : []),
     ...(provider.serviceTierPassthrough ? ["service_tier_passthrough = true"] : []),
   ].join("\n");
 }
@@ -247,6 +254,12 @@ async function probeProvider(raw, options = {}) {
 async function addGlobalProvider(raw, options) {
   const provider = normalizeDefinition(raw);
   const key = secretFrom(raw);
+  if (readConfig(configPathFor(options.codexHome)).config.model_providers?.[provider.id]) throw new Error(`Provider 已存在：${provider.id}`);
+  const capacity = await discoverProviderCapacity({ ...provider, apiKey: key }, options);
+  if (provider.modelCatalogUrl && capacity.status !== "remote") {
+    throw new Error(`模型目录未通过检测：${capacity.reason}`);
+  }
+  if (capacity.status === "remote") provider.modelCatalogUrl = capacity.url;
   let discoveredModels = [];
   let defaultModel = String(raw?.model || "").trim();
   if (provider.wireApi === "chat") {
@@ -281,10 +294,54 @@ async function addGlobalProvider(raw, options) {
     await setUserEnv(provider.envKey, previous || null).catch(() => {});
     throw error;
   }
+  rememberCapacity(options.codexHome, provider.id, provider.baseUrl, capacity);
   return { provider: publicProvider(provider.id, {
     name: provider.name, base_url: provider.baseUrl, wire_api: provider.wireApi, env_key: provider.envKey,
+    model_catalog_url: provider.modelCatalogUrl,
     service_tier_passthrough: provider.serviceTierPassthrough,
-  }, "", { [provider.envKey]: "available" }), managedProxy: provider.wireApi === "chat", configPath };
+  }, "", { [provider.envKey]: "available" }), capacity, managedProxy: provider.wireApi === "chat", configPath };
+}
+
+async function refreshProviderCapacity(raw, options) {
+  const codexHome = options.codexHome;
+  return checkProviderCapacity(raw, {
+    ...options,
+    writeTextAtomic: options.writeTextAtomic || writeTextAtomic,
+    readKey: async (envKey) => {
+      if (!envKey) return "";
+      const inherited = (options.env || process.env)[envKey];
+      if (inherited) return inherited;
+      const stored = await (options.readUserEnvironmentVariable || readUserEnvironmentVariable)(envKey);
+      if (stored) return stored;
+      const bot = (options.dataRoot ? readManagedBots(options.dataRoot) : []).find((item) => (
+        path.resolve(item.codexHome || "").toLowerCase() === path.resolve(codexHome).toLowerCase()
+        && item.provider?.mode === "custom" && item.provider?.envKey === envKey
+      ));
+      const secretPath = bot && path.join(path.dirname(bot.configPath), "provider-secret.bin");
+      return secretPath && fs.existsSync(secretPath) && options.decryptSecret
+        ? options.decryptSecret(fs.readFileSync(secretPath)) : "";
+    },
+  });
+}
+
+async function refreshProviderCapacities(options) {
+  const homes = new Set([options.codexHome, ...uniqueManagedHomes(options.dataRoot).map((home) => home.codexHome)]);
+  const jobs = [];
+  for (const codexHome of homes) {
+    const { config } = readConfig(configPathFor(codexHome));
+    for (const [id, definition] of Object.entries(config.model_providers || {})) {
+      if (!definition.base_url || id === "openai") continue;
+      jobs.push({ codexHome, id });
+    }
+  }
+  const results = [];
+  for (let index = 0; index < jobs.length; index += 3) {
+    results.push(...await Promise.all(jobs.slice(index, index + 3).map(async ({ codexHome, id }) => {
+      try { return { codexHome, ...await refreshProviderCapacity({ id }, { ...options, codexHome }) }; }
+      catch { return { codexHome, id, changed: false, error: "容量检测未完成，请在 Provider 页面重新检测" }; }
+    })));
+  }
+  return { results, changedCount: results.filter((result) => result.changed).length };
 }
 
 async function replaceGlobalProviderKey(raw, options) {
@@ -552,6 +609,8 @@ module.exports = {
   previewGlobalProviderRemoval,
   providerSyncPlan,
   readUserEnvironmentVariable,
+  refreshProviderCapacity,
+  refreshProviderCapacities,
   removeProviderDefinition,
   replaceGlobalProviderKey,
 };

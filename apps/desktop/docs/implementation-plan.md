@@ -1,5 +1,12 @@
 # Codex Feishu Bridge Desktop Implementation Plan
 
+## 2026-11-06 — Provider capacity integration
+
+- Detect a version-compatible Codex Models catalog when saving a Responses Provider or creating a custom Provider Bot; store the endpoint rather than a fixed window.
+- Backfill global and client-managed isolated configurations at startup without changing selected routes or restarting active Bots.
+- Expose the declared capacity and its source, preserve native overrides, and support a manually supplied catalog endpoint.
+- Verify changing service metadata, missing metadata, request limits, credential handling, configuration preservation, both creation paths, and a real native Codex turn before publishing 0.8.29.
+
 ## 1. Product goal
 
 Deliver a Windows desktop client that a new Windows user can install from a provided installer and use to configure and operate Codex Feishu Bridge without cloning source code, running PowerShell commands, editing JSON/TOML, or opening a localhost URL manually.

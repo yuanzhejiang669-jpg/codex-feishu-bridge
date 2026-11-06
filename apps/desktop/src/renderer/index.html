@@ -177,7 +177,7 @@
           <p id="provider-catalog-error" class="readiness-summary hidden"></p>
           <div class="table-wrap">
             <table class="provider-table">
-              <thead><tr><th>Provider</th><th>Base URL</th><th>接口</th><th>环境变量</th><th>Key</th><th>操作</th></tr></thead>
+              <thead><tr><th>Provider</th><th>Base URL</th><th>接口</th><th>环境变量</th><th>Key</th><th>容量来源</th><th>操作</th></tr></thead>
               <tbody id="provider-catalog-body"></tbody>
             </table>
           </div>
@@ -194,6 +194,7 @@
               <label><span>环境变量名</span><input name="envKey" required pattern="[A-Z_][A-Z0-9_]*" placeholder="COMPANY_API_KEY"></label>
               <label><span>API Key</span><input name="apiKey" required type="password" autocomplete="new-password"></label>
               <label><span>默认模型</span><input name="model" placeholder="Chat Completions 可选；留空时使用拉取结果的第一个模型"></label>
+              <label><span>模型目录地址（可选）</span><input name="modelCatalogUrl" type="url" placeholder="留空自动检测；也可填写服务商提供的目录地址"><small>目录地址会接收此 Provider 的凭据；容量由 Codex 读取，修改后需重启对应 Bot。</small></label>
               <div class="inline-actions">
                 <button id="provider-add-models" class="secondary-button" type="button">拉取模型</button>
                 <button id="provider-add-probe" class="secondary-button" type="button">测试请求</button>
@@ -336,6 +337,7 @@
           <label><span>Provider 标识</span><input id="provider-id" name="providerId" value="custom" maxlength="64"></label>
           <label><span>模型</span><input id="provider-model" name="providerModel" placeholder="例如 gpt-5.6-sol"></label>
           <label class="form-wide"><span>Base URL</span><input id="provider-base-url" name="providerBaseUrl" type="url" placeholder="https://example.com/v1"></label>
+              <label class="form-wide"><span>模型目录地址（可选）</span><input id="provider-model-catalog-url" name="providerModelCatalogUrl" type="url" placeholder="留空自动检测；填写的地址会接收 Provider 凭据"></label>
           <label class="form-wide"><span>API Key</span><input id="provider-api-key" name="providerApiKey" type="password" autocomplete="new-password"></label>
           <label><span>推理强度</span><select id="provider-reasoning" name="providerReasoning"><option value="medium">medium</option></select><small id="provider-reasoning-hint"></small></label>
           <div class="provider-test-control"><button id="test-provider-button" class="secondary-button" type="button">测试模型 API</button><span id="provider-test-status"></span></div>
@@ -426,6 +428,20 @@
         <button id="cancel-provider-removal" class="secondary-button" type="button">取消</button>
         <button id="apply-provider-removal" class="danger-button" type="submit">确认删除</button>
       </div>
+    </form>
+  </dialog>
+  <dialog id="provider-capacity-dialog" class="bot-dialog removal-dialog">
+    <form id="provider-capacity-form">
+      <div class="dialog-heading">
+        <div><h2 id="provider-capacity-title">检测模型容量</h2><span>读取服务商声明的容量资料</span></div>
+        <button id="close-provider-capacity-dialog" class="icon-button" type="button" aria-label="关闭" title="关闭">×</button>
+      </div>
+      <div class="stack-form">
+        <p id="provider-capacity-error" class="form-note" role="status"></p>
+        <label><span>模型目录地址（可选）</span><input name="modelCatalogUrl" type="url" placeholder="留空自动检测 Provider 的 models 目录"></label>
+        <p class="form-note">使用已保存的 Provider 凭据检测此地址。检测通过后保存目录配置；对应 Bot 重新启动后由 Codex 原生读取。全局窗口覆盖或本地目录配置优先，客户端会明确标记。</p>
+      </div>
+      <div class="dialog-actions"><button class="primary-button" type="submit">检测并保存</button></div>
     </form>
   </dialog>
   <script src="app.js"></script>

@@ -3,6 +3,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const TOML = require("smol-toml");
 const { normalizeReasoningEffort, resolveReasoningSelection } = require("./reasoning-effort.cjs");
+const { catalogUrl } = require("./provider-capacity.cjs");
 
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
 const ENV_PATTERN = /^[A-Z_][A-Z0-9_]{0,127}$/;
@@ -46,6 +47,7 @@ function normalizeProviderInput(raw = {}, botName = "bot") {
     id,
     name: String(raw.name || id).trim().slice(0, 120) || id,
     baseUrl,
+    modelCatalogUrl: raw.modelCatalogUrl ? catalogUrl(raw.modelCatalogUrl, baseUrl) : "",
     model,
     envKey,
     apiKey,
@@ -172,6 +174,7 @@ function prepareProviderConfiguration(bot, raw, options) {
     wire_api: provider.wireApi,
     env_key: provider.envKey,
     requires_openai_auth: false,
+    ...(options.capacity?.status === "remote" ? { model_catalog_url: options.capacity.url } : {}),
   };
   const secretPath = path.join(options.transactionRoot, "provider-secret.bin");
   const encrypted = options.encryptSecret(provider.apiKey);
@@ -190,6 +193,7 @@ function prepareProviderConfiguration(bot, raw, options) {
       model: provider.model,
       envKey: provider.envKey,
       wireApi: provider.wireApi,
+      modelCatalogUrl: options.capacity?.status === "remote" ? options.capacity.url : "",
       reasoning: provider.reasoning,
       effectiveReasoning: provider.reasoningPlan.effectiveEffort,
       upstreamReasoning: provider.reasoningPlan.upstreamValue,

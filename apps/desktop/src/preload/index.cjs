@@ -23,6 +23,7 @@ contextBridge.exposeInMainWorld("bridgeDesktop", Object.freeze({
   listProviderModels: (value) => ipcRenderer.invoke("desktop:list-provider-models", value),
   probeProvider: (value) => ipcRenderer.invoke("desktop:probe-provider", value),
   addGlobalProvider: (value) => ipcRenderer.invoke("desktop:add-global-provider", value),
+  refreshProviderCapacity: (value) => ipcRenderer.invoke("desktop:refresh-provider-capacity", value),
   replaceGlobalProviderKey: (value) => ipcRenderer.invoke("desktop:replace-global-provider-key", value),
   previewGlobalProviderRemoval: (value) => ipcRenderer.invoke("desktop:preview-global-provider-removal", value),
   applyGlobalProviderRemoval: (value) => ipcRenderer.invoke("desktop:apply-global-provider-removal", value),

@@ -76,6 +76,10 @@ const elements = {
   providerCatalogCount: document.querySelector("#provider-catalog-count"),
   providerCatalogBody: document.querySelector("#provider-catalog-body"),
   providerCatalogError: document.querySelector("#provider-catalog-error"),
+  providerCapacityDialog: document.querySelector("#provider-capacity-dialog"),
+  providerCapacityForm: document.querySelector("#provider-capacity-form"),
+  providerCapacityTitle: document.querySelector("#provider-capacity-title"),
+  providerCapacityError: document.querySelector("#provider-capacity-error"),
   providerAddForm: document.querySelector("#provider-add-form"),
   providerAddModels: document.querySelector("#provider-add-models"),
   providerAddProbe: document.querySelector("#provider-add-probe"),
@@ -173,6 +177,7 @@ const elements = {
 let state = null;
 let removalPreview = null;
 let providerRemovalPreview = null;
+let providerCapacityId = "";
 let modelSourcePollTimer = null;
 const modelSourceDrafts = new Map();
 const selectedManagedBotNames = new Set();
@@ -573,6 +578,21 @@ function renderCapabilities(capabilities, setup) {
   updateCapabilitySelectionCounts();
 }
 
+function capacityText(capacity = {}, model = "") {
+  const number = (value) => Number(value).toLocaleString("en-US");
+  if (capacity.status === "manual") return `手动窗口配置：${number(capacity.configuredWindow)} tokens（此 Codex Home）`;
+  if (["local", "disabled"].includes(capacity.status)) return capacity.reason;
+  if (capacity.status === "official") return "OpenAI 官方模型目录，由 Codex 读取";
+  if (capacity.status === "remote") {
+    const entry = model ? capacity.models?.find((item) => item.id === model) : capacity.models?.[0];
+    if (!entry) return `服务商目录：${capacity.models?.length || 0} 个模型${model ? `；未收录 ${model}` : ""}`;
+    if (!entry.contextWindow) return `服务商目录：${entry.id} 未声明窗口大小`;
+    return `服务商目录 · ${entry.id}：${number(entry.contextWindow)} × ${entry.effectivePercent}% = ${number(entry.usableWindow)} tokens${entry.percentSource === "codex-default" ? "（比例为 Codex 默认值）" : ""}`;
+  }
+  if (capacity.configuredUrl) return `目录已配置${capacity.reason ? `；${capacity.reason}` : "，尚未验证当前容量"}`;
+  return `使用 Codex 内置预设${capacity.reason ? `；${capacity.reason}` : "；尚未接入服务商容量目录"}`;
+}
+
 function renderProviderCatalog(catalog = {}, setup = {}) {
   const providers = catalog.providers || [];
   elements.providerCatalogCount.textContent = `${providers.length} 个 · ${text(catalog.configPath)}`;
@@ -586,9 +606,10 @@ function renderProviderCatalog(catalog = {}, setup = {}) {
         <td>${escapeHtml(provider.wireApi || "未设置")}</td>
         <td>${escapeHtml(provider.envKey || "未设置")}</td>
         <td><span class="${badgeClass(provider.credentialAvailable ? "good" : "warn")}">${provider.credentialAvailable ? "可用" : "未找到"}</span></td>
-        <td><button class="link-button danger-link provider-remove" data-provider-id="${escapeHtml(provider.id)}" type="button">删除</button></td>
+        <td class="provider-capacity" title="${escapeHtml(provider.capacity?.configuredUrl || "")}">${escapeHtml(capacityText(provider.capacity, catalog.selectedModel))}${provider.capacity?.status === "remote" ? '<small>服务商声明值；对应 Bot 重启后由 Codex 读取</small>' : ""}</td>
+        <td><button class="link-button provider-capacity-check" data-provider-id="${escapeHtml(provider.id)}" type="button">检测容量</button><button class="link-button danger-link provider-remove" data-provider-id="${escapeHtml(provider.id)}" type="button">删除</button></td>
       </tr>`).join("")
-    : '<tr><td colspan="6" class="empty-row">全局 config.toml 中没有 Provider</td></tr>';
+    : '<tr><td colspan="7" class="empty-row">全局 config.toml 中没有 Provider</td></tr>';
   const select = elements.providerReplaceForm.elements.id;
   const selected = select.value;
   select.innerHTML = '<option value="">请选择</option>' + providers
@@ -664,7 +685,7 @@ function renderModelSources(modelSources = {}) {
     const draft = modelSourceDrafts.get(home.codexHome);
     return `<div class="model-source-row" data-model-source-index="${index}">
       <div class="model-source-main"><strong>${escapeHtml(home.label)}</strong><code>${escapeHtml(home.codexHome)}</code><span>${escapeHtml((home.bots || []).map((bot) => bot.label).join("、") || (home.trusted ? "已由客户端管理 · 尚未绑定 Bot" : "尚未纳入客户端管理"))}</span></div>
-      <div class="model-source-status"><span><span class="${loginClass}">${loginText}</span> ${loginJob.badge}</span><span>当前来源：${home.sourceKind === "openai" ? "OpenAI 官方账号" : `第三方 API · ${escapeHtml(home.currentProvider)}`}</span><span>会话覆盖 ${home.sessionOverrideCount || 0} 个 · 活动任务 ${active} 个</span></div>
+      <div class="model-source-status"><span><span class="${loginClass}">${loginText}</span> ${loginJob.badge}</span><span>当前来源：${home.sourceKind === "openai" ? "OpenAI 官方账号" : `第三方 API · ${escapeHtml(home.currentProvider)}`}</span><span>会话覆盖 ${home.sessionOverrideCount || 0} 个 · 活动任务 ${active} 个</span><span class="model-source-hint">容量来源：${escapeHtml(capacityText(home.capacity, home.currentModel))}</span></div>
       <div class="model-source-actions">
         ${readOnly ? '<button class="secondary-button" data-model-source-action="trust" type="button">纳入客户端管理</button>' : ""}
         <button class="primary-button" data-model-source-action="login" type="button" ${readOnly ? "disabled" : ""}>${loginJob.button}</button>
@@ -930,6 +951,7 @@ function addProviderInput() {
     apiKey: text(data.get("apiKey"), ""),
     model: text(data.get("model"), ""),
     wireApi: text(data.get("wireApi"), "responses"),
+    modelCatalogUrl: text(data.get("modelCatalogUrl"), ""),
   };
 }
 
@@ -1081,6 +1103,7 @@ function providerInput() {
     mode,
     id: document.querySelector("#provider-id").value,
     baseUrl: document.querySelector("#provider-base-url").value,
+    modelCatalogUrl: document.querySelector("#provider-model-catalog-url").value,
     model: document.querySelector("#provider-model").value,
     apiKey: document.querySelector("#provider-api-key").value,
     reasoning: document.querySelector("#provider-reasoning").value,
@@ -1124,7 +1147,7 @@ function updateBotProviderMode() {
   elements.customProviderFields.classList.toggle("hidden", mode !== "custom");
   elements.botGlobalProvider.required = mode === "global";
   elements.botGlobalModel.required = mode === "global";
-  ["#provider-id", "#provider-model", "#provider-base-url", "#provider-api-key"].forEach((selector) => {
+  ["#provider-id", "#provider-model", "#provider-base-url", "#provider-model-catalog-url", "#provider-api-key"].forEach((selector) => {
     document.querySelector(selector).required = mode === "custom";
   });
   elements.providerTestStatus.textContent = "";
@@ -1785,11 +1808,42 @@ elements.providerAddForm.addEventListener("submit", (event) => {
   const button = event.submitter;
   if (!elements.providerAddForm.reportValidity()) return;
   runProviderAction(button, async () => {
-    const result = await window.bridgeDesktop.addGlobalProvider(addProviderInput());
+    const input = addProviderInput();
+    const result = await window.bridgeDesktop.addGlobalProvider(input);
     elements.providerAddForm.reset();
-    showProviderResult("Provider 已保存", `${result.provider.id} 的定义已写入全局配置，Key 已写入系统安全凭据存储`);
+    showProviderResult("Provider 已保存", `${result.provider.id} 已保存。${capacityText(result.capacity, input.model)}`, result.capacity?.status === "remote" ? "good" : "warn");
     await refresh();
   }).catch(() => {});
+});
+elements.providerCatalogBody.addEventListener("click", (event) => {
+  const button = event.target.closest(".provider-capacity-check");
+  if (!button) return;
+  providerCapacityId = button.dataset.providerId;
+  const provider = state?.providerCatalog?.providers?.find((item) => item.id === providerCapacityId);
+  elements.providerCapacityTitle.textContent = `检测模型容量 · ${providerCapacityId}`;
+  elements.providerCapacityForm.elements.modelCatalogUrl.value = provider?.modelCatalogUrl || "";
+  elements.providerCapacityError.textContent = "";
+  elements.providerCapacityDialog.showModal();
+});
+document.querySelector("#close-provider-capacity-dialog").addEventListener("click", () => elements.providerCapacityDialog.close());
+elements.providerCapacityForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  if (!elements.providerCapacityForm.reportValidity()) return;
+  runProviderAction(event.submitter, async () => {
+    const result = await window.bridgeDesktop.refreshProviderCapacity({
+      id: providerCapacityId,
+      modelCatalogUrl: elements.providerCapacityForm.elements.modelCatalogUrl.value.trim(),
+    });
+    const detail = capacityText(result.capacity, state?.providerCatalog?.selectedModel);
+    if (!["remote", "manual", "local", "disabled"].includes(result.capacity.status)) {
+      elements.providerCapacityError.textContent = detail;
+      await refresh();
+      return;
+    }
+    elements.providerCapacityDialog.close();
+    showProviderResult(result.changed ? "容量目录已配置" : "容量检测完成", `${detail}。对应 Bot 重新启动后生效。`, result.capacity.status === "remote" ? "good" : "warn");
+    await refresh();
+  }).catch((error) => { elements.providerCapacityError.textContent = error.message; });
 });
 elements.providerReplaceForm.addEventListener("submit", (event) => {
   event.preventDefault();
