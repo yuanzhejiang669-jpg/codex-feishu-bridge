@@ -6,6 +6,8 @@ const { execFile } = require("node:child_process");
 const { publicPermissionPolicy } = require("./permission-policy.cjs");
 const { prepareProviderConfiguration } = require("./provider-setup.cjs");
 const { discoverProviderCapacity, rememberCapacity } = require("./provider-capacity.cjs");
+const { normalizeEngine } = require('./agent-engines.cjs');
+const { previewClaudeBot, createClaudeBot } = require('./claude-bots.cjs');
 
 const NAME_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,62}[A-Za-z0-9])?$/;
 
@@ -50,6 +52,7 @@ function resolveBotCreationTarget(raw = {}, options = {}) {
 }
 
 function normalizeBotInput(raw = {}, { workspaceRoot, codexHomeRoot, defaultCodexHome } = {}) {
+  if (normalizeEngine(raw.engine) === 'claude') throw new Error('Claude Bot 必须通过 Claude 创建流程配置');
   const name = String(raw.name || "").trim();
   if (!NAME_PATTERN.test(name)) {
     throw new Error("Bot 标识只能包含字母、数字、点、下划线和连字符，长度为 1-64 个字符");
@@ -98,6 +101,7 @@ function readManagedBots(dataRoot) {
 }
 
 function previewBot(raw, options) {
+  if (normalizeEngine(raw.engine) === 'claude') return previewClaudeBot(raw, options, readManagedBots(options.dataRoot).map((bot) => bot.name));
   const resolved = resolveBotCreationTarget(raw, options);
   const bot = normalizeBotInput(resolved.input, options);
   const conflicts = new Set([
@@ -168,6 +172,8 @@ async function assertLarkProfileAvailable(profile, options) {
 }
 
 async function createManagedBot(raw, credentials, options) {
+  if (normalizeEngine(raw.engine) === 'claude') return createClaudeBot(raw, credentials, options,
+    { readManagedBots, assertLarkProfileAvailable, runLarkCli });
   const preview = previewBot(raw, options);
   const resolved = resolveBotCreationTarget(raw, options);
   if (!preview.available) throw new Error(preview.conflict);

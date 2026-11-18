@@ -1,5 +1,7 @@
 # Codex Feishu Bridge Desktop
 
+The integrated desktop client also supports fixed Claude Code CLI Bots, separate Claude Providers and a shared native MCP/Skills library. See the [dual-engine guide](docs/dual-engine.md).
+
 Windows, macOS, and Ubuntu desktop distribution for Codex Feishu Bridge. The packaged app is the recommended user-facing installation; root-level PowerShell scripts and the web control panel remain advanced compatibility tools.
 
 ## User workflow

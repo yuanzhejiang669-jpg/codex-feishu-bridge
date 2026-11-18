@@ -79,6 +79,7 @@ const manifest = {
   schemaVersion: 1,
   protocolVersion: 1,
   sourceCommit: gitCommit(),
+  sourceDirty: spawnSync('git', ['status', '--porcelain'], { cwd: repositoryRoot, encoding: 'utf8', windowsHide: true }).stdout?.trim().length > 0,
   generatedAt: new Date().toISOString(),
   entrypoints: {
     bridge: "codex-feishu-bridge.mjs",

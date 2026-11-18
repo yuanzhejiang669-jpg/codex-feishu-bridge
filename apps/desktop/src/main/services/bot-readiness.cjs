@@ -42,6 +42,11 @@ async function queryJson(runCli, tool, args, profileHome) {
 }
 
 function providerCheck(bot, currentProvider = {}, codexLoginState = "unknown") {
+  if (bot.engine === 'claude') {
+    const provider = (currentProvider.providers || []).find((item) => item.id === bot.provider?.id);
+    return { id: 'provider', label: 'Claude Provider', status: provider?.credentialAvailable ? 'good' : 'bad',
+      detail: provider?.credentialAvailable ? `${provider.name || provider.id} / ${bot.provider.model || provider.model}` : 'Claude 渠道或安全凭据不可用，请在 Claude Provider 中配置' };
+  }
   if (bot.provider?.mode === "global") {
     const available = Boolean(bot.provider.envKey && process.env[bot.provider.envKey]);
     return {
@@ -172,13 +177,13 @@ async function checkBotReadiness(name, options) {
         ? `已收到 ${REQUIRED_EVENT_KEYS.join(", ")}；最近验证于 ${messageEventTime || "已记录"}`
         : `Bridge 将监听 ${REQUIRED_EVENT_KEYS.join(", ")}；需要在飞书发送真实消息完成验证`,
     },
-    providerCheck(bot, options.currentProvider, options.codexLoginState),
+    providerCheck(bot, bot.engine === 'claude' ? options.claudeProviders : options.currentProvider, options.codexLoginState),
     localCheck(
-      "codex",
-      "Codex 运行时",
-      Boolean(options.codexAvailable),
-      "已检测到可用 Codex 运行时",
-      "未检测到可用 Codex 运行时",
+      bot.engine === 'claude' ? 'claude' : 'codex',
+      bot.engine === 'claude' ? 'Claude Code CLI' : 'Codex 运行时',
+      Boolean(bot.engine === 'claude' ? options.claudeAvailable : options.codexAvailable),
+      `已检测到可用 ${bot.engine === 'claude' ? 'Claude Code CLI' : 'Codex 运行时'}`,
+      `未检测到可用 ${bot.engine === 'claude' ? 'Claude Code CLI' : 'Codex 运行时'}`,
     ),
     localCheck(
       "engine",

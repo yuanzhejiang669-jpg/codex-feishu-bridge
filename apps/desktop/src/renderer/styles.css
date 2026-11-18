@@ -145,6 +145,13 @@ th:nth-child(1) { width: 20%; } th:nth-child(2) { width: 11%; } th:nth-child(3) 
 .selected-mark { display: inline-block; margin-left: 6px; border-radius: 3px; padding: 2px 5px; background: #fff0c2; color: #795800; font-size: 10px; }
 .provider-workbench .content-section { min-width: 0; }
 .stack-form { display: grid; gap: 12px; }
+.stack-form textarea { width: 100%; min-height: 180px; padding: 10px; border: 1px solid #c9d0d7; border-radius: 4px; resize: vertical; font: 12px/1.6 Consolas, monospace; }
+#claude-source-skills, #claude-source-mcp { max-height: 340px; overflow-y: auto; }
+#claude-tools-section details, #claude-provider-section details { margin-top: 18px; }
+#claude-tools-section summary, #claude-provider-section summary { cursor: pointer; margin-bottom: 12px; font-weight: 600; }
+#claude-factory-section summary { cursor: pointer; color: #287d64; }
+#claude-factory-section details[open] summary { margin-bottom: 18px; }
+#claude-provider-list .capability-item { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 12px 0; }
 .stack-form label { display: grid; gap: 6px; color: #596570; font-size: 11px; }
 .stack-form input, .stack-form select { width: 100%; height: 38px; border: 1px solid #c9d0d7; border-radius: 4px; padding: 7px 9px; background: #fff; color: #1f2933; font-size: 12px; outline: none; }
 .stack-form input:focus, .stack-form select:focus { border-color: #287d64; box-shadow: 0 0 0 2px rgb(40 125 100 / 12%); }

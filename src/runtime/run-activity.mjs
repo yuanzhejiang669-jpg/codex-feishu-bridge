@@ -145,7 +145,8 @@ export function runActivityView(state, now = Date.now(), formatToolName = toolDi
 
   return {
     healthLabel: healthLabel(activity, silenceMs, effectivePhase),
-    phaseLabel: PHASE_LABELS[effectivePhase] || "正在处理",
+    phaseLabel: effectivePhase === 'initializing' && state?.meta?.engine === 'claude'
+      ? '正在初始化 Claude Code' : PHASE_LABELS[effectivePhase] || "正在处理",
     currentTool: effectivePhase === "tool_running" ? formatToolName(currentTool) : "",
     statusNote: unresolvedTools.length
       ? `${unresolvedTools.length} 个较早工具尚未收到结束状态`

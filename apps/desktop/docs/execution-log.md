@@ -1894,6 +1894,18 @@ Adversarial review for the three most likely failures after three months:
 
 - The user subsequently authorized GitHub publication and installation on reachable devices. Rollout now includes committing this tested candidate, publishing the tagged multi-platform stable release, synchronizing reachable existing installations, and deferring any active conversation until idle. Actual publication and installation results are recorded in the task's external rollout report after verification.
 
+## 2026-11-18 — 0.9.0 Claude Code CLI candidate
+
+- Implemented native CLI streaming/control integration, private per-Bot homes and resumable UUIDs, separate protected Claude provider management, revision-aware idle reconfiguration, default Claude 1–10 registration preparation, and shared native MCP/Skills management.
+- Added native MCP transport metadata and workspace-file delivery tools. The recipient and Bot profile come from the requesting turn; permission, workspace boundaries, idempotency and a returned Feishu message ID are verified.
+- Real Claude Code 2.1.327 calls through the user-selected channel and `claude-opus-5-5` at high effort passed Read, two-turn resume, approved Write, native Skill invocation, connected MCP invocation and current-conversation metadata. File delivery passed through a real native CLI/control/MCP round trip into a subprocess Lark CLI stub. No unsolicited external message was sent. Real Feishu delivery awaits a registered Claude Bot.
+- Root check: 173 tests passed. Desktop check: 243 passed with 3 macOS-only skips on Windows. Windows packaging, proxy smoke, production formula/dependency smoke, checksums, version verification and 107 packaged-source comparisons passed. Packaged Provider/Bot views were exercised in isolated capture mode. Protected provider storage roundtrip passed using Windows DPAPI, and a private test setup contains ten prepared queue entries.
+- Source is an uncommitted local 0.9.0 candidate based on `29d6c272f3aa9ffd3f5e5d592d63347916d58e3f`, matching the observed current `origin/main`. No source commit/push, tag publication or stable Release has occurred. Installed production client remains 0.8.29 and its ten Codex configurations were not replaced. The current conversation has an active run and was not restarted.
+- The device registry marks the old PC `maintenance_owner: user`; it was not probed or modified. Cross-device deployment requires a device-specific request under the migration skill. macOS/Linux release builds have not run locally; the existing tagged release workflow runs their clean platform builds before public publication.
+- Detailed local reports, intermediate/temporary file records and candidate deliverables are retained in the task's output directory, outside the Git source tree. Rollout remains pending explicit publication authorization and the necessary Feishu QR approvals.
+
+- The user subsequently explicitly authorized commit, push, stable publication and an idle-time upgrade of the current device. The old user-maintained PC remains excluded. Publication, platform CI outcomes, downloaded asset verification and the deferred local installation are recorded in the external rollout report; the running conversation must not be interrupted.
+
 ## 2026-11-06 — 0.8.29 Provider capacity discovery
 
 - Added versioned remote catalog detection to global Provider creation and custom Provider Bot creation. Compatible existing global and managed isolated configurations are repaired on startup; the change preserves selected routes and unrelated TOML text.

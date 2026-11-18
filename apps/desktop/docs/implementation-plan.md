@@ -616,6 +616,17 @@ These risks are addressed with protocol versioning, active-run guards, transacti
 - Keep Apple signing and notarization explicitly out of scope. Document the first-launch warning instead of weakening or bypassing macOS system controls.
 - Keep managed physical-Mac installation through Tailscale and SSH as an explicit maintenance path; do not restart Bots while the Mac is offline.
 
+## 2026-11-18 - 0.9.0 native Claude Code CLI engine
+
+- Keep existing Bot configurations on Codex and add fixed Claude CLI Bots with private native session IDs and homes.
+- Add separate Anthropic Messages provider management, protected keys, model discovery, configurable effort and idle-only application of updated credentials.
+- Prepare Claude 1–10 through the existing QR registration queue; do not count prepared entries as registered applications.
+- Reuse Feishu transport, cards, attachments, queues and stopping. Expose current-chat metadata and workspace-file delivery as native MCP tools without adding writing requirements to the user's text.
+- Add shared Claude MCP/Skills management and selective standard-tool migration. Preserve same-name entries and identify Codex-specific Skill instructions that need adaptation.
+- Preserve unknown native capacity and actual compaction events; do not reuse a Codex capacity constant.
+- Verify native tool use, resume, host permissions, MCP/Skill loading, desktop rendering, protected credential roundtrip and packaged-source parity. Keep source publication and installed-client rollout pending explicit commit/push authorization.
+- Respect device-registry maintenance ownership. The old PC is marked user-maintained and is outside deployment scope without a device-specific request.
+
 ## 2026-10-17 - 0.8.24 forwarded card references
 
 - Read incoming interactive cards regardless of whether the user forwards them to the original bot or another bot.

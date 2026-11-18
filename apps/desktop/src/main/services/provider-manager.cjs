@@ -387,7 +387,7 @@ function previewGlobalProviderRemoval(raw, options) {
   const catalog = options.decorateProviderCatalog?.(rawCatalog) || rawCatalog;
   const provider = catalog.providers.find((item) => item.id === id);
   if (!provider) throw new Error(`找不到 Provider：${id}`);
-  const managedBots = readManagedBots(options.dataRoot);
+  const managedBots = readManagedBots(options.dataRoot).filter((bot) => bot.engine !== 'claude');
   const homes = uniqueManagedHomes(options.dataRoot).map((home) => {
     const configPath = configPathFor(home.codexHome);
     const read = readConfig(configPath);
@@ -535,7 +535,7 @@ function providerSyncPlan(options, apply = false) {
   const source = readConfig(sourcePath).config;
   const definitions = source.model_providers && typeof source.model_providers === "object" ? source.model_providers : {};
   const safeDefinitions = Object.fromEntries(Object.entries(definitions).filter(([, value]) => !hasInlineSecret(value)));
-  const bots = readManagedBots(options.dataRoot).filter((bot) => bot.codexHomeMode === "isolated");
+  const bots = readManagedBots(options.dataRoot).filter((bot) => bot.engine !== 'claude' && bot.codexHomeMode === "isolated" && bot.codexHome);
   const targets = [];
   const pendingWrites = [];
   const writeConfig = options.writeTextAtomic || writeTextAtomic;

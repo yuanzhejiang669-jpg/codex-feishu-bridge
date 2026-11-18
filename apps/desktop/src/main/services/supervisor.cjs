@@ -1,4 +1,5 @@
 const fs = require("node:fs");
+const { inspectClaudeRuntime, normalizeEngine } = require('./agent-engines.cjs');
 const crypto = require("node:crypto");
 const os = require("node:os");
 const path = require("node:path");
@@ -54,6 +55,7 @@ function inspectManagedBots(dataRoot, localAppData) {
       runtimeRoot,
       processId,
       backends,
+      ...(bot.engine === 'claude' ? { claudeRuntime: readJson(path.join(stateDir, 'claude-runtime.json')) || null } : {}),
       online,
       activeRunCount: activeRunCount(active),
       messageEventVerified,
@@ -164,11 +166,21 @@ function processEnvironment(options, bot = null) {
   }
   if (options.codexPath) environment.CODEX_CLI_BIN = options.codexPath;
   if (options.codexSource) environment.CODEX_BRIDGE_RUNTIME_SOURCE = options.codexSource;
+  environment.CODEX_FEISHU_ENGINE = normalizeEngine(bot?.engine);
+  if (normalizeEngine(bot?.engine) === 'claude') {
+    environment.CLAUDE_CLI_BIN = options.claudePath || '';
+    environment.CLAUDE_CONFIG_DIR = bot.claudeHome;
+    environment.CLAUDE_FEISHU_PROVIDER_CATALOG = path.join(options.dataRoot, 'claude-providers.json');
+    environment.CLAUDE_FEISHU_PROVIDER_ID = bot.provider?.id || '';
+    environment.CLAUDE_FEISHU_BOT_CONFIG = bot.configPath;
+    environment.CLAUDE_FEISHU_TOOLS_ROOT = path.join(options.dataRoot, 'claude-tools');
+    environment.CLAUDE_FEISHU_PERMISSION_MODE = bot.claude?.permissionMode || 'manual';
+  }
   return environment;
 }
 
 function macosProviderEnvironment(codexHome, bot, options = {}) {
-  if ((options.platform || process.platform) !== "darwin" || bot?.provider?.mode === "custom") return {};
+  if ((options.platform || process.platform) !== "darwin" || bot?.provider?.mode === "custom" || bot?.engine === 'claude') return {};
   const inspect = options.inspectProviderCatalog || inspectProviderCatalog;
   const catalog = inspect(codexHome, {});
   if (catalog.error) throw new Error(catalog.error);
@@ -377,6 +389,7 @@ function managedBotStartArguments(bot, codexHome) {
     "-CodexHome", codexHome,
   ];
   if (bot.provider?.reasoning) args.push("-Reasoning", bot.provider.reasoning);
+  if (normalizeEngine(bot.engine) === 'claude') args.push('-AgentEngine', 'claude');
   return args;
 }
 
@@ -432,15 +445,19 @@ async function startManagedBotOnce(name, options) {
   const current = inspectManagedBots(options.dataRoot, options.localAppData).find((item) => item.name === name);
   if (current?.online) return current;
   // Resolve again for every start: a long-lived desktop may have a stale snapshot.
-  if (options.resolveCodex) {
+  const engine = normalizeEngine(bot.engine);
+  if (engine === 'claude') {
+    const runtime = await inspectClaudeRuntime({ userHome: options.userHome, claudePath: options.claudePath });
+    options = { ...options, claudePath: runtime.runtimePath, claudeAvailable: runtime.available };
+  } else if (options.resolveCodex) {
     const runtime = await options.resolveCodex();
     options = { ...options, codexPath: runtime.runtimePath || '', codexSource: runtime.runtimeSource || '', codexAvailable: runtime.runtimeFound === true };
   }
   if (!fs.existsSync(options.nodePath) || !fs.existsSync(options.larkCliPath)) {
     throw new Error("客户端内置运行时不完整，请重新安装客户端");
   }
-  if (!options.codexAvailable) throw new Error("未检测到可用的 Codex 桌面运行时");
-  const codexHome = bot.codexHome || options.defaultCodexHome;
+  if (engine === 'claude' ? !options.claudeAvailable : !options.codexAvailable) throw new Error(`未检测到可用的 ${engine === 'claude' ? 'Claude Code CLI' : 'Codex 桌面运行时'}`);
+  const codexHome = engine === 'claude' ? bot.claudeHome : bot.codexHome || options.defaultCodexHome;
   if ((options.platform || process.platform) === "win32") {
     const scriptPath = path.join(options.engineRoot, "start-codex-feishu-bridge.ps1");
     if (!fs.existsSync(scriptPath)) throw new Error("客户端 Bridge 启动脚本缺失");
@@ -448,7 +465,7 @@ async function startManagedBotOnce(name, options) {
     await runPowerShell(scriptPath, startArgs, { env: processEnvironment(options, bot), timeoutMs: 60_000 });
   } else {
     if (!fs.existsSync(options.bridgeEntry || "")) throw new Error("客户端 Bridge 入口缺失");
-    if (!options.codexPath) throw new Error("未检测到可用的 Codex 桌面运行时");
+    if (engine === 'codex' && !options.codexPath) throw new Error("未检测到可用的 Codex 桌面运行时");
     await startManagedBotPosix(bot, codexHome, options);
   }
 
@@ -498,10 +515,6 @@ async function stopManagedBotAndDisableAutoStart(name, options) {
 }
 
 async function restartSelectedManagedBots(options) {
-  if (options.resolveCodex) {
-    const runtime = await options.resolveCodex();
-    if (!runtime.runtimeFound) throw new Error('新 Codex 后端不可用，未停止任何 Bot：' + (runtime.error || '未检测到 CLI'));
-  }
   const inspectBots = options.inspectBots || (() => inspectManagedBots(options.dataRoot, options.localAppData));
   const stopBot = options.stopBot || ((name, mode) => stopManagedBot(name, { ...options, force: mode.force }));
   const startBot = options.startBot || ((name) => startManagedBot(name, options));
@@ -521,6 +534,14 @@ async function restartSelectedManagedBots(options) {
     .filter((bot) => Number(bot.activeRunCount || 0) > 0)
     .map((bot) => ({ name: bot.name, activeRunCount: Number(bot.activeRunCount || 0) }));
   const targets = force ? onlineBots : onlineBots.filter((bot) => Number(bot.activeRunCount || 0) === 0);
+  if (targets.some((bot) => normalizeEngine(bot.engine) === 'codex') && options.resolveCodex) {
+    const runtime = await options.resolveCodex();
+    if (!runtime.runtimeFound) throw new Error('新 Codex 后端不可用，未停止任何 Bot：' + (runtime.error || '未检测到 CLI'));
+  }
+  if (targets.some((bot) => normalizeEngine(bot.engine) === 'claude')) {
+    const runtime = await (options.inspectClaudeRuntime || inspectClaudeRuntime)({ userHome: options.userHome, claudePath: options.claudePath });
+    if (!runtime.available) throw new Error('Claude Code CLI 不可用，未停止任何 Bot');
+  }
   const restarted = [];
   const clearedActiveRuns = [];
   const recovered = [];

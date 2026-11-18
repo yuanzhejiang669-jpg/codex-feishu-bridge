@@ -27,6 +27,8 @@ function publicBot(bot, runtime) {
     profile: bot.profile,
     workspace: bot.workspace,
     codexHome: bot.codexHome,
+    claudeHome: bot.claudeHome,
+    engine: bot.engine || 'codex',
     online: runtime?.online === true,
     activeRunCount: Number(runtime?.activeRunCount || 0),
   };
@@ -37,7 +39,7 @@ function previewManagedBotRemoval(name, options) {
   if (!bot) throw new Error(`找不到客户端管理的 Bot：${name}`);
   const runtime = inspectManagedBots(options.dataRoot, options.localAppData).find((item) => item.name === bot.name);
   const shared = readManagedBots(options.dataRoot).filter((item) => (
-    item.name !== bot.name && path.resolve(item.codexHome || "") === path.resolve(bot.codexHome || "")
+    bot.codexHome && item.codexHome && item.name !== bot.name && path.resolve(item.codexHome) === path.resolve(bot.codexHome)
   ));
   return {
     kind: "bot",
@@ -48,6 +50,7 @@ function previewManagedBotRemoval(name, options) {
     paths: {
       workspace: bot.workspace,
       codexHome: bot.codexHome,
+      claudeHome: bot.claudeHome,
       managedRoot: path.dirname(bot.configPath),
       runtimeRoot: managedRuntimeRoot(options.localAppData, bot.name),
     },

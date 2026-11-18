@@ -46,7 +46,7 @@ async function accountState(options, homes = []) {
   const accounts = store(options);
   await settlePending(options);
   for (const home of homes) if (home.manageable) await accounts.discoverAccount(root(options), home.codexHome);
-  const bots = readManagedBots(options.dataRoot);
+  const bots = readManagedBots(options.dataRoot).filter((bot) => bot.engine !== 'claude');
   return {
     accounts: accounts.listAccounts(root(options)),
     accountLoginJob: publicJob(jobs.get(root(options))),
@@ -93,6 +93,7 @@ async function setBotAccountOnce(input, options) {
   const accounts = store(options);
   const bot = readManagedBots(options.dataRoot).find((item) => item.name === input.name);
   if (!bot) throw new Error("找不到客户端 Bot");
+  if (bot.engine === 'claude') throw new Error('Claude Bot 请使用 Claude Provider');
   const alias = String(input.alias || "");
   if (alias) accounts.readAccountAuth(root(options), alias);
   const state = (options.inspectBots || inspectManagedBots)(options.dataRoot, options.localAppData).find((item) => item.name === bot.name);

@@ -8,6 +8,7 @@ export function createSessionStore({
   normalizeSessionData,
   dedupeSessions,
   sessionListLimit,
+  preserveSessionIdentity = false,
 } = {}) {
   const sessions = loadSessions(sessionsPath);
 
@@ -50,7 +51,13 @@ export function createSessionStore({
     }
 
     if (Array.isArray(current.sessions)) {
-      current.sessions = dedupeSessions(current.sessions.map(normalizeSessionData)).slice(0, sessionListLimit());
+      current.sessions = dedupeSessions(current.sessions.map((item) => {
+        const normalized = normalizeSessionData(item);
+        if (!preserveSessionIdentity || !item || typeof item !== 'object') return normalized;
+        // Permission/status messages may arrive while a native Claude turn holds this object.
+        for (const key of Object.keys(item)) if (!(key in normalized)) delete item[key];
+        return Object.assign(item, normalized);
+      })).slice(0, sessionListLimit());
       if (!current.currentSessionId && current.sessions[0]) current.currentSessionId = current.sessions[0].id;
       return current;
     }

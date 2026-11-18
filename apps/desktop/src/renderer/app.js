@@ -320,7 +320,7 @@ function renderBots(bridge, setup = {}) {
     return `
     <div class="bot-row">
       <label class="bot-selector" title="选择 ${escapeHtml(bot.label || bot.name)}"><input class="managed-bot-selection" data-bot-name="${escapeHtml(bot.name)}" type="checkbox" aria-label="选择 ${escapeHtml(bot.label || bot.name)}" ${selectedManagedBotNames.has(bot.name) ? "checked" : ""}></label>
-      <strong>${escapeHtml(bot.label || bot.name)}<small>客户端管理</small></strong>
+      <strong>${escapeHtml(bot.label || bot.name)}<small>${bot.engine === 'claude' ? 'Claude Code CLI' : 'Codex'} · 客户端管理</small></strong>
       <span><span class="${badgeClass(stateKind)}" title="${escapeHtml(recovery?.lastError || "")}">${stateLabel}</span></span>
       <span>${bot.activeRunCount} 个任务</span>
       <span class="path-text">${escapeHtml(bot.workspace)}</span>
@@ -344,11 +344,11 @@ function renderBots(bridge, setup = {}) {
 
   const spaces = setup.managedSpaces || [];
   const managedHomes = new Set(spaces.map((space) => String(space.codexHome || "").toLowerCase()));
-  const otherWorkspaces = allBots.filter((instance) => instance.workspace && !managedHomes.has(String(instance.codexHome || "").toLowerCase()));
+  const otherWorkspaces = allBots.filter((instance) => instance.workspace && !managedHomes.has(String(instance.codexHome || instance.claudeHome || "").toLowerCase()));
   elements.workspaceCount.textContent = `${spaces.length} 个客户端空间 · ${otherWorkspaces.length} 个其他工作空间`;
   elements.workspaceTableBody.innerHTML = spaces.length || otherWorkspaces.length
     ? spaces.map((space, index) => `<tr><td><strong>${escapeHtml(space.spaceName)}</strong><small>${space.bots.length} 个 Bot</small></td><td>${escapeHtml(space.bots.map((bot) => bot.workspace).join("；"))}</td><td title="${escapeHtml(space.codexHome)}">${escapeHtml(space.codexHome)}</td><td><button class="link-button danger-link managed-space-remove" data-space-index="${index}" type="button">删除空间</button></td></tr>`).join("")
-      + otherWorkspaces.map((instance) => `<tr><td>${escapeHtml(instance.name)}</td><td title="${escapeHtml(instance.workspace)}">${escapeHtml(instance.workspace)}</td><td title="${escapeHtml(instance.codexHome)}">${escapeHtml(instance.codexHome)}</td><td><span class="section-meta">只读</span></td></tr>`).join("")
+       + otherWorkspaces.map((instance) => `<tr><td>${escapeHtml(instance.name)}</td><td title="${escapeHtml(instance.workspace)}">${escapeHtml(instance.workspace)}</td><td title="${escapeHtml(instance.codexHome || instance.claudeHome)}">${escapeHtml(instance.codexHome || instance.claudeHome)}</td><td><span class="section-meta">${instance.engine === 'claude' ? 'Claude Code CLI' : '只读'}</span></td></tr>`).join("")
     : '<tr><td colspan="4" class="empty-row">未发现工作空间</td></tr>';
 }
 
@@ -934,6 +934,7 @@ function render(currentState) {
   renderSystemPaths(currentState);
   renderDesktopSettings(currentState.settings, currentState.setup);
   renderUpdater(currentState.update);
+  window.claudeDesktop?.render(currentState);
 }
 
 function workspaceFactoryInput() {
@@ -2006,4 +2007,5 @@ document.querySelectorAll(".nav-item").forEach((button) => {
 window.bridgeDesktop.getVersion()
   .then((version) => { elements.appVersion.textContent = `v${version}`; })
   .catch(() => {});
+if (window.claudeDesktop) window.claudeDesktop.onRefresh = render;
 refresh();

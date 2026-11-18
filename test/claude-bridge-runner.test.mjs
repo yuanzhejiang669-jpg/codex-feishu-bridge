@@ -1,0 +1,94 @@
+import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import test from 'node:test';
+import { createClaudeBridge } from '../src/claude/bridge-runner.mjs';
+import { normalizeContextUsage } from '../src/sessions/normalize.mjs';
+import { createSessionStore } from '../src/sessions/store.mjs';
+
+test('Claude Bridge preserves text, maps tool activity, resumes native identity and binds approvals to the sender', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cfb-claude-runner-'));
+  const envKey = `CFB_RUNNER_${crypto.randomBytes(8).toString('hex')}`;
+  process.env[envKey] = 'fixture-credential';
+  t.after(() => { delete process.env[envKey]; fs.rmSync(root, { recursive: true, force: true }); });
+  const catalog = path.join(root, 'providers.json');
+  fs.writeFileSync(catalog, JSON.stringify({ providers: [{ id: 'provider', envKey, model: 'claude-test', effort: 'high', models: ['claude-test'] }] }));
+  const session = { id: 'local-session', engine: 'claude', title: 'test' };
+  const chat = { currentSessionId: session.id, sessions: [session] };
+  const event = { chat_id: 'chat-a', sender_id: 'user-a', message_id: 'message-a', content: '  用户原话\n不加要求。  ' };
+  const state = { meta: {}, blocks: [] };
+  const activeJobs = new Map(); const activeChildren = new Map(); const reduced = []; const replies = [];
+  let saved = 0; let turnCount = 0; let bridge;
+  const nativeId = crypto.randomUUID();
+  bridge = createClaudeBridge({ config: { claudeProviderCatalog: catalog, claudeProviderId: 'provider',
+    claudeCli: { command: 'claude' }, claudeHome: root, workspace: root, stateDir: root, larkProfile: 'claude-1' },
+    getSession: () => session, getChatState: () => chat, resetSession: () => session,
+    saveSessions: () => { saved += 1; }, userText: (content) => content, activeJobs, activeChildren,
+    appendText: (current, text) => { current.text = (current.text || '') + text; },
+    reduceEvent: (_current, value) => reduced.push(value), markPhase: () => {},
+    ensureDone: (current, text) => { current.final = text; }, markInterrupted: () => {}, markError: () => {},
+    sendMarkdown: async (chatId, text) => {
+      replies.push({ chatId, text });
+      const token = text.match(/\/approve ([a-f0-9]+)/)?.[1];
+      if (token) {
+        await bridge.handleCommand({ ...event, sender_id: 'other-user' }, { name: '/approve', rest: token });
+        assert.match(replies.at(-1).text, /不属于当前用户/);
+        await bridge.handleCommand(event, { name: '/approve', rest: token });
+      }
+    },
+    createClient: (options) => ({ child: { pid: 123 }, async run(content) {
+      assert.deepEqual(content[0], { type: 'text', text: event.content });
+      assert.equal(options.resume, turnCount > 0);
+      if (turnCount > 0) assert.equal(options.sessionId, nativeId);
+      options.onStarted({ pid: 123 });
+      try {
+        await options.onSession(nativeId);
+        options.onEvent({ type: 'initialized', sessionId: nativeId, model: 'claude-test', version: '2.1.327', tools: ['Read'], mcpServers: [], skills: [] });
+        assert.equal(await options.onPermission({ id: 'permission', toolName: 'Write', sessionId: nativeId, input: { file_path: '/fixture' } }), true);
+        options.onEvent({ type: 'tool_start', id: 'tool', name: 'Write', input: { file_path: '/fixture' } });
+        options.onEvent({ type: 'tool_end', id: 'tool', name: 'Write', output: 'success', error: false });
+        options.onEvent({ type: 'context', usedTokens: 120 });
+        options.onEvent({ type: 'text_delta', text: '原样回复\u200b' });
+        const result = { result: '原样回复\u200b', usage: { input_tokens: 20, cache_read_input_tokens: 100, output_tokens: 15 } };
+        options.onEvent({ type: 'result', result }); turnCount += 1; return result;
+      } finally { options.onClosed({ pid: 123 }); }
+    } }) });
+  t.after(() => bridge.close());
+  await bridge.run(event, session, state, async () => {});
+  await bridge.run(event, session, state, async () => {});
+  assert.equal(turnCount, 2); assert.equal(activeJobs.size, 0); assert.equal(activeChildren.size, 0);
+  assert.equal(state.final, '原样回复\u200b'); assert.ok(saved >= 4);
+  assert.deepEqual(reduced.slice(0, 2).map((value) => value.type), ['item.started', 'item.completed']);
+  assert.equal(session.lastContextUsage.contextWindow, null);
+  assert.equal(normalizeContextUsage(session.lastContextUsage).percent, null);
+  assert.equal(session.lastTokenUsage.total.inputTokens, 120);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(root, 'claude-runtime.json'))).version, '2.1.327');
+});
+
+test('unknown context capacity remains unknown through normalization', () => {
+  assert.deepEqual(normalizeContextUsage({ usedTokens: 100, contextWindow: null, percent: null, updatedAt: 1 }),
+    { usedTokens: 100, contextWindow: null, percent: null, updatedAt: 1 });
+  assert.equal(normalizeContextUsage({ usedTokens: null, contextWindow: null, percent: null }), null);
+});
+
+test('Claude session identity survives concurrent status/permission reads so native state persists', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cfb-claude-session-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const sessionsPath = path.join(root, 'sessions.json');
+  const store = createSessionStore({ sessionsPath, preserveSessionIdentity: true,
+    createSessionData: () => ({ id: 'session', engine: 'claude', title: 'test', claudeSessionId: '', lastContextUsage: null }),
+    normalizeSessionData: (value) => ({ ...value }), dedupeSessions: (values) => values, sessionListLimit: () => 100 });
+  const running = store.getSession('chat');
+  assert.equal(store.getSession('chat'), running);
+  const otherCommand = store.getChatState('chat').sessions[0];
+  assert.equal(otherCommand, running);
+  otherCommand.title = 'renamed during run';
+  running.claudeSessionId = 'native-id'; running.lastContextUsage = { usedTokens: 15, contextWindow: null };
+  store.saveSessions();
+  const persisted = JSON.parse(fs.readFileSync(sessionsPath)).chats.chat.sessions[0];
+  assert.equal(persisted.claudeSessionId, 'native-id');
+  assert.equal(persisted.title, 'renamed during run');
+  assert.equal(persisted.lastContextUsage.usedTokens, 15);
+});

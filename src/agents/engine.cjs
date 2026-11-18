@@ -1,0 +1,21 @@
+const path = require('node:path');
+
+const ENGINES = Object.freeze({ codex: 'Codex', claude: 'Claude Code CLI' });
+
+function normalizeEngine(value) {
+  const engine = String(value || 'codex').trim().toLowerCase();
+  if (!Object.hasOwn(ENGINES, engine)) throw new Error(`不支持的执行内核：${engine}`);
+  return engine;
+}
+
+function agentHome(bot, fallback = '') {
+  return normalizeEngine(bot?.engine) === 'claude'
+    ? String(bot.claudeHome || fallback)
+    : String(bot?.codexHome || fallback);
+}
+
+function defaultClaudeCli(home, platform = process.platform) {
+  return path.join(home, '.local', 'bin', platform === 'win32' ? 'claude.exe' : 'claude');
+}
+
+module.exports = { ENGINES, agentHome, defaultClaudeCli, normalizeEngine };

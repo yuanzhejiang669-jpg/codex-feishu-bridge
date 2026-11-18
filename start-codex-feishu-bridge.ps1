@@ -23,7 +23,8 @@ param(
   [switch]$ThreadReply,
   [switch]$EnableMcp,
   [switch]$DisableMcp,
-  [switch]$Foreground
+  [switch]$Foreground,
+  [ValidateSet('codex', 'claude')][string]$AgentEngine = 'codex'
 )
 
 $ErrorActionPreference = "Stop"
@@ -244,6 +245,7 @@ if (Test-Path $pidFile) {
 }
 
 $env:CODEX_FEISHU_WORKSPACE = $resolvedWorkspace
+$env:CODEX_FEISHU_ENGINE = $AgentEngine
 $env:CODEX_FEISHU_INSTANCE_NAME = if ($safeName) { $safeName } else { "default" }
 $env:CODEX_HOME = $resolvedCodexHome
 if ($resolvedDesktopCodexHome) {
@@ -333,7 +335,7 @@ if (Test-Path -LiteralPath $codexConfigFile) {
 
 Import-UserEnvIfMissing ($envKeysToImport | Sort-Object -Unique)
 
-$resolvedCodexCli = Resolve-CodexCliBin
+$resolvedCodexCli = if ($AgentEngine -eq 'codex') { Resolve-CodexCliBin } else { $null }
 if ($resolvedCodexCli) {
   $env:CODEX_CLI_BIN = $resolvedCodexCli
 }

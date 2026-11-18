@@ -549,10 +549,21 @@ test("bounds macOS login Provider environment retries", async () => {
 test('invalid upgraded CLI never stops a currently running Bot', async () => {
   let stopped = false;
   await assert.rejects(() => restartSelectedManagedBots({
+    names: ['codex-running'],
+    inspectBots: () => [{ name: 'codex-running', engine: 'codex', online: true, activeRunCount: 0 }],
     resolveCodex: async () => ({ runtimeFound: false, error: 'broken package' }),
     stopBot: async () => { stopped = true; },
   }), /未停止任何 Bot/);
   assert.equal(stopped, false);
+});
+
+test('Claude-only restart validates Claude independently of the Codex runtime', async () => {
+  const bot = { name: 'claude-1', engine: 'claude', online: true, activeRunCount: 0 };
+  const result = await restartSelectedManagedBots({ names: [bot.name], inspectBots: () => [bot],
+    resolveCodex: async () => assert.fail('Claude must not resolve the Codex runtime'),
+    inspectClaudeRuntime: async () => ({ available: true }),
+    stopBot: async () => { bot.online = false; }, startBot: async () => { bot.online = true; } });
+  assert.deepEqual(result.restarted, [bot.name]);
 });
 
 test('runtime snapshots reject another Bridge PID and corrupted backend lists', () => {

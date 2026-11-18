@@ -14,6 +14,11 @@ function collectKnownPaths(state) {
 
   add(state?.bridge?.root);
   add(state?.codex?.runtimePath);
+  add(state?.claude?.runtimePath);
+  add(state?.claudeCapabilities?.root);
+  add(state?.claudeCapabilities?.configPath);
+  add(state?.claudeCapabilities?.skillsRoot);
+  for (const skill of state?.claudeCapabilities?.skills || []) { add(skill.path); add(skill.skillFile); }
   add(state?.capabilities?.codexHome);
   add(state?.capabilities?.configPath);
   add(state?.capabilities?.skillsRoot);
@@ -32,6 +37,7 @@ function collectKnownPaths(state) {
   for (const bot of state?.setup?.managedBots || []) {
     add(bot.workspace);
     add(bot.codexHome);
+    add(bot.claudeHome);
     add(bot.configPath);
     add(bot.logDir);
     if (bot.codexHome) {

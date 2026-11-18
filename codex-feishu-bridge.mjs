@@ -5,6 +5,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
+import agentEngine from './src/agents/engine.cjs';
+import { createClaudeBridge } from './src/claude/bridge-runner.mjs';
 import { fileURLToPath } from "node:url";
 import {
   durationConfigLabel,
@@ -144,6 +146,14 @@ const DESKTOP_CODEX_HOME_PATH = CONFIGURED_DESKTOP_CODEX_HOME
   : "";
 
 const CONFIG = {
+  engine: agentEngine.normalizeEngine(process.env.CODEX_FEISHU_ENGINE),
+  claudeCli: parseToolEnv('CLAUDE_CLI_BIN', { command: process.platform === 'win32' ? 'claude.exe' : 'claude', argsPrefix: [] }),
+  claudeHome: process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'),
+  claudeProviderCatalog: process.env.CLAUDE_FEISHU_PROVIDER_CATALOG || '',
+  claudeProviderId: process.env.CLAUDE_FEISHU_PROVIDER_ID || '',
+  claudeBotConfig: process.env.CLAUDE_FEISHU_BOT_CONFIG || '',
+  claudePermissionMode: process.env.CLAUDE_FEISHU_PERMISSION_MODE || 'manual',
+  claudeToolsRoot: process.env.CLAUDE_FEISHU_TOOLS_ROOT || '',
   workspace: process.env.CODEX_FEISHU_WORKSPACE || process.cwd(),
   eventKeys: EVENT_KEYS,
   eventKey: EVENT_KEYS[0] || "im.message.receive_v1",
@@ -191,11 +201,11 @@ const CONFIG = {
   deleteConfirmTtlMs: Number(process.env.CODEX_FEISHU_DELETE_CONFIRM_TTL_MS || `${5 * 60_000}`),
   streamRecoveryEnabled: (process.env.CODEX_FEISHU_STREAM_RECOVERY || "1") !== "0",
   streamRecoveryMaxAttempts: Number(process.env.CODEX_FEISHU_STREAM_RECOVERY_MAX_ATTEMPTS || "1"),
-  syncSidebar: (process.env.CODEX_FEISHU_SYNC_SIDEBAR || "0") !== "0",
+  syncSidebar: process.env.CODEX_FEISHU_ENGINE !== 'claude' && (process.env.CODEX_FEISHU_SYNC_SIDEBAR || "0") !== "0",
   sidebarReconcileIntervalMs: parseDurationMs(process.env.CODEX_FEISHU_SIDEBAR_RECONCILE_INTERVAL_MS, 60_000),
-  syncSessionsFromCodex: (process.env.CODEX_FEISHU_SYNC_SESSIONS_FROM_CODEX || "1") !== "0",
+  syncSessionsFromCodex: process.env.CODEX_FEISHU_ENGINE !== 'claude' && (process.env.CODEX_FEISHU_SYNC_SESSIONS_FROM_CODEX || "1") !== "0",
   keepEmptySessionMs: Number(process.env.CODEX_FEISHU_KEEP_EMPTY_SESSION_MS || `${10 * 60_000}`),
-  threadHealthReminder: (process.env.CODEX_FEISHU_THREAD_HEALTH_REMINDER || "1") !== "0",
+  threadHealthReminder: process.env.CODEX_FEISHU_ENGINE !== 'claude' && (process.env.CODEX_FEISHU_THREAD_HEALTH_REMINDER || "1") !== "0",
   threadHealthWarningBytes: Number(process.env.CODEX_FEISHU_THREAD_HEALTH_WARNING_MB || "120") * 1_000_000,
   threadHealthCriticalBytes: Number(process.env.CODEX_FEISHU_THREAD_HEALTH_CRITICAL_MB || "200") * 1_000_000,
   threadHealthWarningResumeMs: parseDurationMs(process.env.CODEX_FEISHU_THREAD_HEALTH_WARNING_RESUME_MS, 15_000),
@@ -489,6 +499,7 @@ let sidebarReconcileQueuedReason = "";
 let sidebarReconcileTimer = null;
 let sidebarReconcilePendingReason = "";
 const sessionStore = createSessionStore({
+  preserveSessionIdentity: CONFIG.engine === 'claude',
   sessionsPath,
   createSessionData,
   normalizeSessionData,
@@ -560,12 +571,22 @@ shutdownCallbacks.add(() => {
   void appServerPool.closeAll("bridge-shutdown");
 });
 
+const claudeBridge = CONFIG.engine === 'claude' ? createClaudeBridge({
+  config: CONFIG, getSession, getChatState, resetSession, saveSessions, userText: userTextFromContent,
+  sendText, sendMarkdown, activeChildren, activeJobs: activeCodexJobs,
+  appendText: appendRunText, reduceEvent: reduceCodexJsonEvent, markPhase: markRunPhase,
+  ensureDone: ensureRunDone, markInterrupted: markRunInterrupted, markError: markRunError,
+  terminateProcessTree, log,
+}) : null;
+shutdownCallbacks.add(() => claudeBridge?.close());
+
 function cleanOverride(value) {
   const text = String(value || "").trim();
   return text || "";
 }
 
 function effectiveSessionSettings(session) {
+  if (CONFIG.engine === 'claude') return claudeBridge.settings(session);
   const model = cleanOverride(session?.modelOverride) || CONFIG.codexModel || resolveCodexConfigValue("model") || "";
   const provider = cleanOverride(session?.providerOverride) || (process.env.CODEX_FEISHU_OPENAI_DEFAULT_ACCOUNT ? "openai" : resolveCodexConfigValue("model_provider")) || "openai";
   const requestedReasoning = cleanOverride(session?.reasoningOverride) || CONFIG.codexReasoning || resolveCodexConfigValue("model_reasoning_effort") || MODEL_REASONING_REGISTRY.defaultRequestedEffort;
@@ -585,6 +606,7 @@ function assertReasoningSupported(settings) {
 
 function settingsSummary(session) {
   const settings = effectiveSessionSettings(session);
+  if (CONFIG.engine === 'claude') return `Claude Code CLI · provider ${settings.provider} · model ${settings.model} · effort ${settings.reasoning}`;
   return [
     `provider ${settings.accountAlias || settings.provider || "默认"}`,
     `model ${settings.model || "默认"}`,
@@ -664,6 +686,8 @@ function normalizeSessionData(session) {
     updatedAt: Number(session?.updatedAt) || Number(session?.createdAt) || now,
     messages: Array.isArray(session?.messages) ? session.messages : [],
     codexThreadId: typeof session?.codexThreadId === "string" ? session.codexThreadId : "",
+    engine: session?.engine || 'codex',
+    claudeSessionId: typeof session?.claudeSessionId === 'string' ? session.claudeSessionId : '',
     lastTokenUsage: normalizeTokenUsage(session?.lastTokenUsage),
     lastContextUsage: normalizeContextUsage(session?.lastContextUsage),
     lastContextPeakUsage: normalizeContextUsage(session?.lastContextPeakUsage),
@@ -1801,6 +1825,8 @@ function createSessionData(title) {
     updatedAt: now,
     messages: [],
     codexThreadId: "",
+    engine: CONFIG.engine,
+    claudeSessionId: '',
     lastTokenUsage: null,
     lastContextUsage: null,
     lastContextPeakUsage: null,
@@ -1845,6 +1871,7 @@ function createRunState(session, event, userContent) {
     formulaSources: [],
     formulaRenderStats: null,
     meta: {
+      engine: session.engine || 'codex',
       durationMs: undefined,
       inputTokens: undefined,
       outputTokens: undefined,
@@ -2257,7 +2284,7 @@ function ensureRunDone(state, finalText = "") {
     const tools = state.blocks.filter((block) => block.kind === "tool");
     state.blocks = [{ kind: "text", content: answer, streaming: false }, ...tools];
   } else if (state.blocks.length === 0) {
-    appendRunText(state, "(Codex 没有返回内容)");
+    appendRunText(state, state.meta.engine === 'claude' ? '(Claude 没有返回内容)' : '(Codex 没有返回内容)');
   }
   closeStreamingBlocks(state);
   state.terminal = "done";
@@ -2398,7 +2425,7 @@ function renderStaleRunCard(record) {
     },
     body: {
       elements: [
-        markdown("**上一轮 Codex 任务状态已丢失**\n\nBridge 启动时发现这张卡片仍处于运行状态，但原进程已经不在当前 Bridge 内。为避免误判为仍在执行，已将它标记为中断。"),
+        markdown(`**上一轮 ${CONFIG.engine === 'claude' ? 'Claude Code' : 'Codex'} 任务状态已丢失**\n\nBridge 启动时发现这张卡片仍处于运行状态，但原进程已经不在当前 Bridge 内。为避免误判为仍在执行，已将它标记为中断。`),
         noteMd(`原始消息：${record?.messageId || ""}`),
         noteMd(`会话：${record?.sessionId || ""}`),
         startedAt ? noteMd(`开始时间：${formatTime(startedAt)}`) : null,
@@ -3075,6 +3102,11 @@ function renderFooterText(footer, elapsed) {
 }
 
 function renderDoneMeta(state) {
+  if (state.meta.engine === 'claude') {
+    const used = state.meta.contextUsage?.usedTokens;
+    return [used == null ? '当前上下文未知' : `当前请求上下文 ${formatNumber(used)} tokens`,
+      '容量未提供', state.meta.compactedAt ? `上次压缩 ${formatTime(state.meta.compactedAt)}` : '未观察到压缩'].join(' · ');
+  }
   const parts = [];
   const context = renderContextUsage(state.meta.contextUsage, "当前窗口");
   if (context) parts.push(context);
@@ -3141,14 +3173,15 @@ function cardTitle(state) {
     if (state.terminal === "done") return "Codex goal 已结束";
     return "Codex goal 进行中";
   }
-  if (state.terminal === "error") return state.failure?.label || "Codex 处理失败";
-  if (state.terminal === "interrupted") return "Codex 已停止";
-  if (state.terminal === "done") return "Codex 已完成";
-  if (state.footer === "recovering") return "Codex 正在续跑";
-  if (state.footer === "reconnecting") return "Codex 正在重连";
-  if (state.footer === "tool_running") return "Codex 正在执行";
-  if (state.footer === "streaming") return "Codex 正在回复";
-  return "Codex 正在思考";
+  const engine = state.meta?.engine === 'claude' ? 'Claude Code' : 'Codex';
+  if (state.terminal === "error") return state.failure?.label || `${engine} 处理失败`;
+  if (state.terminal === "interrupted") return `${engine} 已停止`;
+  if (state.terminal === "done") return `${engine} 已完成`;
+  if (state.footer === "recovering") return `${engine} 正在续跑`;
+  if (state.footer === "reconnecting") return `${engine} 正在重连`;
+  if (state.footer === "tool_running") return `${engine} 正在执行`;
+  if (state.footer === "streaming") return `${engine} 正在回复`;
+  return `${engine} 正在思考`;
 }
 
 function cardSummary(state) {
@@ -3562,7 +3595,7 @@ function formatBytes(bytes) {
   return `${(value / 1024 / 1024).toFixed(1)} MB`;
 }
 
-const parseCommand = (content) => parseCommandInput(content, { extractText: userTextFromContent });
+const parseCommand = (content) => parseCommandInput(content, { extractText: userTextFromContent, engine: CONFIG.engine });
 
 function attachmentPromptBlock(attachments) {
   const items = Array.isArray(attachments) ? attachments : [];
@@ -6345,6 +6378,7 @@ function appServerNotificationMatchesRun(message, threadId, turnId) {
 }
 
 async function runCodex(event, session, state = null, onState = null) {
+  if (CONFIG.engine === 'claude') return claudeBridge.run(event, session, state, onState);
   const selectedAccount = effectiveSessionSettings(session).accountAlias;
   if (selectedAccount || CONFIG.runMode === "app-server" || CONFIG.runMode === "auto") {
     try {
@@ -6920,7 +6954,7 @@ async function handleEvent(rawEvent, dispatchControl = {}) {
         await sendMarkdown(
           chatId,
           [
-            "**Codex 处理失败**",
+            `**${CONFIG.engine === 'claude' ? 'Claude Code' : 'Codex'} 处理失败**`,
             "",
             "动态卡片最终刷新失败，以下是错误兜底：",
             "",
@@ -6938,7 +6972,7 @@ async function handleEvent(rawEvent, dispatchControl = {}) {
       await sendMarkdown(
         chatId,
         [
-          "**Codex 处理失败**",
+          `**${CONFIG.engine === 'claude' ? 'Claude Code' : 'Codex'} 处理失败**`,
           "",
           failureShortText(failure),
           "",
@@ -6980,6 +7014,7 @@ async function handleCommand(event, command) {
   const chatId = event.chat_id;
   const messageId = event.message_id || event.id || chatId;
   log("INFO", "command received", { messageId, chatId, command: command.name });
+  if (CONFIG.engine === 'claude' && await claudeBridge.handleCommand(event, command)) return;
 
   switch (command.name) {
     case "/help":
@@ -8288,6 +8323,14 @@ async function stopCurrentJob(chatId, messageId, { clearMode = "" } = {}) {
   stoppedJobs.add(job.messageId);
   if (job.rootMessageId) stoppedJobs.add(job.rootMessageId);
   await sendText(chatId, "Stopping", "stop-start", messageId);
+
+  if (job.mode === 'claude' && job.client) {
+    job.client.interrupt();
+    setTimeout(() => {
+      if (activeCodexJobs.get(chatId)?.pid === job.pid) terminateProcessTree(job.pid, true);
+    }, 5000).unref?.();
+    return;
+  }
 
   if (job.mode === "app-server-goal" && job.client && job.threadId) {
     try {

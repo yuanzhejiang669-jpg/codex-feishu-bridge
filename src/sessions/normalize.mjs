@@ -46,9 +46,9 @@ export function normalizeTokenUsageBreakdown(value) {
 
 export function normalizeContextUsage(value) {
   if (!value || typeof value !== "object") return null;
-  const usedTokens = Number(value.usedTokens);
-  const contextWindow = Number(value.contextWindow);
-  const percent = Number(value.percent);
+  const usedTokens = value.usedTokens == null ? NaN : Number(value.usedTokens);
+  const contextWindow = value.contextWindow == null ? NaN : Number(value.contextWindow);
+  const percent = value.percent == null ? NaN : Number(value.percent);
   if (!Number.isFinite(usedTokens) && !Number.isFinite(contextWindow) && !Number.isFinite(percent)) return null;
   return {
     usedTokens: Number.isFinite(usedTokens) ? usedTokens : null,

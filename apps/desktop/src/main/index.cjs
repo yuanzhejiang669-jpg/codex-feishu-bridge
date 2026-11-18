@@ -81,6 +81,12 @@ const {
 const { readTrustedCodexHomes } = require("./services/trusted-codex-homes.cjs");
 const { startAccountLogin, setBotAccount, forgetAccount } = require("./services/openai-accounts.cjs");
 const { createWindowReadiness } = require("./services/window-readiness.cjs");
+const { inspectClaudeRuntime } = require('./services/agent-engines.cjs');
+const { inspectClaudeProviders, listClaudeModels, probeClaudeProvider, saveClaudeProvider,
+  replaceClaudeProviderKey } = require('./services/claude-providers.cjs');
+const { assignClaudeProvider } = require('./services/claude-bots.cjs');
+const { inspectClaudeCapabilities, migrateClaudeCapabilities, saveClaudeMcp } = require('./services/claude-capabilities.cjs');
+const { queueClaudeReconfiguration, processClaudeReconfiguration, readPending: readClaudePending } = require('./services/claude-reconfiguration.cjs');
 
 const smokeTest = process.argv.includes("--smoke-test");
 const capturePath = process.env.CFB_DESKTOP_CAPTURE_PATH || "";
@@ -95,6 +101,11 @@ const backgroundStart = process.argv.includes("--background");
 
 if (!app.isPackaged || smokeTest || capturePath) {
   app.setPath("userData", path.join(process.env.LOCALAPPDATA || app.getPath("appData"), "CodexFeishuBridgeDesktopDev"));
+}
+if (capturePath && process.env.CFB_DESKTOP_CAPTURE_HOME) {
+  const isolatedHome = path.resolve(process.env.CFB_DESKTOP_CAPTURE_HOME);
+  fs.mkdirSync(isolatedHome, { recursive: true });
+  app.setPath('home', isolatedHome);
 }
 
 const singleInstance = capturePath ? true : app.requestSingleInstanceLock();
@@ -114,7 +125,22 @@ let proxyStoppedForQuit = false;
 let desktopSettings = { launchAtLogin: false, closeToTray: true, error: "" };
 const desktopStartup = createDesktopStartup(app);
 let providerCredentialStore = null;
+let claudeCredentialStore = null;
+let claudeConfigurationTimer = null;
+let runtimeInitializing = true;
 let batchRestartInFlight = false;
+
+async function initializeClaudeCredentialStore() {
+  const root = path.join(managedDataRoot(), 'claude-provider-credentials');
+  claudeCredentialStore = createCredentialStore({ root,
+    encrypt: (value) => { assertSecureStorage(safeStorage, process.platform); return safeStorage.encryptString(value); },
+    decrypt: (value) => { assertSecureStorage(safeStorage, process.platform); return safeStorage.decryptString(value); } });
+  if (!fs.existsSync(root) || !fs.readdirSync(root).some((name) => name.endsWith('.bin'))) return;
+  const result = await waitForCredentialStoreHydration({ attempts: 61, delayMs: 1_000,
+    isAvailable: () => inspectSecureStorage(safeStorage, process.platform).available,
+    createStore: () => claudeCredentialStore });
+  if (!result.ready || result.hydration.failed.length) throw new Error('Claude Provider 安全凭据未能解锁，请检查系统凭据存储');
+}
 
 async function initializeProtectedProviderCredentialStore() {
   if (!new Set(["darwin", "linux"]).has(process.platform)) return;
@@ -209,6 +235,7 @@ function inspectDesktopSettings() {
 function setupOptions() {
   const secureStorage = inspectSecureStorage(safeStorage, process.platform);
   return {
+    userHome: app.getPath('home'),
     dataRoot: managedDataRoot(),
     workspaceRoot: workspaceRoot(),
     codexHomeRoot: codexHomeRoot(),
@@ -228,6 +255,8 @@ function setupOptions() {
 
 function supervisorOptions() {
   return {
+    userHome: app.getPath('home'),
+    claudePath: currentState?.claude?.runtimePath || '',
     resolveCodex: () => inspectCodex(detectorScriptPath(), { home: app.getPath('home') }),
     dataRoot: managedDataRoot(),
     localAppData: runtimeLocalAppData(),
@@ -277,6 +306,39 @@ function providerManagerOptions() {
     options.setUserEnvironmentVariable = providerCredentialStore.set;
   }
   return options;
+}
+
+function claudeOptions() {
+  return { dataRoot: managedDataRoot(), userHome: app.getPath('home'),
+    sourceCodexHome: path.join(app.getPath('home'), '.codex'),
+    env: process.env, timeoutMs: 30_000,
+    readCredential: async (name) => {
+      if (!claudeCredentialStore) throw new Error('安全凭据存储尚未初始化');
+      return claudeCredentialStore.read(name);
+    },
+    setCredential: async (name, value) => {
+      assertSecureStorage(safeStorage, process.platform);
+      if (!claudeCredentialStore) throw new Error('安全凭据存储尚未初始化');
+      return claudeCredentialStore.set(name, value);
+    } };
+}
+
+function queueClaudeProviderUsers(providerId) {
+  const names = readManagedBots(managedDataRoot()).filter((bot) => bot.engine === 'claude' && bot.provider?.id === providerId).map((bot) => bot.name);
+  return queueClaudeReconfiguration(managedDataRoot(), names);
+}
+
+let claudeReconfigurationRunning = false;
+async function applyPendingClaudeConfiguration() {
+  if (claudeReconfigurationRunning || runtimeInitializing || !Object.keys(readClaudePending(managedDataRoot()).bots).length) return;
+  claudeReconfigurationRunning = true;
+  recoverySupervisor?.stop();
+  try {
+    await processClaudeReconfiguration({ dataRoot: managedDataRoot(),
+      inspectBots: () => inspectManagedBots(managedDataRoot(), runtimeLocalAppData()),
+      stopBot: (name) => stopManagedBot(name, supervisorOptions()),
+      startBot: (name) => startManagedBot(name, supervisorOptions()) });
+  } finally { claudeReconfigurationRunning = false; if (!isQuitting) recoverySupervisor?.start(); }
 }
 
 function modelSourceOptions() {
@@ -356,6 +418,8 @@ function readinessOptions() {
     dataRoot: managedDataRoot(),
     larkCliPath: currentState?.engine?.larkCliPath || "",
     codexAvailable: Boolean(currentState?.codex?.runtimeFound),
+    claudeAvailable: Boolean(currentState?.claude?.available),
+    claudeProviders: currentState?.claudeProviders,
     engineAvailable: Boolean(currentState?.engine?.available),
     currentProvider: currentState?.provider || {},
     codexLoginState: currentState?.codex?.loginState || "unknown",
@@ -493,11 +557,15 @@ async function loadState() {
   const managedBots = inspectManagedBots(managedDataRoot(), runtimeLocalAppData());
   const capabilityHomes = inspectCapabilityHomes([
     capabilities.codexHome,
-    ...managedBots.map((bot) => bot.codexHome),
+    ...managedBots.filter((bot) => bot.engine !== 'claude').map((bot) => bot.codexHome),
   ]);
   const providerCatalog = inspectProviderCatalog(path.join(app.getPath("home"), ".codex"));
   const secureStorage = inspectSecureStorage(safeStorage, process.platform);
   currentState = {
+    claude: await inspectClaudeRuntime({ userHome: app.getPath('home') }),
+    claudeProviders: inspectClaudeProviders(managedDataRoot()),
+    claudeCapabilities: inspectClaudeCapabilities(claudeOptions()),
+    claudePendingConfiguration: readClaudePending(managedDataRoot()),
     generatedAt: new Date().toISOString(),
     app: {
       version: app.getVersion(),
@@ -608,12 +676,16 @@ function createWindow() {
   mainWindow.removeMenu();
   mainWindow.loadFile(path.join(__dirname, "..", "renderer", "index.html"));
   mainWindow.once("ready-to-show", () => {
-    if (!backgroundStart || capturePath || !tray) mainWindow.show();
+    if (!capturePath && (!backgroundStart || !tray)) mainWindow.show();
   });
   if (capturePath) {
     mainWindow.webContents.once("did-finish-load", () => {
       setTimeout(async () => {
         try {
+          const deadline = Date.now() + 30_000;
+          while (Date.now() < deadline && !await mainWindow.webContents.executeJavaScript('document.querySelector("#app-version").textContent !== "v..."')) {
+            await new Promise((resolve) => setTimeout(resolve, 250));
+          }
           if (captureSetup) {
             await mainWindow.webContents.executeJavaScript('document.querySelector("[data-view=bots]").click(); document.querySelector("#create-bot-button").click();');
             await new Promise((resolve) => setTimeout(resolve, 300));
@@ -635,6 +707,21 @@ function createWindow() {
           const image = await mainWindow.webContents.capturePage();
           fs.mkdirSync(path.dirname(capturePath), { recursive: true });
           fs.writeFileSync(capturePath, image.toPNG());
+          if (process.env.CFB_DESKTOP_CAPTURE_REPORT) {
+            const report = await mainWindow.webContents.executeJavaScript(`({
+              version: document.querySelector('#app-version').textContent,
+              error: document.querySelector('#error-band').textContent,
+              claudeSections: ['claude-provider-section', 'claude-factory-section', 'claude-tools-section', 'claude-runtime-section'].every((id) => Boolean(document.getElementById(id))),
+              runtime: document.querySelector('#claude-runtime-details').textContent,
+              factoryCount: document.querySelector('#claude-factory-form').elements.count.value,
+              effort: document.querySelector('#claude-factory-form').elements.reasoning.value,
+              credentialInputType: document.querySelector('#claude-provider-form').elements.apiKey.type,
+              activeView: document.querySelector('.nav-item.active')?.dataset.view
+            })`);
+            fs.writeFileSync(process.env.CFB_DESKTOP_CAPTURE_REPORT, JSON.stringify(report, null, 2)+'\n', 'utf8');
+            if (!report.claudeSections || report.version !== `v${app.getVersion()}` || report.error.trim()
+                || (captureView && captureView !== 'factory' && report.activeView !== captureView)) throw new Error('Desktop capture validation failed');
+          }
           app.exit(0);
         } catch {
           app.exit(1);
@@ -667,6 +754,7 @@ if (!singleInstance) {
         if (desktopSettings.error) throw new Error(`客户端设置损坏：${desktopSettings.error}`);
         await Promise.all([
           initializeProtectedProviderCredentialStore(),
+          initializeClaudeCredentialStore(),
           initializeMacProviderEnvironment(),
         ]);
         if (desktopSettings.launchAtLogin && desktopStartup.supported()) desktopStartup.setEnabled(true);
@@ -682,7 +770,7 @@ if (!singleInstance) {
       return;
     }
     let startupStatePromise = null;
-    let runtimeInitializing = !capturePath;
+    runtimeInitializing = !capturePath;
     const startupState = () => {
       if (!startupStatePromise) startupStatePromise = loadState();
       return startupStatePromise;
@@ -706,6 +794,32 @@ if (!singleInstance) {
       return { ok: true };
     });
     ipcMain.handle("desktop:preview-bot", (_event, input) => previewBot(input, setupOptions()));
+    ipcMain.handle('desktop:claude-list-models', (_event, input) => listClaudeModels(input, claudeOptions()));
+    ipcMain.handle('desktop:claude-probe-provider', (_event, input) => probeClaudeProvider(input, claudeOptions()));
+    ipcMain.handle('desktop:claude-save-provider', async (_event, input) => {
+      assertStartupReady();
+      const result = await saveClaudeProvider(input, claudeOptions());
+      result.pendingBots = queueClaudeProviderUsers(result.provider.id);
+      await loadState(); return result;
+    });
+    ipcMain.handle('desktop:claude-replace-key', async (_event, input) => {
+      assertStartupReady();
+      const result = await replaceClaudeProviderKey(input, claudeOptions());
+      result.pendingBots = queueClaudeProviderUsers(result.provider.id);
+      await loadState(); return result;
+    });
+    ipcMain.handle('desktop:claude-assign-provider', async (_event, input) => {
+      assertStartupReady();
+      const result = assignClaudeProvider(input, claudeOptions(), readManagedBots(managedDataRoot()));
+      queueClaudeReconfiguration(managedDataRoot(), result.botNames);
+      await loadState(); return result;
+    });
+    ipcMain.handle('desktop:claude-save-mcp', async (_event, input) => {
+      assertStartupReady(); const result = saveClaudeMcp(input, claudeOptions()); await loadState(); return result;
+    });
+    ipcMain.handle('desktop:claude-migrate-capabilities', async (_event, input) => {
+      assertStartupReady(); const result = migrateClaudeCapabilities(input, claudeOptions()); await loadState(); return result;
+    });
     ipcMain.handle("desktop:create-bot", async (_event, input) => {
       assertStartupReady();
       const result = await createManagedBot(input?.bot, input?.credentials, setupOptions());
@@ -1014,6 +1128,9 @@ if (!singleInstance) {
         startupStatePromise = null;
       }
       if (!startupError) {
+        claudeConfigurationTimer = setInterval(() => { void applyPendingClaudeConfiguration().catch((error) => console.error('Claude configuration update failed:', error.message)); }, 10_000);
+        claudeConfigurationTimer.unref();
+        void applyPendingClaudeConfiguration().catch((error) => console.error('Claude configuration update failed:', error.message));
         void refreshProviderCapacities(providerManagerOptions()).then(() => loadState()).catch(() => {});
       }
     }
@@ -1022,6 +1139,7 @@ if (!singleInstance) {
   app.on("before-quit", (event) => {
     isQuitting = true;
     if (legacyAdoptionTimer) clearInterval(legacyAdoptionTimer);
+    if (claudeConfigurationTimer) clearInterval(claudeConfigurationTimer);
     recoverySupervisor?.stop();
     updaterService?.stop();
     const proxyStatus = protocolProxyService?.snapshot().status;
