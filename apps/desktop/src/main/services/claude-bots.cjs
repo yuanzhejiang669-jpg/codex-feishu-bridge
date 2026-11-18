@@ -67,7 +67,7 @@ async function createClaudeBot(raw, credentials, options, helpers) {
       { input: appSecret, profileHome });
     profileAdded = true;
     const config = { schemaVersion: 2, ...preview.bot, provider, appId,
-      claude: { permissionMode: 'manual' }, permissionPolicy: publicPermissionPolicy(),
+      claude: { permissionMode: 'bypassPermissions' }, permissionPolicy: publicPermissionPolicy(),
       state: 'configured', createdAt: new Date().toISOString() };
     fs.writeFileSync(path.join(transaction, 'bot.json'), JSON.stringify(config, null, 2)+'\n', 'utf8');
     fs.mkdirSync(path.dirname(destination), { recursive: true });

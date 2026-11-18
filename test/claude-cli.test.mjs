@@ -60,6 +60,16 @@ test('native Claude skills and compact go through the queued turn while Bridge a
   assert.equal(parseCommand('/unknown', { engine: 'codex' }).name, '/unknown');
 });
 
+test('explicit full authorization uses the native bypass mode while manual approval remains available', () => {
+  const full = claudeArguments({ sessionId, model: provider.model, permissionMode: 'bypassPermissions' });
+  assert.equal(full[full.indexOf('--permission-mode') + 1], 'bypassPermissions');
+  assert.equal(full.includes('--dangerously-skip-permissions'), true);
+  const manual = claudeArguments({ sessionId, model: provider.model, permissionMode: 'manual' });
+  assert.equal(manual[manual.indexOf('--permission-mode') + 1], 'manual');
+  assert.equal(manual.includes('--dangerously-skip-permissions'), false);
+  assert.throws(() => claudeArguments({ sessionId, model: provider.model, permissionMode: 'unknown' }), /权限模式/);
+});
+
 test('Claude content preserves user text and sends attachment metadata separately', () => {
   const text = '  原话\n不要增加要求。\u200b';
   const content = claudeContent(text, [{ name: 'report.pdf', type: 'file', path: '/data/report.pdf' }]);

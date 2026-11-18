@@ -87,6 +87,7 @@ test('Claude 1–10 use ten independent native homes and carry their provider th
     } });
   const bot = readManagedBots(value.dataRoot)[0];
   assert.equal(bot.engine, 'claude');
+  assert.equal(bot.claude.permissionMode, 'bypassPermissions');
   assert.equal(bot.provider.model, 'claude-test');
   assert.equal(fs.readFileSync(path.join(bot.claudeHome, 'settings.json'), 'utf8').includes('private-test-key'), false);
   assert.equal(fs.existsSync(path.join(value.sourceCodexHome, 'auth.json')), false);

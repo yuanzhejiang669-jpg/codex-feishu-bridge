@@ -14,6 +14,8 @@ test('Claude Bridge preserves text, maps tool activity, resumes native identity 
   process.env[envKey] = 'fixture-credential';
   t.after(() => { delete process.env[envKey]; fs.rmSync(root, { recursive: true, force: true }); });
   const catalog = path.join(root, 'providers.json');
+  const botConfig = path.join(root, 'bot.json');
+  fs.writeFileSync(botConfig, JSON.stringify({ claude: { permissionMode: 'manual' } }));
   fs.writeFileSync(catalog, JSON.stringify({ providers: [{ id: 'provider', envKey, model: 'claude-test', effort: 'high', models: ['claude-test'] }] }));
   const session = { id: 'local-session', engine: 'claude', title: 'test' };
   const chat = { currentSessionId: session.id, sessions: [session] };
@@ -22,7 +24,7 @@ test('Claude Bridge preserves text, maps tool activity, resumes native identity 
   const activeJobs = new Map(); const activeChildren = new Map(); const reduced = []; const replies = [];
   let saved = 0; let turnCount = 0; let bridge;
   const nativeId = crypto.randomUUID();
-  bridge = createClaudeBridge({ config: { claudeProviderCatalog: catalog, claudeProviderId: 'provider',
+  bridge = createClaudeBridge({ config: { claudeProviderCatalog: catalog, claudeProviderId: 'provider', claudeBotConfig: botConfig,
     claudeCli: { command: 'claude' }, claudeHome: root, workspace: root, stateDir: root, larkProfile: 'claude-1' },
     getSession: () => session, getChatState: () => chat, resetSession: () => session,
     saveSessions: () => { saved += 1; }, userText: (content) => content, activeJobs, activeChildren,
@@ -41,12 +43,14 @@ test('Claude Bridge preserves text, maps tool activity, resumes native identity 
     createClient: (options) => ({ child: { pid: 123 }, async run(content) {
       assert.deepEqual(content[0], { type: 'text', text: event.content });
       assert.equal(options.resume, turnCount > 0);
+      assert.equal(options.permissionMode, turnCount > 0 ? 'bypassPermissions' : 'manual');
       if (turnCount > 0) assert.equal(options.sessionId, nativeId);
       options.onStarted({ pid: 123 });
       try {
         await options.onSession(nativeId);
-        options.onEvent({ type: 'initialized', sessionId: nativeId, model: 'claude-test', version: '2.1.327', tools: ['Read'], mcpServers: [], skills: [] });
-        assert.equal(await options.onPermission({ id: 'permission', toolName: 'Write', sessionId: nativeId, input: { file_path: '/fixture' } }), true);
+        options.onEvent({ type: 'initialized', sessionId: nativeId, model: 'claude-test', version: '2.1.327',
+          permissionMode: options.permissionMode, tools: ['Read'], mcpServers: [], skills: [] });
+        if (options.permissionMode === 'manual') assert.equal(await options.onPermission({ id: 'permission', toolName: 'Write', sessionId: nativeId, input: { file_path: '/fixture' } }), true);
         options.onEvent({ type: 'tool_start', id: 'tool', name: 'Write', input: { file_path: '/fixture' } });
         options.onEvent({ type: 'tool_end', id: 'tool', name: 'Write', output: 'success', error: false });
         options.onEvent({ type: 'context', usedTokens: 120 });
@@ -57,7 +61,10 @@ test('Claude Bridge preserves text, maps tool activity, resumes native identity 
     } }) });
   t.after(() => bridge.close());
   await bridge.run(event, session, state, async () => {});
+  fs.writeFileSync(botConfig, JSON.stringify({ claude: { permissionMode: 'bypassPermissions' } }));
   await bridge.run(event, session, state, async () => {});
+  await bridge.handleCommand(event, { name: '/status', rest: '' });
+  assert.match(replies.at(-1).text, /完全授权（bypassPermissions）/);
   assert.equal(turnCount, 2); assert.equal(activeJobs.size, 0); assert.equal(activeChildren.size, 0);
   assert.equal(state.final, '原样回复\u200b'); assert.ok(saved >= 4);
   assert.deepEqual(reduced.slice(0, 2).map((value) => value.type), ['item.started', 'item.completed']);
@@ -65,6 +72,7 @@ test('Claude Bridge preserves text, maps tool activity, resumes native identity 
   assert.equal(normalizeContextUsage(session.lastContextUsage).percent, null);
   assert.equal(session.lastTokenUsage.total.inputTokens, 120);
   assert.equal(JSON.parse(fs.readFileSync(path.join(root, 'claude-runtime.json'))).version, '2.1.327');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(root, 'claude-runtime.json'))).permissionMode, 'bypassPermissions');
 });
 
 test('unknown context capacity remains unknown through normalization', () => {

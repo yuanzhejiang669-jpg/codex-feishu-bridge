@@ -24,10 +24,11 @@ export function claudeArguments({ sessionId, resume, model, effort = 'high', per
   if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(sessionId || '')) throw new Error('Claude session ID 无效');
   if (!model || /[\r\n\0]/.test(model)) throw new Error('Claude 模型无效');
   if (!EFFORTS.has(effort)) throw new Error('Claude 思考强度无效');
-  if (!['manual', 'acceptEdits', 'auto', 'plan'].includes(permissionMode)) throw new Error('Claude 权限模式无效');
+  if (!['manual', 'acceptEdits', 'auto', 'plan', 'bypassPermissions'].includes(permissionMode)) throw new Error('Claude 权限模式无效');
   const args = ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose',
     '--include-partial-messages', '--permission-prompt-tool', 'stdio', '--permission-mode', permissionMode,
     '--model', model, '--effort', effort, resume ? '--resume' : '--session-id', sessionId];
+  if (permissionMode === 'bypassPermissions') args.push('--dangerously-skip-permissions');
   if (allowedTools.length) args.push('--allowedTools', allowedTools.join(','));
   if (tools !== undefined) args.push('--tools', tools);
   if (additionalDirectories.length) args.push('--add-dir', ...additionalDirectories);
@@ -110,7 +111,7 @@ export class ClaudeCliClient {
       if (message.session_id) this.sessionId = message.session_id;
       await this.onSession(this.sessionId);
       this.onEvent({ type: 'initialized', sessionId: this.sessionId, model: message.model,
-        version: message.claude_code_version || '',
+        version: message.claude_code_version || '', permissionMode: message.permissionMode || '',
         tools: message.tools || [], mcpServers: message.mcp_servers || [], skills: message.skills || [] });
     } else if (message.type === 'system' && message.subtype === 'compact_boundary') {
       this.onEvent({ type: 'compacted', at: Date.now(), metadata: message.compact_metadata });

@@ -52,6 +52,7 @@ export function createClaudeBridge({ config, getSession, getChatState, resetSess
     const effort = session?.reasoningOverride || bot.provider?.reasoning || provider.effort || 'high';
     if (!EFFORTS.has(effort)) throw new Error('Claude 思考强度无效');
     return { model, provider: provider.id, reasoning: effort, requestedReasoning: effort,
+      permissionMode: bot.claude?.permissionMode || config.claudePermissionMode || 'manual',
       reasoningMapping: { supported: true, mapped: false }, serviceTier: '', accountAlias: '' };
   }
 
@@ -93,7 +94,7 @@ export function createClaudeBridge({ config, getSession, getChatState, resetSess
     const client = createClient({ command: config.claudeCli.command, cwd: config.workspace,
       home: config.claudeHome, provider: { ...definition, model: selected.model, apiKey },
       sessionId, resume: Boolean(session.claudeSessionId), model: selected.model, effort: selected.reasoning,
-      permissionMode: config.claudePermissionMode || 'manual', disableMcp: config.disableMcp,
+      permissionMode: selected.permissionMode, disableMcp: config.disableMcp,
       allowedTools: ['Read', 'Glob', 'Grep', 'LS', 'Skill', 'mcp__feishu_bridge__current_conversation'],
       additionalDirectories: config.claudeToolsRoot && fs.existsSync(config.claudeToolsRoot) ? [config.claudeToolsRoot] : [],
       mcpConfigs: [config.claudeToolsRoot ? path.join(config.claudeToolsRoot, '.mcp.json') : '',
@@ -118,7 +119,8 @@ export function createClaudeBridge({ config, getSession, getChatState, resetSess
           state.meta.engine = 'claude'; state.meta.model = item.model || selected.model;
           writeJsonFileAtomicSync(path.join(config.stateDir, 'claude-runtime.json'), {
             engine: 'claude', pid: client.child.pid, sessionId: item.sessionId,
-            version: item.version, model: item.model, tools: item.tools, mcpServers: item.mcpServers, skills: item.skills,
+            version: item.version, model: item.model, permissionMode: item.permissionMode,
+            tools: item.tools, mcpServers: item.mcpServers, skills: item.skills,
             configHome: config.claudeHome, observedAt: new Date().toISOString(),
           });
           markPhase(state, 'model_thinking', { connection: 'connected' });
@@ -201,6 +203,7 @@ export function createClaudeBridge({ config, getSession, getChatState, resetSess
       const selected = settings(session); const job = activeJobs.get(chatId);
       await reply(`内核：Claude Code CLI\nBot：${config.larkProfile}\n会话：${session.title} (${session.id})\n`
         + `Provider：${selected.provider}\n模型：${selected.model}\n思考强度：${selected.reasoning}\n`
+        + `权限模式：${selected.permissionMode === 'bypassPermissions' ? '完全授权（bypassPermissions）' : selected.permissionMode}\n`
         + `任务：${job ? '运行中' : '空闲'}\n当前请求上下文：${session.lastContextUsage?.usedTokens ?? '未知'} tokens\n`
         + `压缩阈值：由 Claude Code 管理，Bridge 未获得精确阈值\nMCP／Skills：${config.claudeHome}`); return true;
     }

@@ -26,13 +26,15 @@ Selected standard Codex MCP definitions can be converted to Claude JSON. Environ
 
 Configured tool inventories are separate from actual runtime reports. The System page shows the most recent native CLI version, model, MCP connection statuses and observation time for each Claude Bot. Those reports describe the last run, not a permanently connected process.
 
-Each turn also exposes the built-in `feishu_bridge` MCP server. `current_conversation` reads the current chat/profile/workspace metadata; `send_file` delivers a workspace file through the existing Lark CLI as this Bot. The recipient is fixed to the conversation that requested the turn, sends use a stable idempotency key, and success requires a returned Feishu message ID. The write tool uses the same host permission flow as other writes. Its tool description limits use to requested file delivery. No transport metadata is inserted into the user's own text.
+Each turn also exposes the built-in `feishu_bridge` MCP server. `current_conversation` reads the current chat/profile/workspace metadata; `send_file` delivers a workspace file through the existing Lark CLI as this Bot. The recipient is fixed to the conversation that requested the turn, sends use a stable idempotency key, and success requires a returned Feishu message ID. The tool follows the Bot's native permission mode. Its tool description limits use to requested file delivery. No transport metadata is inserted into the user's own text.
 
 ## Conversation controls and limits
 
 Bridge handles `/new`, `/list`, `/sessions`, `/switch`, `/rename`, `/reset`, `/status`, `/context`, `/provider`, `/model`, `/effort`, `/queue`, queue-clearing and stop commands. Native skill names and `/compact` travel through an ordinary queued Claude turn. Codex-specific goal/fast/steer and transcript-deletion commands are not implemented as Claude equivalents.
 
-Tool calls requiring permission produce a Feishu request with one-use `/approve TOKEN` and `/deny TOKEN` commands. The reply must come from the requesting user in the same chat. Requests expire after 30 minutes and are cancelled when their turn ends. There is no blanket permission bypass. Stopping uses the native interrupt control with a process-tree fallback.
+New managed Claude Bots default to native full authorization: `claude.permissionMode` is `bypassPermissions`, passed to Claude Code with `--permission-mode bypassPermissions --dangerously-skip-permissions`. Ordinary file writes, commands and MCP calls therefore do not require repeated Feishu approval. Existing explicit modes are preserved during upgrade; the Bot's saved mode is read again for every turn. `/status` shows the configured mode, and native runtime reports record the mode observed from Claude Code. The Bridge does not rewrite native policy denials or auto-approve residual permission requests.
+
+In explicit manual mode, tool calls requiring permission produce a Feishu request with one-use `/approve TOKEN` and `/deny TOKEN` commands. The reply must come from the requesting user in the same chat. Requests expire after 30 minutes and are cancelled when their turn ends. Stopping uses the native interrupt control with a process-tree fallback.
 
 Context usage comes from native events, and compaction timestamps come from native compact-boundary events. A provider's advertised model window is not assumed to be its real compaction threshold. Until native capacity is available, cards explicitly show that capacity was not supplied.
 
