@@ -2,6 +2,16 @@ import { spawn } from "node:child_process";
 
 export const DEFAULT_MAX_STDERR_BYTES = 1024 * 1024;
 
+export class AppServerRpcError extends Error {
+  constructor(error, method, formatError = defaultErrorText) {
+    super(formatError(error, "codex app-server request failed"), { cause: error });
+    this.name = "AppServerRpcError";
+    this.code = error?.code;
+    this.data = error?.data;
+    this.method = method;
+  }
+}
+
 export class AppServerClient {
   constructor({
     tool,
@@ -108,7 +118,7 @@ export class AppServerClient {
       this.pending.delete(message.id);
       clearTimeout(pending.timer);
       if (Object.prototype.hasOwnProperty.call(message, "error")) {
-        pending.reject(new Error(this.formatError(message.error, "codex app-server request failed")));
+        pending.reject(new AppServerRpcError(message.error, pending.method, this.formatError));
       } else {
         pending.resolve(message.result);
       }
@@ -131,6 +141,10 @@ export class AppServerClient {
   }
 
   respondToServerRequest(message) {
+    if (this.denyServerRequests) {
+      this.write({ id: message.id, error: { code: -32000, message: "Tool and approval requests are disabled during model verification" } });
+      return;
+    }
     if (message.method === "account/chatgptAuthTokens/refresh") {
       void Promise.resolve().then(async () => {
         if (!this.refreshAccountTokens) throw new Error("该进程没有可刷新的独立账号");
@@ -160,10 +174,13 @@ export class AppServerClient {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error(`codex app-server request timed out: ${method}`));
+        const error = new Error(`codex app-server request timed out: ${method}`);
+        error.code = "APP_SERVER_REQUEST_TIMEOUT";
+        error.method = method;
+        reject(error);
       }, timeoutMs);
       timer.unref?.();
-      this.pending.set(id, { resolve, reject, timer });
+      this.pending.set(id, { resolve, reject, timer, method });
       try {
         this.write(params === undefined ? { id, method } : { id, method, params });
       } catch (error) {

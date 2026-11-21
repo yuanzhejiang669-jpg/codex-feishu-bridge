@@ -7,7 +7,9 @@ export function safeJson(value) {
 }
 
 export function errorText(value, fallback = "Codex 运行失败") {
-  if (value instanceof Error) return value.message || fallback;
+  if (value instanceof Error) {
+    return [value.message || fallback, value.data ? safeJson(value.data) : ""].filter(Boolean).join("\n");
+  }
   if (typeof value === "string") return value || fallback;
   if (!value || typeof value !== "object") return String(value || fallback);
 
@@ -85,6 +87,7 @@ export function nativeRetryExhaustedFailure(failure, willRetry) {
 export function httpStatusFromText(text) {
   const value = String(text || "");
   const match = value.match(/httpStatusCode["']?\s*[:=]\s*(\d{3})/i)
+    || value.match(/(?:API Error:|\bHTTP)\s*(\d{3})\b/i)
     || value.match(/\b(\d{3})\s+(?:Unauthorized|Too Many Requests|Forbidden|Payment Required)\b/i);
   return match ? Number(match[1]) : null;
 }
@@ -119,11 +122,21 @@ export function classifyCodexFailure(value, fallback = "Codex 运行失败") {
     };
   }
 
-  if (
-    lower.includes("cloud config bundle")
-    || lower.includes("failed to load configuration")
-    || lower.includes("timed out waiting for cloud config")
-  ) {
+  const structured = safeJson(value?.data || value?.codexErrorInfo || value?.cause?.data || "").toLowerCase();
+  if (structured.includes("modelprovidermismatch") || /cannot change this thread.s model provider.+on resume/.test(lower)) {
+    return { ...base, kind: "model_provider_mismatch", label: "Provider 与原生会话不匹配",
+      message: "目标 Provider 与当前原生 thread 的 Provider 不同，不能直接恢复。",
+      suggestion: "Bridge 需要从当前最新历史创建目标 Provider 的接续分支；原会话绑定与历史已保留，不自动重放任务。" };
+  }
+  if (/modelprovidernotfound|modelprovidernotconfigured/.test(structured) || /model provider.+(?:not found|not configured)|provider.+未(?:配置|在 config)/.test(lower)) {
+    return { ...base, kind: "provider_not_configured", label: "Provider 未配置", message: "当前配置中找不到目标 Provider。",
+      suggestion: "先添加或同步对应 Codex Home 的 Provider 定义；原会话已保留。" };
+  }
+  if (/providerpolicyconflict|modelproviderpolicy/.test(structured) || /(?:model provider|model_provider).+(?:not allowed|disallowed|policy|requirement)/.test(lower)) {
+    return { ...base, kind: "provider_policy", label: "Provider 策略冲突", message: "目标 Provider 与当前运行策略不兼容。",
+      suggestion: "检查 Provider 与组织策略配置；不会改用其他渠道或重跑任务。" };
+  }
+  if (structured.includes('cloudconfigtimeout') || lower.includes("cloud config") && /timed?\s*out|timeout|deadline/.test(lower)) {
     return {
       ...base,
       kind: "cloud_config",
@@ -132,6 +145,15 @@ export function classifyCodexFailure(value, fallback = "Codex 运行失败") {
       message: "Codex cloud config 加载超时，当前无法开始这一轮。",
       suggestion: "这通常是临时服务或网络问题；Bridge 会保留原 thread 绑定，请稍后重试同一个会话。",
     };
+  }
+
+  if (lower.includes("failed to load configuration") || /toml parse error|invalid configuration/.test(lower)) {
+    return { ...base, kind: "configuration", label: "Codex 配置错误", message: "Codex 无法加载当前配置。",
+      suggestion: "查看具体配置错误并修正；原 thread 绑定保留，不自动重试任务。" };
+  }
+  if (errorCode === "PROVIDER_HANDOFF_UNCERTAIN") {
+    return { ...base, kind: "provider_handoff_pending", label: "Provider 接续状态待核实",
+      message: "接续请求未返回确定结果，原绑定仍然保留。", suggestion: "再次发送相同切换命令会核对已有分支，不会盲目创建新分支。" };
   }
 
   if (lower.includes("no rollout found for thread id")) {

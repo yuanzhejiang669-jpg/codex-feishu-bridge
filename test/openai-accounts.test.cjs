@@ -107,11 +107,18 @@ test("real /provider handler persists account selection independently in two con
   const b = await accounts.saveAccount(root, home("b", auth("b@example.com")), { owned: true });
   const sessions = { one: { id: "one" }, two: { id: "two" } }; const sent = []; const writes = [];
   const context = { openaiAccounts: { ...accounts, accountsRoot: () => root }, CONFIG: { codexHome: home("default", auth("native@example.com")) },
+    eventDispatcher: { isChatActive: () => false }, normalizeProviderTarget: (await import('../src/commands/provider-target.mjs')).normalizeProviderTarget,
     syncChatSessionsWithCodex: async () => {}, getSession: (id) => sessions[id], commandArgs: (text) => text.trim().split(/\s+/), activeCodexJobs: new Map(),
     clearProviderBundleOverride: () => {}, setSessionOverride: (session, key, value) => { session[key] = value; }, saveSessions: () => {},
     providerStatusMarkdown: (session) => session.openaiAccountOverride, sendMarkdown: async (...args) => sent.push(args), sendText: async (...args) => sent.push(args),
     writeCodexConfigValue: async (...args) => writes.push(args), findProviderBundle: () => null, findCodexProvider: () => null,
     runtimeCommandErrorMarkdown: (_title, error) => error.message };
+  context.providerSwitcher = (await import('../src/providers/session-switch.mjs')).createProviderSwitchController({
+    save: () => {}, prepare: async () => ({ threadId: 'prepared', provider: 'openai', lineage: [] }),
+    snapshotDefaults: () => ({ values: {}, account: '' }),
+    applyDefaults: defaults => { for (const pair of Object.entries(defaults.values)) writes.push(pair); accounts.setDefaultAccount(context.CONFIG.codexHome, defaults.account); },
+    restoreDefaults: () => {},
+  });
   const handler = vm.runInNewContext(`(${sourceFunction("handleProviderCommand")})`, context);
   await handler("one", a.alias, "m1"); await handler("two", b.alias, "m2");
   assert.equal(sessions.one.openaiAccountOverride, a.alias); assert.equal(sessions.two.openaiAccountOverride, b.alias); assert.equal(writes.length, 0);
@@ -136,11 +143,14 @@ test("warm process validates removal and rotates injected tokens before its next
   assert.match(sourceFunction("runCodexAppServer"), /initialization\.warm\) await synchronizeAppServerAccount\(client\)/);
 });
 
-test("session account survives normalization and prevents exec fallback", () => {
+test("session account survives normalization and prevents exec fallback", async () => {
   const normalize = vm.runInNewContext(`(${sourceFunction("normalizeSessionData")})`, {
     cleanOverride: (value) => String(value || "").trim(), crypto: require("node:crypto"), Date,
     normalizeTokenUsage: () => null, normalizeContextUsage: () => null, normalizeThreadHealth: () => null,
     normalizeGoal: () => null, normalizeFailure: () => null,
+    normalizeThreadContinuity: (await import('../src/codex/thread-continuity.mjs')).normalizeThreadContinuity,
+    normalizeProviderSwitch: (await import('../src/providers/session-switch.mjs')).normalizeProviderSwitch,
+    normalizeNativeInputs: (await import('../src/sessions/native-inputs.mjs')).normalizeNativeInputs,
   });
   const saved = JSON.parse(JSON.stringify(normalize({ id: "one", codexThreadId: "thread", openaiAccountOverride: "openai-a@example.com", providerOverride: "openai" })));
   const reloaded = normalize(saved);

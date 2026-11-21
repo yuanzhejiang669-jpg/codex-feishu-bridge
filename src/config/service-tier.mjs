@@ -76,19 +76,15 @@ export function createServiceTierPolicy({ findProvider = () => null } = {}) {
   }
 
   function shouldRetryWithoutServiceTier(failure, tierPlan, options = {}) {
-    if (options.disableServiceTier || options.serviceTierFallbackAttempt) return false;
+    if (options.disableServiceTier || options.serviceTierFallbackAttempt || options.hasExecutedTools) return false;
     if (!tierPlan?.serviceTier || !tierPlan.autoFallback) return false;
     const item = normalizeFailure(failure) || classifyCodexFailure(failure);
-    if (["user_stop", "feishu_card", "local_io", "missing_rollout", "empty_completion", "stream_disconnect"].includes(item.kind)) {
+    if (!["unknown", "bad_request"].includes(item.kind)) {
       return false;
     }
     const lower = errorText(item.detail || item.message || failure, "").toLowerCase();
-    return item.kind !== "timeout"
-      || lower.includes("service_tier")
-      || lower.includes("service tier")
-      || lower.includes("service-tier")
-      || lower.includes("fast")
-      || lower.includes("priority");
+    return /service[_ -]tier/.test(lower)
+      && /unsupported|not supported|not allowed|unknown (?:parameter|field)|unrecognized|invalid (?:parameter|value)|does not support/.test(lower);
   }
 
   function serviceTierFallbackFailure(failure, tierPlan) {

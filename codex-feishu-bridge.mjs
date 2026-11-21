@@ -55,6 +55,12 @@ import { AppServerClient } from "./src/codex/app-server-client.mjs";
 import openaiAccounts from "./src/codex/openai-accounts.cjs";
 import { createAppServerPool } from "./src/codex/app-server-pool.mjs";
 import { createAppServerProtocol } from "./src/codex/app-server-protocol.mjs";
+import { normalizeThreadContinuity, prepareThreadContinuation, commitThreadBinding, collapseContinuationEntries } from './src/codex/thread-continuity.mjs';
+import { probeAppServerModel } from './src/codex/model-probe.mjs';
+import { createVerifiedModelStore } from './src/providers/verified-models.mjs';
+import { createProviderSwitchController, normalizeProviderSwitch } from './src/providers/session-switch.mjs';
+import { normalizeProviderTarget } from './src/commands/provider-target.mjs';
+import { normalizeNativeInputs, receiveNativeInput, nativeInputContext, markNativeInputSubmitting, acknowledgeNativeInput } from './src/sessions/native-inputs.mjs';
 import {
   codexRuntimeVersionLines,
   parseCodexCliVersion,
@@ -499,7 +505,7 @@ let sidebarReconcileQueuedReason = "";
 let sidebarReconcileTimer = null;
 let sidebarReconcilePendingReason = "";
 const sessionStore = createSessionStore({
-  preserveSessionIdentity: CONFIG.engine === 'claude',
+  preserveSessionIdentity: true,
   sessionsPath,
   createSessionData,
   normalizeSessionData,
@@ -567,6 +573,32 @@ const appServerPool = createAppServerPool({
   idleTtlMs: CONFIG.appServerIdleTtlMs,
   log,
 });
+const verifiedModels = createVerifiedModelStore(path.join(CONFIG.stateDir, 'verified-provider-models.json'));
+const providerSwitcher = createProviderSwitchController({
+  save: saveSessions,
+  prepare: prepareProviderBinding,
+  validate: session => {
+    if (!Object.values(sessions.chats).some(chat => chat.currentSessionId === session.id && chat.sessions?.includes(session))) {
+      throw new Error('准备期间当前逻辑会话已变化，原会话的 Provider 绑定未更换');
+    }
+  },
+  snapshotDefaults: defaults => ({
+    values: codexProviderConfig.readTopLevelValues(Object.keys(defaults.values)),
+    account: openaiAccounts.defaultAccount(CONFIG.codexHome),
+  }),
+  applyDefaults: (defaults, before) => {
+    if (before) assertDefaultValuesUnchanged(before.values, defaults.values);
+    if (before && ![before.account, defaults.account].includes(openaiAccounts.defaultAccount(CONFIG.codexHome))) throw new Error('默认账号已被其他操作修改');
+    codexProviderConfig.writeTopLevelCodexConfigValues(defaults.values);
+    openaiAccounts.setDefaultAccount(CONFIG.codexHome, defaults.account);
+  },
+  restoreDefaults: (before, desired) => {
+    assertDefaultValuesUnchanged(desired.values, before.values);
+    if (![before.account, desired.account].includes(openaiAccounts.defaultAccount(CONFIG.codexHome))) throw new Error('默认账号已被其他操作修改');
+    codexProviderConfig.writeTopLevelCodexConfigValues(before.values);
+    openaiAccounts.setDefaultAccount(CONFIG.codexHome, before.account);
+  },
+});
 shutdownCallbacks.add(() => {
   void appServerPool.closeAll("bridge-shutdown");
 });
@@ -616,7 +648,7 @@ function settingsSummary(session) {
 }
 
 function applySessionThreadOverrides(params, session, options = {}) {
-  const settings = effectiveSessionSettings(session);
+  const settings = options.settings || effectiveSessionSettings(session);
   const serviceTier = serviceTierForThreadSettings(settings, options);
   if (settings.model) params.model = settings.model;
   if (settings.provider) params.modelProvider = settings.provider;
@@ -625,7 +657,7 @@ function applySessionThreadOverrides(params, session, options = {}) {
 }
 
 function applySessionTurnOverrides(params, session, options = {}) {
-  const settings = assertReasoningSupported(effectiveSessionSettings(session));
+  const settings = assertReasoningSupported(options.settings || effectiveSessionSettings(session));
   const serviceTier = serviceTierForTurnSettings(settings, options);
   if (settings.model) params.model = settings.model;
   if (serviceTier) params.serviceTier = serviceTier;
@@ -686,6 +718,9 @@ function normalizeSessionData(session) {
     updatedAt: Number(session?.updatedAt) || Number(session?.createdAt) || now,
     messages: Array.isArray(session?.messages) ? session.messages : [],
     codexThreadId: typeof session?.codexThreadId === "string" ? session.codexThreadId : "",
+    ...normalizeThreadContinuity(session),
+    providerSwitchTransaction: normalizeProviderSwitch(session?.providerSwitchTransaction),
+    pendingNativeInputs: normalizeNativeInputs(session?.pendingNativeInputs),
     engine: session?.engine || 'codex',
     claudeSessionId: typeof session?.claudeSessionId === 'string' ? session.claudeSessionId : '',
     lastTokenUsage: normalizeTokenUsage(session?.lastTokenUsage),
@@ -953,7 +988,7 @@ async function syncChatSessionsWithCodex(chatId, options = {}) {
 
   const before = chatState.sessions.length;
   const beforeCurrent = chatState.currentSessionId || "";
-  const normalized = dedupeSessions(chatState.sessions.map(normalizeSessionData)).slice(0, sessionListLimit());
+  const normalized = dedupeSessions(chatState.sessions.map(normalizeSessionIdentity)).slice(0, sessionListLimit());
   const resumeInfoByThread = await loadCodexThreadResumeInfoMap(
     normalized.map((session) => session.codexThreadId),
   );
@@ -1428,7 +1463,7 @@ function bridgeSessionEntries(chatId, visibleThreadIds = null) {
     const chatState = sourceChatId === chatId ? getChatState(chatId) : sessions.chats[sourceChatId];
     if (!chatState || !Array.isArray(chatState.sessions)) continue;
 
-    const normalized = dedupeSessions(chatState.sessions.map(normalizeSessionData)).slice(0, sessionListLimit());
+    const normalized = dedupeSessions(chatState.sessions.map(normalizeSessionIdentity)).slice(0, sessionListLimit());
     if (sourceChatId === chatId) chatState.sessions = normalized;
 
     for (const session of normalized) {
@@ -1464,7 +1499,8 @@ async function mergedSessionEntries(chatId) {
 
   const registry = registeredCodexHomeRegistry();
   const sameHomeStateDirs = stateDirsForCodexHome(registry, CONFIG.codexHome);
-  for (const binding of loadRegisteredBridgeBindings(sameHomeStateDirs)) {
+  const registeredBindings = loadRegisteredBridgeBindings(sameHomeStateDirs);
+  for (const binding of registeredBindings) {
     if (sameResolvedPath(binding.stateDir, CONFIG.stateDir)) continue;
     const session = normalizeSessionData(binding.session);
     mergeThreadInventoryEntry(entryMap, {
@@ -1643,7 +1679,8 @@ async function mergedSessionEntries(chatId) {
   if (CONFIG.desktopCodexHome) {
     for (const id of loadDeletedThreadIds(CONFIG.desktopCodexHome)) deletedThreadIds.add(id);
   }
-  return sortThreadListEntries([...entryMap.values()])
+  const logicalBindings = [...Object.values(sessions.chats).flatMap(chat => chat.sessions || []), ...registeredBindings.map(binding => binding.session)];
+  return sortThreadListEntries(collapseContinuationEntries([...entryMap.values()], logicalBindings))
     .filter((entry) => !deletedThreadIds.has(String(entry.codexThreadId || "").trim()))
     .slice(0, boundedListLimit());
 }
@@ -1651,7 +1688,7 @@ async function mergedSessionEntries(chatId) {
 async function listChatSessionsSynced(chatId) {
   await syncChatSessionsWithCodex(chatId);
   const chatState = getChatState(chatId);
-  chatState.sessions = dedupeSessions(chatState.sessions.map(normalizeSessionData)).slice(0, sessionListLimit());
+  chatState.sessions = dedupeSessions(chatState.sessions.map(normalizeSessionIdentity)).slice(0, sessionListLimit());
   saveSessions();
   return await mergedSessionEntries(chatId);
 }
@@ -4953,7 +4990,7 @@ async function syncCodexSidebarThread({ event, session, promptFile, outFile, std
   await ensureAppServerThreadVisible(threadId, "exec/completed");
 }
 
-function startAppServerClient({ cwd = CONFIG.workspace, label = "codex-app-server", accountAlias = "", provider = "" } = {}) {
+function startAppServerClient({ cwd = CONFIG.workspace, label = "codex-app-server", accountAlias = "", provider = "", environment = {} } = {}) {
   let previousToken = "";
   const root = openaiAccounts.accountsRoot();
   return new AppServerClient({
@@ -4974,7 +5011,7 @@ function startAppServerClient({ cwd = CONFIG.workspace, label = "codex-app-serve
     formatError: errorText,
     terminateProcessTree,
     accountAlias,
-    environment: accountAlias ? { OPENAI_API_KEY: undefined, CODEX_API_KEY: undefined, CODEX_ACCESS_TOKEN: undefined } : {},
+    environment: { ...environment, ...(accountAlias ? { OPENAI_API_KEY: undefined, CODEX_API_KEY: undefined, CODEX_ACCESS_TOKEN: undefined } : {}) },
     refreshAccountTokens: accountAlias ? async (params) => {
       const identity = openaiAccounts.readAccountAuth(root, accountAlias).identity;
       if (params.previousAccountId && params.previousAccountId !== identity.accountId) throw new Error("账号身份不匹配");
@@ -4983,6 +5020,70 @@ function startAppServerClient({ cwd = CONFIG.workspace, label = "codex-app-serve
       return tokens;
     } : null,
   }).start();
+}
+
+function runtimeOptionsForSession(session) {
+  const settings = effectiveSessionSettings(session);
+  const provider = findCodexProvider(settings.provider);
+  if (!provider) throw new Error('model provider ' + settings.provider + ' not configured');
+  const credential = provider.envKey ? process.env[provider.envKey] || '' : '';
+  if (provider.envKey && !credential) throw new Error('Provider 凭据环境变量不可用：' + provider.envKey);
+  const accountIdentity = settings.accountAlias ? openaiAccounts.readAccountAuth(openaiAccounts.accountsRoot(), settings.accountAlias).identity.key : '';
+  const hash = value => crypto.createHash('sha256').update(value).digest('hex');
+  const credentialIdentity = hash(credential + '\0' + accountIdentity);
+  return { cwd: CONFIG.workspace, codexHome: CONFIG.codexHome, provider: settings.provider,
+    accountAlias: settings.accountAlias, settings, credentialIdentity,
+    configIdentity: hash(CONFIG.codexCli.command + '\0' + codexProviderConfig.readCodexConfigText()),
+    verificationIdentity: hash(JSON.stringify(provider) + '\0' + credentialIdentity + '\0' + settings.accountAlias),
+    environment: provider.envKey ? { [provider.envKey]: credential } : {} };
+}
+
+function assertDefaultValuesUnchanged(expected, alternate) {
+  const current = codexProviderConfig.readTopLevelValues(Object.keys(expected));
+  for (const key of Object.keys(expected)) if (current[key] !== expected[key] && current[key] !== alternate[key]) {
+    throw new Error('默认配置已被其他操作修改，已保留当前设置：' + key);
+  }
+}
+
+async function prepareProviderBinding(session, staged) {
+  const snapshot = runtimeOptionsForSession(staged);
+  let model = snapshot.settings.model;
+  if (!model) {
+    const models = await listCodexModels(staged);
+    const selected = models.find(x => x.isDefault) || models[0];
+    model = selected?.model || selected?.id;
+    if (!model) throw new Error('目标渠道没有可用于验证的模型；请明确选择模型');
+  }
+  const current = effectiveSessionSettings(session);
+  const targetChanged = current.provider !== snapshot.provider || current.accountAlias !== snapshot.accountAlias
+    || Boolean(session.codexThreadId && session.codexThreadProvider !== snapshot.provider);
+  const previousFailure = ['auth', 'quota', 'model_provider_mismatch', 'configuration'].includes(session.lastFailure?.kind);
+  if (targetChanged || previousFailure || !verifiedModels.has(snapshot.verificationIdentity, model)) await testCurrentProviderModel(staged, model);
+  if (runtimeOptionsForSession(staged).configIdentity !== snapshot.configIdentity) throw new Error('Provider 配置在准备期间发生变化，原会话保持不变');
+  const client = startAppServerClient(snapshot);
+  try {
+    await initializeAppServerClient(client);
+    return await prepareThreadContinuation({ client, session,
+      params: { ...appServerStartParams(staged), model }, save: saveSessions,
+      isBusy: sourceThreadIsBusy,
+      targetKey: snapshot.verificationIdentity + ':' + model });
+  } finally { await client.stop(); }
+}
+
+function sourceThreadIsBusy(threadId) {
+  if ([...activeCodexJobs.values()].some(job => job.threadId === threadId)) return true;
+  const registry = registeredCodexHomeRegistry();
+  for (const binding of loadRegisteredBridgeBindings(stateDirsForCodexHome(registry, CONFIG.codexHome))) {
+    if (binding.threadId !== threadId || sameResolvedPath(binding.stateDir, CONFIG.stateDir)) continue;
+    const runs = readJsonFile(path.join(binding.stateDir, 'active-runs.json'))?.runs || {};
+    if (Object.values(runs).some(run => run && run.sessionId === binding.session.id)) return true;
+  }
+  return false;
+}
+
+function normalizeSessionIdentity(session) {
+  const normalized = normalizeSessionData(session);
+  return session && typeof session === 'object' ? Object.assign(session, normalized) : normalized;
 }
 
 function resultTextFromState(state) {
@@ -5084,7 +5185,7 @@ function createRunWatchdog(label, onTimeout, {
 }
 
 async function compactAppServerThread(session) {
-  const client = startAppServerClient({ cwd: CONFIG.workspace, accountAlias: effectiveSessionSettings(session).accountAlias });
+  const client = startAppServerClient(runtimeOptionsForSession(session));
   const startedAt = Date.now();
   const watchdog = createRunWatchdog("codex app-server compaction", () => {
     void client.stop();
@@ -5101,7 +5202,7 @@ async function compactAppServerThread(session) {
 
     await initializeAppServerClient(client);
     watchdog.touch();
-    const resumed = await client.request("thread/resume", appServerResumeParams(session), 60_000);
+    const resumed = { thread: { id: await startOrResumeAppServerThread(client, session) } };
     watchdog.touch();
     const threadId = resumed?.thread?.id || session.codexThreadId;
     if (threadId && threadId !== session.codexThreadId) {
@@ -5148,12 +5249,10 @@ async function withAppServerThread(session, { createIfMissing = true, timeoutMs 
     throw new Error("当前会话还没有创建 Codex 原生 thread。");
   }
 
-  const client = startAppServerClient({ cwd: CONFIG.workspace, accountAlias: effectiveSessionSettings(session).accountAlias });
+  const client = startAppServerClient(runtimeOptionsForSession(session));
   try {
     await initializeAppServerClient(client);
-    const threadId = createIfMissing
-      ? await startOrResumeAppServerThread(client, session)
-      : (await client.request("thread/resume", appServerResumeParams(session), timeoutMs))?.thread?.id || session.codexThreadId;
+    const threadId = await startOrResumeAppServerThread(client, session);
     if (threadId && threadId !== session.codexThreadId) {
       session.codexThreadId = threadId;
       session.updatedAt = Date.now();
@@ -5660,7 +5759,7 @@ function isActiveTurnRaceError(error) {
 async function runGoalLoop(run, goalPatch) {
   const { chatId, messageId, session, state } = run;
   const startedAt = Date.now();
-  const client = startAppServerClient({ cwd: CONFIG.workspace, accountAlias: effectiveSessionSettings(session).accountAlias });
+  const client = startAppServerClient(runtimeOptionsForSession(session));
   run.client = client;
   const activeJob = {
     pid: client.child.pid,
@@ -5840,7 +5939,7 @@ async function runGoalLoop(run, goalPatch) {
 
 async function withConfigClient(fn, session = null) {
   const settings = effectiveSessionSettings(session);
-  const client = startAppServerClient({ cwd: CONFIG.workspace, accountAlias: settings.accountAlias, provider: settings.provider });
+  const client = startAppServerClient(runtimeOptionsForSession(session));
   try {
     await initializeAppServerClient(client);
     return await fn(client);
@@ -5955,129 +6054,44 @@ function normalizeProviderModels(body) {
 
 async function testCurrentProviderModel(session, modelId) {
   const model = cleanOverride(modelId);
-  if (!model) throw new Error("缺少模型 ID。用法：/model test <模型ID>");
-  const settings = effectiveSessionSettings(session);
-  const provider = findCodexProvider(settings.provider);
-  if (!provider) {
-    throw new Error(`当前 provider 未在 config.toml 中找到：${settings.provider || "默认"}`);
-  }
-  const url = providerResponsesUrl(provider);
-  if (!url) {
-    throw new Error(`provider ${provider.id} 未配置 base_url，无法测试 /responses。`);
-  }
-  if (provider.envKey && !process.env[provider.envKey]) {
-    throw new Error(`当前 Bridge 进程看不到环境变量 ${provider.envKey}；设置后需要重启对应 Bridge。`);
-  }
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), PROVIDER_MODEL_TEST_TIMEOUT_MS);
+  if (!model) throw new Error('缺少模型 ID。用法：/model test <模型ID>');
+  const snapshot = runtimeOptionsForSession(session);
+  const provider = findCodexProvider(snapshot.provider);
+  const cwd = path.join(CONFIG.stateDir, 'model-verification');
+  fs.mkdirSync(cwd, { recursive: true });
+  const client = startAppServerClient({ ...snapshot, cwd });
   const startedAt = Date.now();
   try {
-    const headers = {
-      Accept: "application/json",
-      "Content-Type": "application/json",
-    };
-    if (provider.envKey) headers.Authorization = `Bearer ${process.env[provider.envKey]}`;
-    const response = await fetch(url, {
-      method: "POST",
-      headers,
-      signal: controller.signal,
-      body: JSON.stringify({
-        model,
-        input: "Reply with OK.",
-        max_output_tokens: 8,
-      }),
-    });
-    const bodyText = await response.text();
-    let body = null;
-    if (bodyText.trim()) {
-      try {
-        body = JSON.parse(bodyText);
-      } catch {
-        body = null;
-      }
-    }
-    if (!response.ok) {
-      const message = body?.error?.message || body?.message || bodyText.slice(0, 500) || response.statusText;
-      throw new Error(`HTTP ${response.status} ${message}`);
-    }
-    return {
-      provider,
-      settings,
-      model,
-      url,
-      elapsedMs: Date.now() - startedAt,
-      responseId: String(body?.id || "").trim(),
-    };
-  } catch (error) {
-    if (error?.name === "AbortError") {
-      throw new Error(`provider ${provider.id} /responses 测试超时（${Math.round(PROVIDER_MODEL_TEST_TIMEOUT_MS / 1000)} 秒）。`);
-    }
-    throw error;
-  } finally {
-    clearTimeout(timeout);
-  }
+    await initializeAppServerClient(client);
+    const result = await probeAppServerModel(client, { provider: snapshot.provider, model, cwd, timeoutMs: PROVIDER_MODEL_TEST_TIMEOUT_MS });
+    verifiedModels.record(snapshot.verificationIdentity, result);
+    return { provider, settings: snapshot.settings, model, url: providerResponsesUrl(provider) || 'Codex app-server',
+      elapsedMs: Date.now() - startedAt, responseId: '', source: 'native-probe', verifiedAt: result.verifiedAt };
+  } finally { await client.stop(); }
 }
 
 async function assertCurrentProviderModelAvailable(session, modelId) {
   const model = cleanOverride(modelId);
-  if (!model || model.toLowerCase() === "default") return;
+  if (!model || model.toLowerCase() === 'default') return;
   const result = await listCurrentProviderModels(session);
-  if (result.source !== "provider" || !result.models.length) return;
-  if (!result.models.some((item) => item.id === model)) {
-    throw new Error(`模型 ${model} 不在 provider ${result.provider.id} 当前实时 /models 列表中；请先执行 /model list 查看可用模型。`);
-  }
+  if (result.source !== 'provider' || result.models.some(item => item.id === model)) return;
+  const snapshot = runtimeOptionsForSession(session);
+  if (!verifiedModels.has(snapshot.verificationIdentity, model)) await testCurrentProviderModel(session, model);
 }
 
 async function startOrResumeAppServerThread(client, session, options = {}) {
   if (session.codexThreadId) {
-    const previousThreadId = session.codexThreadId;
-    const resumeInfo = await loadCodexThreadResumeInfo(previousThreadId);
-    if (!resumeInfo.resumeable) {
-      markSessionResumeFailure(session, resumeInfo);
-      log("WARN", "app-server thread binding is not resumable; preserving session binding", {
-        sessionId: session.id,
-        threadId: previousThreadId,
-        reason: resumeInfo.reason,
-        hasDb: resumeInfo.hasDb,
-        hasRollout: resumeInfo.hasRollout,
-        rolloutPath: resumeInfo.rolloutPath || "",
-      });
-      throw errorFromFailure(missingRolloutFailureForThread(previousThreadId, resumeInfo.reason || ""));
+    const info = await loadCodexThreadResumeInfo(session.codexThreadId);
+    if (!info.resumeable) {
+      markSessionResumeFailure(session, info);
+      throw errorFromFailure(missingRolloutFailureForThread(session.codexThreadId, info.reason || ''));
     }
   }
-
-  if (session.codexThreadId) {
-    const previousThreadId = session.codexThreadId;
-    try {
-      const resumed = await client.request("thread/resume", appServerResumeParams(session, options), 60_000);
-      return resumed.thread.id;
-    } catch (error) {
-      const failure = classifyCodexFailure(error);
-      if (failure.kind === "cloud_config") {
-        log("WARN", "app-server thread resume failed; keeping existing thread binding", {
-          sessionId: session.id,
-          threadId: previousThreadId,
-          kind: failure.kind,
-          error: String(error.message || error).slice(0, 1000),
-        });
-        throw errorFromFailure(failure);
-      }
-      log("WARN", "app-server thread resume failed; trying new thread without clearing old binding", {
-        sessionId: session.id,
-        threadId: previousThreadId,
-        kind: failure.kind,
-        error: String(error.message || error).slice(0, 1000),
-      });
-    }
-  }
-
-  const params = appServerStartParams(session, options);
-  const started = await client.request("thread/start", params, 60_000);
-  session.codexThreadId = started.thread.id;
-  session.updatedAt = Date.now();
-  saveSessions();
-  return started.thread.id;
+  const binding = await prepareThreadContinuation({ client, session,
+    params: appServerStartParams(session, options), save: saveSessions,
+    isBusy: sourceThreadIsBusy,
+    targetKey: (options.settings || effectiveSessionSettings(session)).provider });
+  return commitThreadBinding(session, binding, saveSessions);
 }
 
 async function runCodexAppServer(event, session, state = null, onState = null, options = {}) {
@@ -6088,7 +6102,9 @@ async function runCodexAppServer(event, session, state = null, onState = null, o
   const userContent = userTextFromContent(event.content);
   const liveState = state || createRunState(session, event, userContent);
   const poolWaitStartedAt = Date.now();
-  const lease = await appServerPool.acquire({ cwd: CONFIG.workspace, accountAlias: effectiveSessionSettings(session).accountAlias });
+  const snapshot = runtimeOptionsForSession(session);
+  options = { ...options, settings: snapshot.settings };
+  const lease = await appServerPool.acquire(snapshot);
   const poolWaitMs = Date.now() - poolWaitStartedAt;
   const client = lease.client;
   const activeJob = {
@@ -6167,7 +6183,15 @@ async function runCodexAppServer(event, session, state = null, onState = null, o
     if (stoppedJobs.has(messageId) || stoppedJobs.has(activeJob.rootMessageId)) {
       throw new Error("codex job stopped by user");
     }
-    const turn = await client.request("turn/start", appServerTurnParams(threadId, event, userContent, session, options), 60_000);
+    const carried = nativeInputContext(session, messageId);
+    const inputEvent = { ...event, attachments: [...carried.attachments, ...(event.attachments || [])] };
+    const turnParams = appServerTurnParams(threadId, inputEvent, carried.text + userContent, session, options);
+    markNativeInputSubmitting(session, messageId);
+    saveSessions();
+    activeJob.turnRequestSubmitted = true;
+    const turn = await client.request("turn/start", turnParams, 60_000);
+    acknowledgeNativeInput(session, messageId, carried.messageIds);
+    saveSessions();
     const turnStartedAt = Date.now();
     watchdog.touch();
     markModelEvent(liveState, "model_thinking");
@@ -6284,6 +6308,12 @@ async function runCodexAppServer(event, session, state = null, onState = null, o
     };
   } catch (error) {
     discardClient = true;
+    error.nativeTurnSubmitted = Boolean(activeJob.turnRequestSubmitted);
+    if (!activeJob.turnId && typeof error.code === 'number' && error.method === 'turn/start') {
+      const pending = session.pendingNativeInputs?.find(input => input.messageId === messageId);
+      if (pending) pending.state = 'received';
+      saveSessions();
+    }
     if (stoppedJobs.has(messageId) || stoppedJobs.has(activeJob.rootMessageId)) {
       markRunInterrupted(liveState);
     } else {
@@ -6294,7 +6324,7 @@ async function runCodexAppServer(event, session, state = null, onState = null, o
         liveState.failure = failure;
         liveState.errorMsg = failureDetailText(failure).slice(0, 1500);
         updateSessionFailure(liveState.session, failure);
-      } else if (shouldRetryWithoutServiceTier(failure, serviceTierPlan, options)) {
+      } else if (shouldRetryWithoutServiceTier(failure, serviceTierPlan, { ...options, hasExecutedTools: liveState.blocks.some(block => block.kind === "tool") })) {
         const fallbackFailure = serviceTierFallbackFailure(failure, serviceTierPlan);
         markRunRecovering(liveState, fallbackFailure, 1);
         if (state) await flushState();
@@ -6379,13 +6409,16 @@ function appServerNotificationMatchesRun(message, threadId, turnId) {
 
 async function runCodex(event, session, state = null, onState = null) {
   if (CONFIG.engine === 'claude') return claudeBridge.run(event, session, state, onState);
+  await providerSwitcher.recover(session);
+  receiveNativeInput(session, event.message_id || event.id, userTextFromContent(event.content), event.attachments || []);
+  saveSessions();
   const selectedAccount = effectiveSessionSettings(session).accountAlias;
   if (selectedAccount || CONFIG.runMode === "app-server" || CONFIG.runMode === "auto") {
     try {
       return await runCodexAppServer(event, session, state, onState);
     } catch (error) {
       const failure = classifyCodexFailure(error);
-      const canFallback = !selectedAccount && CONFIG.runMode === "auto";
+      const canFallback = !selectedAccount && CONFIG.runMode === "auto" && !session.codexThreadId && !error.nativeTurnSubmitted && failure.kind === "app_server";
       if (!canFallback) throw error;
       if (["auth", "quota", "rate_limit", "user_stop"].includes(failure.kind)) throw error;
       log("WARN", "app-server mode failed; falling back to codex exec", {
@@ -6660,6 +6693,10 @@ function handleRecallEvent(rawEvent) {
 }
 
 function isOutOfBandCommand(command) {
+  if (CONFIG.engine !== 'claude' && ['/provider', '/model'].includes(command?.name)
+      && !/^(?:$|status\b|view\b|list\b|refresh\b|capabilit)/i.test(String(command.rest || '').trim())) {
+    return eventDispatcher.activeJobs > 0;
+  }
   return Boolean(command?.name);
 }
 
@@ -7768,98 +7805,52 @@ function commandArgs(rest) {
 }
 
 async function handleProviderCommand(chatId, rest, messageId) {
-  await openaiAccounts.discoverAccount(openaiAccounts.accountsRoot(), CONFIG.codexHome);
-  await syncChatSessionsWithCodex(chatId);
-  const session = getSession(chatId);
   const args = commandArgs(rest);
-  const action = String(args[0] || "").toLowerCase();
-
-  if (!args.length || action === "status" || action === "view" || action === "check") {
-    await sendMarkdown(chatId, providerStatusMarkdown(session), "provider-status", messageId);
-    return;
-  }
-
-  if (action === "list") {
-    const scope = String(args[1] || "").toLowerCase();
-    if (["shortcut", "shortcuts", "bundle", "bundles"].includes(scope)) {
-      await sendMarkdown(chatId, providerShortcutListMarkdown(session), "provider-shortcuts", messageId);
-    } else {
-      await sendMarkdown(chatId, providerListMarkdown(session), "provider-list", messageId);
+  const action = String(args[0] || '').toLowerCase();
+  if (!args.length || ['status', 'view', 'check', 'list', 'shortcut', 'shortcuts', 'bundle', 'bundles'].includes(action)) {
+    const session = getSession(chatId);
+    if (action === 'list') {
+      const shortcuts = ['shortcut', 'shortcuts', 'bundle', 'bundles'].includes(String(args[1] || '').toLowerCase());
+      await sendMarkdown(chatId, shortcuts ? providerShortcutListMarkdown(session) : providerListMarkdown(session), shortcuts ? 'provider-shortcuts' : 'provider-list', messageId);
     }
+    else if (['shortcut', 'shortcuts', 'bundle', 'bundles'].includes(action)) await sendMarkdown(chatId, providerShortcutListMarkdown(session), 'provider-shortcuts', messageId);
+    else await sendMarkdown(chatId, providerStatusMarkdown(session), 'provider-status', messageId);
     return;
   }
-
-  if (["shortcut", "shortcuts", "bundle", "bundles"].includes(action)) {
-    await sendMarkdown(chatId, providerShortcutListMarkdown(session), "provider-shortcuts", messageId);
-    return;
+  if (activeCodexJobs.has(chatId) || eventDispatcher.isChatActive(chatId, messageId)) {
+    await sendText(chatId, '当前会话有任务正在执行，请在任务结束后切换账号或 Provider。', 'provider-busy', messageId); return;
   }
-
-  if (["clear", "default", "reset"].includes(action)) {
-    if (activeCodexJobs.has(chatId)) { await sendText(chatId, "当前会话有任务正在执行，请在任务结束后切换账号或 Provider。", "provider-busy", messageId); return; }
-    setSessionOverride(session, "providerOverride", "");
-    setSessionOverride(session, "openaiAccountOverride", "");
-    clearProviderBundleOverride(session);
-    saveSessions();
-    await sendMarkdown(chatId, providerStatusMarkdown(session, "已清除当前会话的 provider 覆盖，后续使用 Codex 配置默认 provider。"), "provider-clear", messageId);
-    return;
-  }
-
-  const persist = action === "save";
-  const providerId = persist ? args[1] : args[0];
-  if (activeCodexJobs.has(chatId)) { await sendText(chatId, "当前会话有任务正在执行，请在任务结束后切换账号或 Provider。", "provider-busy", messageId); return; }
-  const accountRoot = openaiAccounts.accountsRoot();
-  const savedAccount = openaiAccounts.listAccounts(accountRoot).find((account) => account.alias === providerId);
-  if (savedAccount) {
-    try {
-      openaiAccounts.readAccountAuth(accountRoot, savedAccount.alias);
-      if (persist) {
-        const previous = openaiAccounts.defaultAccount(CONFIG.codexHome);
-        openaiAccounts.setDefaultAccount(CONFIG.codexHome, savedAccount.alias);
-        try { await writeCodexConfigValue("model_provider", "openai"); }
-        catch (error) { openaiAccounts.setDefaultAccount(CONFIG.codexHome, previous); throw error; }
-      }
-      clearProviderBundleOverride(session);
-      session.providerOverride = "openai";
-      setSessionOverride(session, "openaiAccountOverride", savedAccount.alias);
-      await sendMarkdown(chatId, providerStatusMarkdown(session, `已切换${persist ? "并保存为该 Home 默认账号" : "当前飞书会话"}：\`${savedAccount.alias}\``), "provider-set", messageId);
-    } catch (error) { await sendMarkdown(chatId, runtimeCommandErrorMarkdown("账号切换失败", error), "provider-error", messageId); }
-    return;
-  }
-  const bundle = findProviderBundle(providerId);
-  const provider = bundle ? findCodexProvider(bundle.provider) : findCodexProvider(providerId);
-  if (!provider) {
-    await sendMarkdown(chatId, providerListMarkdown(session, `没有找到 provider：\`${providerId || ""}\``), "provider-miss", messageId);
-    return;
-  }
-
+  await openaiAccounts.discoverAccount(openaiAccounts.accountsRoot(), CONFIG.codexHome);
+  await syncChatSessionsWithCodex(chatId, { ensureRunnableCurrent: false });
+  const session = getSession(chatId);
+  const target = { ...session };
+  const persist = action === 'save';
+  const id = normalizeProviderTarget(persist ? args.slice(1).join(' ') : args.join(' '));
+  let defaults = null;
   try {
-    if (bundle) {
-      if (persist) {
-        await writeCodexConfigValue("model_provider", bundle.provider);
-        await writeCodexConfigValue("model", bundle.model);
-        if (bundle.reasoning) await writeCodexConfigValue("model_reasoning_effort", bundle.reasoning);
-      }
-      applyProviderBundleOverride(session, bundle);
+    if (['clear', 'default', 'reset'].includes(action)) {
+      target.providerOverride = ''; target.openaiAccountOverride = '';
+      clearProviderBundleOverride(target);
     } else {
-      if (persist) await writeCodexConfigValue("model_provider", provider.id);
-      clearProviderBundleOverride(session);
-      setSessionOverride(session, "providerOverride", provider.id);
+      const savedAccount = openaiAccounts.listAccounts(openaiAccounts.accountsRoot()).find(account => account.alias === id);
+      const bundle = savedAccount ? null : findProviderBundle(id);
+      const provider = savedAccount ? { id: 'openai' } : findCodexProvider(bundle?.provider || id);
+      if (!provider) { await sendMarkdown(chatId, providerListMarkdown(session, '没有找到 provider：' + id), 'provider-miss', messageId); return; }
+      if (savedAccount) openaiAccounts.readAccountAuth(openaiAccounts.accountsRoot(), savedAccount.alias);
+      clearProviderBundleOverride(target);
+      target.providerOverride = provider.id;
+      target.openaiAccountOverride = savedAccount?.alias || '';
+      if (bundle) {
+        target.providerBundleOverride = bundle.id; target.modelOverride = bundle.model;
+        if (bundle.reasoning) target.reasoningOverride = bundle.reasoning;
+      }
+      if (persist) defaults = { values: { model_provider: provider.id,
+        ...(bundle ? { model: bundle.model, ...(bundle.reasoning ? { model_reasoning_effort: bundle.reasoning } : {}) } : {}) }, account: savedAccount?.alias || '' };
     }
-    if (persist && provider.id === "openai") openaiAccounts.setDefaultAccount(CONFIG.codexHome, "");
-    setSessionOverride(session, "openaiAccountOverride", "");
-    await sendMarkdown(
-      chatId,
-      providerStatusMarkdown(
-        session,
-        persist
-          ? `已切换并写入用户级 config.toml：\`${bundle?.id || provider.id}\`。`
-          : `已切换当前飞书会话 provider：\`${bundle?.id || provider.id}\`。`,
-      ),
-      "provider-set",
-      messageId,
-    );
+    await providerSwitcher.switch(session, target, defaults);
+    await sendMarkdown(chatId, providerStatusMarkdown(session, persist ? '已接续当前会话，并保存默认设置。' : '已接续当前会话，历史与工作区保留。'), 'provider-set', messageId);
   } catch (error) {
-    await sendMarkdown(chatId, runtimeCommandErrorMarkdown("provider 操作失败", error), "provider-error", messageId);
+    await sendMarkdown(chatId, runtimeCommandErrorMarkdown('Provider 切换未完成，原绑定保留', error), 'provider-error', messageId);
   }
 }
 
@@ -7871,6 +7862,8 @@ function providerStatusMarkdown(session, title = "Codex provider") {
     `**${title}**`,
     "",
     `当前会话：\`${session.title || "未命名会话"}\` (${session.id})`,
+    session.providerSwitchTransaction ? '切换准备中；当前显示的仍是已生效设置。' : '',
+    session.codexThreadTransition?.phase === 'uncertain' ? '此前接续结果尚待核实，原会话绑定保留。' : '',
     `当前 provider：\`${settings.accountAlias || settings.provider || "默认"}\`${session.providerOverride ? "（会话覆盖）" : "（配置默认）"}`,
     bundle ? `当前组合：\`${bundle.id}\`；${providerBundleLabel(bundle)}` : "",
     provider ? providerDetailLine(provider) : "provider 未在当前 config.toml 中找到；如果它来自 profile 或外部配置，请确认 Bridge 启动参数也选择了对应配置。",
@@ -7971,7 +7964,7 @@ async function handleModelCommand(chatId, rest, messageId) {
     try {
       await sendMarkdown(chatId, modelTestMarkdown(await testCurrentProviderModel(session, model)), "model-test", messageId);
     } catch (error) {
-      await sendMarkdown(chatId, runtimeCommandErrorMarkdown("provider /responses 测试失败", error), "model-test-error", messageId);
+      await sendMarkdown(chatId, runtimeCommandErrorMarkdown("Provider 原生模型验证失败", error), "model-test-error", messageId);
     }
     return;
   }
@@ -8164,7 +8157,14 @@ async function modelListMarkdown(session) {
   }
   lines.push("");
   if (result.source === "provider") {
-    lines.push("`/model list` 和 `/model refresh` 都会实时查询当前 provider 的 `/models`；模型切换和保存会再次核对这份实时列表。");
+    const listed = new Set(models.map(model => model.id || model.model));
+    const extra = verifiedModels.list(runtimeOptionsForSession(session).verificationIdentity).filter(model => !listed.has(model.model));
+    if (extra.length) {
+      lines.push('**目录外实测通过（当前渠道与凭据）**');
+      for (const model of extra) lines.push('- \x60' + model.model + '\x60' + (model.model === settings.model ? ' ← 当前' : '') + '；验证时间：' + new Date(model.verifiedAt).toISOString());
+      lines.push('');
+    }
+    lines.push('上方目录实时查询当前渠道 /models；额外验证结果单独显示。明确输入目录外模型时，会先通过当前渠道完成一次轻量验证再允许选择。');
   } else if (result.source === "openai-account") {
     lines.push("`/model list` 和 `/model refresh` 每次都实时查询当前官方账号；不合并本地旧目录，隐藏的内部模型不展示。目录可见不保证每次请求都有可用额度。");
   }

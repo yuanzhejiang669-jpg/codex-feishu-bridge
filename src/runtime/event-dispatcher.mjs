@@ -68,7 +68,8 @@ export function createEventDispatcher({
   function drain() {
     if (isShuttingDown()) return;
     while (activeJobs < concurrency && queue.length) {
-      const entry = queue.dequeue();
+      const entry = queue.dequeue(candidate => ![...inFlight].some(state => chatIdOf(state.event) === chatIdOf(candidate.event)));
+      if (!entry) break;
       const state = {
         event: entry.event,
         wasQueued: entry.wasQueued,
@@ -135,6 +136,7 @@ export function createEventDispatcher({
     cancelForChat,
     countForChat: (chatId) => queue.countForChat(chatId),
     summary: (chatId) => queue.summary(chatId),
+    isChatActive: (chatId, exceptMessageId = '') => [...inFlight].some(state => chatIdOf(state.event) === chatId && messageIdOf(state.event) !== exceptMessageId),
     get activeJobs() {
       return activeJobs;
     },

@@ -16,12 +16,17 @@ export function createAppServerPool({
   const entries = new Set();
   const waiters = [];
   let closed = false;
+  const identityFor = (options = {}) => JSON.stringify([
+    options.codexHome || "", options.cwd || "", options.provider || "",
+    options.accountAlias || "", options.configIdentity || "", options.credentialIdentity || "",
+  ]);
 
   function createEntry(options = {}) {
     const client = createClient(options);
     const entry = {
       client,
       accountAlias: options.accountAlias || "",
+      identity: identityFor(options),
       busy: false,
       initialized: false,
       initializationResult: null,
@@ -58,7 +63,7 @@ export function createAppServerPool({
 
   function reusableEntry(options = {}) {
     for (const entry of entries) {
-      if (!entry.busy && !entry.client?.closed && entry.accountAlias === (options.accountAlias || "")) return entry;
+      if (!entry.busy && !entry.client?.closed && entry.identity === identityFor(options)) return entry;
     }
     return null;
   }
@@ -175,8 +180,8 @@ export function createAppServerPool({
   function retireMismatchedIdle(options) {
     if (entries.size < capacity) return;
     for (const entry of entries) {
-      if (!entry.busy && entry.accountAlias !== (options.accountAlias || "")) {
-        void stopEntry(entry, "account-changed");
+      if (!entry.busy && entry.identity !== identityFor(options)) {
+        void stopEntry(entry, "configuration-identity-changed");
         return;
       }
     }

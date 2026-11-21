@@ -11,8 +11,9 @@ export function createEventQueue({ chatIdOf, messageIdOf } = {}) {
     enqueue(event) {
       events.push(event);
     },
-    dequeue() {
-      return events.shift();
+    dequeue(predicate = () => true) {
+      const index = events.findIndex(predicate);
+      return index < 0 ? undefined : events.splice(index, 1)[0];
     },
     removeByMessageId(messageId) {
       const target = String(messageId || "").trim();

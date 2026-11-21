@@ -1854,9 +1854,11 @@ elements.providerReplaceForm.addEventListener("submit", (event) => {
     const result = await window.bridgeDesktop.replaceGlobalProviderKey(replacementProviderInput());
     elements.providerReplaceForm.elements.apiKey.value = "";
     showProviderResult(
-      "API Key 已替换",
+      "API Key 已保存",
       result.requiresBotRestart
-        ? "新 Key 已直接写入安全凭据存储；请重启使用该 Responses Provider 的 Bot。"
+        ? result.reloadError || (result.queuedManagedBots?.length
+          ? `新 Key 已保存；${result.queuedManagedBots.length} 个客户端 Bot 已安排空闲重载，运行中的任务不会中断。`
+          : "新 Key 已保存，新启动的 Bot 会使用它；脚本启动的 Bot 需要在空闲时重启。")
         : "新 Key 已直接写入安全凭据存储；该 Chat Provider 的独立代理已完成重载。",
     );
     await refresh();

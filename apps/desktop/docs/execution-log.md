@@ -1913,3 +1913,12 @@ Adversarial review for the three most likely failures after three months:
 - Focused tests cover dynamic capacities, native optional defaults and message catalogs, missing or malformed metadata, redirect refusal, response/body timeout limits, version/header/query forwarding, quoted TOML sections, concurrent edits, configuration precedence, and both creation paths.
 - A real Codex 0.166.0 process with an isolated test Home completed a gocodex-api turn and emitted `modelContextWindow: 475000`. The test configuration contains only the remote catalog URL, without any `model_context_window` or compaction override. Native cached metadata records a 500000-token window and 95 percent effective window.
 - Full validation, publication, remote synchronization, and installed upgrade are recorded in the task's rollout report after completion.
+
+
+## 2026-11-21 ? 0.9.2 Provider repair candidate
+
+- Implemented the three requested user flows, including related error handling, mailto aliases, credential pool isolation and TOML round-trip fixes. Unrelated source changes are preserved in the original checkout; implementation uses an isolated worktree based on origin/main 5542f5a.
+- Initial complete root check passed 195 tests; desktop check passed 250 tests with 3 platform skips. Additional concurrency/rollback regression cases are included in final checks.
+- A real isolated Bridge process plus codex-cli 0.171.0 passed official -> codexes-api -> official native inference, both 6.2 model paths, latest-history recall, repeated-command idempotency, email links, process restart and list/workspace preservation. Only the Feishu transport was replaced locally.
+- Actual Windows add/replace calls with an isolated Home and a unique fake registry variable completed in 2.2 s / 0.64 s; readback matched and cleanup was verified. No real credential was replaced.
+- Publication, platform builds, old-device synchronization, current-device idle installation and post-install verification are recorded in the task rollout report only after observed completion. No active Bot is stopped for this release.

@@ -634,3 +634,12 @@ These risks are addressed with protocol versioning, active-run guards, transacti
 - Treat the content as a reference in the receiving conversation, isolate slash commands and quoted resource keys, and explain unreadable or partial content.
 - Verify parser behavior and the actual message-handler preflight, then run root and packaged Windows desktop checks.
 - Prepare the stable 0.8.24 candidate. Commit, push, publication, cross-device synchronization, and installed-client replacement remain explicit pending rollout steps; preserve active runs.
+
+
+## 2026-11-21 ? 0.9.2 Provider continuity and credentials
+
+- Preserve the logical session while using native thread/fork only across Provider IDs; commit the new binding/settings after readiness and keep a recoverable handoff journal.
+- Retain RPC errors, classify Provider/configuration failures precisely, and prevent blank-thread/service-tier/exec fallback for these failures.
+- Separate Windows registry commit/readback from best-effort notification, round-trip TOML IDs, and schedule credential reload only for idle affected managed Codex Bots.
+- Keep live upstream model lists; validate explicitly requested unlisted IDs through an isolated ephemeral native turn, scoped to the current Provider/account/credential identity.
+- Release/source/device rollout remains subject to live active-run checks. Existing device-only Claude patches require a separately verified preservation layer on the current device.

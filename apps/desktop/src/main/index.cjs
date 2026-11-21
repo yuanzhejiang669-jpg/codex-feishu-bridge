@@ -87,6 +87,7 @@ const { inspectClaudeProviders, listClaudeModels, probeClaudeProvider, saveClaud
 const { assignClaudeProvider } = require('./services/claude-bots.cjs');
 const { inspectClaudeCapabilities, migrateClaudeCapabilities, saveClaudeMcp } = require('./services/claude-capabilities.cjs');
 const { queueClaudeReconfiguration, processClaudeReconfiguration, readPending: readClaudePending } = require('./services/claude-reconfiguration.cjs');
+const { queueCodexCredentialReload, processCodexCredentialReload, readPendingCodexReload } = require('./services/codex-reconfiguration.cjs');
 
 const smokeTest = process.argv.includes("--smoke-test");
 const capturePath = process.env.CFB_DESKTOP_CAPTURE_PATH || "";
@@ -339,6 +340,30 @@ async function applyPendingClaudeConfiguration() {
       stopBot: (name) => stopManagedBot(name, supervisorOptions()),
       startBot: (name) => startManagedBot(name, supervisorOptions()) });
   } finally { claudeReconfigurationRunning = false; if (!isQuitting) recoverySupervisor?.start(); }
+}
+
+let codexReconfigurationRunning = false;
+async function applyPendingCodexConfiguration() {
+  if (codexReconfigurationRunning || claudeReconfigurationRunning || batchRestartInFlight || runtimeInitializing || isQuitting
+      || !Object.keys(readPendingCodexReload(managedDataRoot()).bots).length) return;
+  codexReconfigurationRunning = true;
+  recoverySupervisor?.stop();
+  try {
+    await processCodexCredentialReload({ dataRoot: managedDataRoot(),
+      inspectBots: () => inspectManagedBots(managedDataRoot(), runtimeLocalAppData()),
+      stopBot: name => stopManagedBot(name, supervisorOptions()),
+      startBot: name => startManagedBot(name, supervisorOptions()) });
+  } finally { codexReconfigurationRunning = false; if (!isQuitting) recoverySupervisor?.start(); }
+}
+function queueCodexProviderReload(result) {
+  if (result.managedProxy || result.provider?.managedProxy) return result;
+  try { result.queuedManagedBots = queueCodexCredentialReload(managedDataRoot(), readManagedBots(managedDataRoot()), result.provider.envKey); }
+  catch { result.reloadError = '??????????????????????????? Bot?'; }
+  return result;
+}
+async function applyPendingProviderConfiguration() {
+  await applyPendingClaudeConfiguration();
+  await applyPendingCodexConfiguration();
 }
 
 function modelSourceOptions() {
@@ -909,13 +934,13 @@ if (!singleInstance) {
     ));
     ipcMain.handle("desktop:add-global-provider", async (_event, input) => {
       assertStartupReady();
-      const result = await addGlobalProvider(input, providerManagerOptions());
+      const result = queueCodexProviderReload(await addGlobalProvider(input, providerManagerOptions()));
       await loadState();
       return result;
     });
     ipcMain.handle("desktop:replace-global-provider-key", async (_event, input) => {
       assertStartupReady();
-      const result = await replaceGlobalProviderKey(input, providerManagerOptions());
+      const result = queueCodexProviderReload(await replaceGlobalProviderKey(input, providerManagerOptions()));
       await loadState();
       return result;
     });
@@ -1128,9 +1153,9 @@ if (!singleInstance) {
         startupStatePromise = null;
       }
       if (!startupError) {
-        claudeConfigurationTimer = setInterval(() => { void applyPendingClaudeConfiguration().catch((error) => console.error('Claude configuration update failed:', error.message)); }, 10_000);
+        claudeConfigurationTimer = setInterval(() => { void applyPendingProviderConfiguration().catch((error) => console.error('Provider configuration update failed:', error.message)); }, 10_000);
         claudeConfigurationTimer.unref();
-        void applyPendingClaudeConfiguration().catch((error) => console.error('Claude configuration update failed:', error.message));
+        void applyPendingProviderConfiguration().catch((error) => console.error('Provider configuration update failed:', error.message));
         void refreshProviderCapacities(providerManagerOptions()).then(() => loadState()).catch(() => {});
       }
     }

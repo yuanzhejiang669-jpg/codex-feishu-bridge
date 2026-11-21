@@ -3,6 +3,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { execFile } = require("node:child_process");
 const TOML = require("smol-toml");
+const { writeWindowsUserEnvironment } = require('./windows-environment.cjs');
 const { readManagedBots } = require("./bot-setup.cjs");
 const {
   catalogUrl, checkProviderCapacity, discoverProviderCapacity, inspectProviderCapacity, rememberCapacity,
@@ -88,7 +89,7 @@ function inspectProviderCatalog(codexHome, env = process.env) {
 function providerBlock(provider) {
   const value = (input) => JSON.stringify(String(input));
   return [
-    `[model_providers.${provider.id}]`,
+    `[model_providers.${provider.id.includes('.') ? JSON.stringify(provider.id) : provider.id}]`,
     `name = ${value(provider.name)}`,
     `base_url = ${value(provider.baseUrl)}`,
     `wire_api = ${value(provider.wireApi)}`,
@@ -186,14 +187,7 @@ async function readUserEnvironmentVariable(name) {
 }
 
 async function setUserEnvironmentVariable(name, value) {
-  await runPowerShell("if ($env:CFB_ENV_REMOVE -eq '1') { [Environment]::SetEnvironmentVariable($env:CFB_ENV_NAME, $null, 'User') } else { [Environment]::SetEnvironmentVariable($env:CFB_ENV_NAME, $env:CFB_ENV_VALUE, 'User') }", {
-    ...process.env,
-    CFB_ENV_NAME: name,
-    CFB_ENV_VALUE: value == null ? "" : String(value),
-    CFB_ENV_REMOVE: value == null ? "1" : "0",
-  });
-  if (value == null || value === "") delete process.env[name];
-  else process.env[name] = String(value);
+  await writeWindowsUserEnvironment(name, value);
 }
 
 function secretFrom(raw) {
@@ -279,20 +273,22 @@ async function addGlobalProvider(raw, options) {
   if (provider.wireApi === "chat" && !proxyTransaction) throw new Error("客户端托管协议代理不可用");
   const codexProvider = proxyTransaction?.codexProvider || provider;
   const previous = await readUserEnv(provider.envKey);
-  await setUserEnv(provider.envKey, key);
+  const prefix = text.trimEnd();
+  const nextText = `${prefix ? `${prefix}\n\n` : ""}${providerBlock(codexProvider)}\n`;
+  if (!TOML.parse(nextText).model_providers?.[provider.id]) throw new Error('Provider 配置往返校验失败');
   let configWritten = false;
   try {
-    const prefix = text.trimEnd();
-    writeConfig(configPath, `${prefix ? `${prefix}\n\n` : ""}${providerBlock(codexProvider)}\n`);
+    await setUserEnv(provider.envKey, key);
+    writeConfig(configPath, nextText);
     configWritten = true;
+    if (!readConfig(configPath).config.model_providers?.[provider.id]) throw new Error('Provider 保存后读回校验失败');
     await proxyTransaction?.commit();
   } catch (error) {
-    if (configWritten) {
-      try { writeConfig(configPath, text); } catch {}
-    }
-    await proxyTransaction?.rollback().catch(() => {});
-    await setUserEnv(provider.envKey, previous || null).catch(() => {});
-    throw error;
+    const failures = [];
+    if (configWritten) { try { writeConfig(configPath, text); } catch { failures.push('配置回滚失败'); } }
+    await proxyTransaction?.rollback().catch(() => failures.push('代理回滚失败'));
+    await setUserEnv(provider.envKey, previous || null).catch(() => failures.push('凭据回滚失败'));
+    throw new Error(`Provider 保存失败：${error.message}${failures.length ? `；${failures.join('；')}` : '；已恢复原配置与凭据'}`, { cause: error });
   }
   rememberCapacity(options.codexHome, provider.id, provider.baseUrl, capacity);
   return { provider: publicProvider(provider.id, {
@@ -354,13 +350,14 @@ async function replaceGlobalProviderKey(raw, options) {
   const readUserEnv = options.readUserEnvironmentVariable || readUserEnvironmentVariable;
   const setUserEnv = options.setUserEnvironmentVariable || setUserEnvironmentVariable;
   const previous = await readUserEnv(provider.envKey);
-  await setUserEnv(provider.envKey, key);
   try {
+    await setUserEnv(provider.envKey, key);
     if (provider.managedProxy) await options.restartProtocolProxy?.(provider.id);
   } catch (error) {
-    await setUserEnv(provider.envKey, previous || null).catch(() => {});
-    await options.restartProtocolProxy?.(provider.id).catch(() => {});
-    throw error;
+    const failures = [];
+    await setUserEnv(provider.envKey, previous || null).catch(() => failures.push('凭据回滚失败'));
+    await options.restartProtocolProxy?.(provider.id).catch(() => failures.push('代理恢复失败'));
+    throw new Error(`API Key 替换失败：${error.message}${failures.length ? `；${failures.join('；')}` : '；已恢复原凭据'}`, { cause: error });
   }
   return {
     provider: { ...provider, credentialAvailable: true },
