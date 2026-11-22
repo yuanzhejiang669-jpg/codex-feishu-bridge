@@ -103,7 +103,8 @@ function migrateClaudeCapabilities(selection, options) {
     if (config.mcpServers[name]) { skipped.push({ name, reason: '目标 MCP 已存在，保留现有配置' }); continue; }
     const value = raw.url ? { type: 'http', url: raw.url, headers: { ...(raw.http_headers || {}) } }
       : { command: raw.command, args: raw.args || [], env: { ...(raw.env || {}) } };
-    for (const key of raw.env_vars || []) value.env = { ...value.env, [key]: '${' + key + '}' };
+    for (const key of raw.env_vars || []) value.env = { ...value.env,
+      [key]: '${' + key + (options.toolEngine === 'antigravity' ? ':-}' : '}') };
     if (raw.bearer_token_env_var) value.headers = { ...value.headers, Authorization: 'Bearer ${' + raw.bearer_token_env_var + '}' };
     for (const [header, env] of Object.entries(raw.env_http_headers || {})) value.headers = { ...value.headers, [header]: '${' + env + '}' };
     try { validateMcp({ mcpServers: { [name]: value } }); }

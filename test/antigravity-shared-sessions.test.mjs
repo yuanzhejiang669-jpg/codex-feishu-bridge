@@ -59,6 +59,13 @@ test('ACP MCP conversion resolves environment references and rejects missing cre
   fs.writeFileSync(file, JSON.stringify({ mcpServers: { fixture: { command: 'node', args: ['${SCRIPT}'], env: { TOKEN: '${KEY}' } } } }));
   const converted = nativeMcpServers(config, null, { SCRIPT: 'server.mjs', KEY: 'opaque' });
   assert.deepEqual(converted[0].env, [{ name: 'TOKEN', value: 'opaque' }]);
+  fs.mkdirSync(path.join(config.antigravityHome, 'config'), { recursive: true });
+  const globalFile = path.join(config.antigravityHome, 'config', 'mcp_config.json');
+  fs.writeFileSync(globalFile, '');
+  assert.equal(nativeMcpServers(config, null, { SCRIPT: 'server.mjs', KEY: 'opaque' }).length, 1);
+  fs.writeFileSync(globalFile, '{broken');
+  assert.throws(() => nativeMcpServers(config), SyntaxError);
+  fs.writeFileSync(globalFile, '');
   assert.throws(() => nativeMcpServers(config, null, {}), /SCRIPT/);
   fs.writeFileSync(file, JSON.stringify({ mcpServers: { fixture: { url: 'https://example.invalid', type: 'websocket' } } }));
   assert.throws(() => nativeMcpServers(config), /传输类型/);

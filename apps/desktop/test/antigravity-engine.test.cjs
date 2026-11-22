@@ -8,7 +8,7 @@ const { createManagedBot } = require('../src/main/services/bot-setup.cjs');
 const { previewWorkspaceFactory, createWorkspaceFactoryQueue } = require('../src/main/services/workspace-factory.cjs');
 const { normalizeProvider, readAccounts, atomicJson, prepareNativeProfile } = require('../../../src/antigravity/configuration.cjs');
 const { acquireOfficialLease } = require('../../../src/antigravity/account-lock.cjs');
-const { inspectClaudeCapabilities, saveClaudeMcp } = require('../src/main/services/claude-capabilities.cjs');
+const { inspectClaudeCapabilities, saveClaudeMcp, migrateClaudeCapabilities } = require('../src/main/services/claude-capabilities.cjs');
 const { queueClaudeReconfiguration, readPending } = require('../src/main/services/claude-reconfiguration.cjs');
 const { startManagedBot, stopManagedBot } = require('../src/main/services/supervisor.cjs');
 
@@ -89,6 +89,7 @@ test('factory creates exactly five native-engine entries and registration persis
   const config = JSON.parse(fs.readFileSync(created.configPath));
   assert.equal(config.engine, 'antigravity'); assert.equal(config.provider.id, 'official');
   assert.equal(config.antigravity.permissionMode, 'default'); assert.equal(config.codexHome, '');
+  assert.equal(fs.realpathSync(path.join(config.antigravityHome, 'config', 'skills')), fs.realpathSync(path.join(f.root, 'antigravity-tools', '.agents', 'skills')));
   assert.ok(!JSON.stringify(config).includes('fixture-app-secret'));
 });
 
@@ -102,6 +103,10 @@ test('native toolset and pending restarts stay separate from Claude', (t) => {
   assert.equal(readPending(f.root).bots['antigravity-1'], undefined);
   assert.ok(readPending(f.root, 'antigravity').bots['antigravity-1']);
   assert.throws(() => saveClaudeMcp({ mcpServers: { fixture: { type: 'websocket', url: 'wss://example.invalid' } } }, options), /ACP/);
+  fs.writeFileSync(path.join(f.options.sourceCodexHome, 'config.toml'), '[mcp_servers.optional]\ncommand="node"\nenv_vars=["HOST_OPTIONAL"]\n');
+  migrateClaudeCapabilities({ mcp: ['optional'] }, options);
+  const migrated = JSON.parse(fs.readFileSync(saved.configPath));
+  assert.equal(migrated.mcpServers.optional.env.HOST_OPTIONAL, '${HOST_OPTIONAL:-}');
 });
 
 test('native Bot start and graceful stop work without PowerShell launch scripts', async (t) => {

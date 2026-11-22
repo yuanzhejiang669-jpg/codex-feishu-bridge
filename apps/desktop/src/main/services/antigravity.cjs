@@ -103,6 +103,16 @@ function antigravityProviderReference(raw, options) {
     reasoning: raw.reasoning || raw.provider?.reasoning || provider.effort || '', accountId: provider.accountId || '' };
 }
 
+function ensureAntigravitySkills(options) {
+  const source = path.join(options.dataRoot, 'antigravity-tools', '.agents', 'skills');
+  const target = path.join(options.dataRoot, 'antigravity-home', 'config', 'skills');
+  fs.mkdirSync(source, { recursive: true }); fs.mkdirSync(path.dirname(target), { recursive: true });
+  try { fs.lstatSync(target); return { source, target, created: false }; }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
+  fs.symlinkSync(source, target, process.platform === 'win32' ? 'junction' : 'dir');
+  return { source, target, created: true };
+}
+
 async function createAntigravityBot(raw, credentials, options, helpers) {
   const preview = previewAntigravityBot(raw, options, helpers.readManagedBots(options.dataRoot).map((item) => item.name));
   if (!preview.available) throw new Error(preview.conflict);
@@ -116,6 +126,7 @@ async function createAntigravityBot(raw, credentials, options, helpers) {
   let profileAdded = false;
   try {
     fs.mkdirSync(preview.bot.workspace, { recursive: true }); fs.mkdirSync(preview.bot.antigravityHome, { recursive: true });
+    ensureAntigravitySkills(options);
     await (options.runLarkCli || helpers.runLarkCli)(options.larkCliPath,
       ['profile', 'add', '--name', preview.bot.profile, '--app-id', credentials.appId, '--brand', preview.bot.brand, '--app-secret-stdin'],
       { input: credentials.appSecret, profileHome: path.join(options.dataRoot, 'profile-home') });
@@ -238,4 +249,4 @@ function assignAntigravityProvider(raw, options, bots) {
 
 module.exports = { inspectAntigravityRuntime, inspectAntigravity, listAntigravityModels, probeAntigravityProvider, saveAntigravityProvider,
   previewAntigravityBot, createAntigravityBot, previewAntigravityFactory, antigravityProviderReference,
-  captureAntigravityAccount, switchAntigravityAccount, inspectAntigravityClients, openAntigravityLogin, assignAntigravityProvider };
+  captureAntigravityAccount, switchAntigravityAccount, inspectAntigravityClients, openAntigravityLogin, assignAntigravityProvider, ensureAntigravitySkills };

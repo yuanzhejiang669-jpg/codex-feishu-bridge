@@ -13,7 +13,10 @@ export function nativeMcpServers(config, event, environment = process.env) {
   const definitions = {};
   for (const file of [config.antigravityMcpConfig, path.join(config.antigravityHome, 'config', 'mcp_config.json'), path.join(config.workspace, '.mcp.json')]) {
     if (!file || !fs.existsSync(file)) continue;
-    Object.assign(definitions, readJson(file, {}).mcpServers || {});
+    // The native CLI creates an empty global MCP file on first startup.
+    // Empty means no global servers; malformed non-empty JSON still fails.
+    const text = fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '').trim();
+    if (text) Object.assign(definitions, JSON.parse(text).mcpServers || {});
   }
   if (config.larkCli && event) Object.assign(definitions, JSON.parse(feishuMcpConfiguration(config, event)).mcpServers);
   const expand = (value) => String(value).replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}/g, (_, key, fallback) => {
