@@ -15,6 +15,11 @@ function collectKnownPaths(state) {
   add(state?.bridge?.root);
   add(state?.codex?.runtimePath);
   add(state?.claude?.runtimePath);
+  add(state?.antigravity?.runtimePath);
+  add(state?.antigravityConfiguration?.home);
+  add(state?.antigravityCapabilities?.root);
+  add(state?.antigravityCapabilities?.configPath);
+  add(state?.antigravityCapabilities?.skillsRoot);
   add(state?.claudeCapabilities?.root);
   add(state?.claudeCapabilities?.configPath);
   add(state?.claudeCapabilities?.skillsRoot);
@@ -38,6 +43,7 @@ function collectKnownPaths(state) {
     add(bot.workspace);
     add(bot.codexHome);
     add(bot.claudeHome);
+    add(bot.antigravityHome);
     add(bot.configPath);
     add(bot.logDir);
     if (bot.codexHome) {

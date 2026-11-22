@@ -1,5 +1,6 @@
 const fs = require("node:fs");
 const { inspectClaudeRuntime, normalizeEngine } = require('./agent-engines.cjs');
+const { inspectAntigravityRuntime } = require('./antigravity.cjs');
 const crypto = require("node:crypto");
 const os = require("node:os");
 const path = require("node:path");
@@ -56,6 +57,7 @@ function inspectManagedBots(dataRoot, localAppData) {
       processId,
       backends,
       ...(bot.engine === 'claude' ? { claudeRuntime: readJson(path.join(stateDir, 'claude-runtime.json')) || null } : {}),
+      ...(bot.engine === 'antigravity' ? { antigravityRuntime: readJson(path.join(stateDir, 'antigravity-runtime.json')) || null } : {}),
       online,
       activeRunCount: activeRunCount(active),
       messageEventVerified,
@@ -167,6 +169,15 @@ function processEnvironment(options, bot = null) {
   if (options.codexPath) environment.CODEX_CLI_BIN = options.codexPath;
   if (options.codexSource) environment.CODEX_BRIDGE_RUNTIME_SOURCE = options.codexSource;
   environment.CODEX_FEISHU_ENGINE = normalizeEngine(bot?.engine);
+  if (normalizeEngine(bot?.engine) === 'antigravity') {
+    environment.ANTIGRAVITY_CLI_BIN = options.antigravityPath || '';
+    environment.ANTIGRAVITY_CONFIG_DIR = bot.antigravityHome;
+    environment.ANTIGRAVITY_BRIDGE_DATA_ROOT = options.dataRoot;
+    environment.ANTIGRAVITY_BOT_CONFIG = bot.configPath;
+    environment.ANTIGRAVITY_TOOLS_ROOT = path.join(options.dataRoot, 'antigravity-tools');
+    environment.ANTIGRAVITY_SHARED_SESSIONS_ROOT = path.join(options.dataRoot, 'antigravity-shared-sessions');
+    environment.ANTIGRAVITY_MCP_CONFIG = path.join(options.dataRoot, 'antigravity-tools', '.mcp.json');
+  }
   if (normalizeEngine(bot?.engine) === 'claude') {
     environment.CLAUDE_CLI_BIN = options.claudePath || '';
     environment.CLAUDE_CONFIG_DIR = bot.claudeHome;
@@ -180,7 +191,7 @@ function processEnvironment(options, bot = null) {
 }
 
 function macosProviderEnvironment(codexHome, bot, options = {}) {
-  if ((options.platform || process.platform) !== "darwin" || bot?.provider?.mode === "custom" || bot?.engine === 'claude') return {};
+  if ((options.platform || process.platform) !== "darwin" || bot?.provider?.mode === "custom" || ['claude', 'antigravity'].includes(bot?.engine)) return {};
   const inspect = options.inspectProviderCatalog || inspectProviderCatalog;
   const catalog = inspect(codexHome, {});
   if (catalog.error) throw new Error(catalog.error);
@@ -320,6 +331,7 @@ async function startManagedBotPosix(bot, codexHome, options) {
       const child = require("node:child_process").spawn(options.nodePath, [options.bridgeEntry], {
         cwd: options.engineRoot,
         detached: true,
+        windowsHide: true,
         env: posixBridgeEnvironment(bot, codexHome, options, paths),
         stdio: ["ignore", stdoutFd, stderrFd],
       });
@@ -346,6 +358,10 @@ async function stopManagedBotPosix(current, options) {
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
   if (force) {
+    if ((options.platform || process.platform) === 'win32') {
+      try { await new Promise((resolve, reject) => require('node:child_process').execFile('taskkill.exe', ['/PID', String(current.processId), '/T', '/F'], { windowsHide: true }, (error) => error && isProcessAlive(current.processId) ? reject(error) : resolve())); }
+      catch (error) { if (isProcessAlive(current.processId)) throw error; }
+    }
     try { process.kill(-current.processId, "SIGTERM"); } catch {
       try { process.kill(current.processId, "SIGTERM"); } catch {}
     }
@@ -446,7 +462,11 @@ async function startManagedBotOnce(name, options) {
   if (current?.online) return current;
   // Resolve again for every start: a long-lived desktop may have a stale snapshot.
   const engine = normalizeEngine(bot.engine);
-  if (engine === 'claude') {
+  if (engine === 'antigravity') {
+    const runtime = await (options.inspectAntigravityRuntime || inspectAntigravityRuntime)({ userHome: options.userHome, antigravityPath: options.antigravityPath });
+    if (!runtime.available) throw new Error(runtime.error);
+    options = { ...options, antigravityPath: runtime.runtimePath };
+  } else if (engine === 'claude') {
     const runtime = await inspectClaudeRuntime({ userHome: options.userHome, claudePath: options.claudePath });
     options = { ...options, claudePath: runtime.runtimePath, claudeAvailable: runtime.available };
   } else if (options.resolveCodex) {
@@ -456,9 +476,9 @@ async function startManagedBotOnce(name, options) {
   if (!fs.existsSync(options.nodePath) || !fs.existsSync(options.larkCliPath)) {
     throw new Error("客户端内置运行时不完整，请重新安装客户端");
   }
-  if (engine === 'claude' ? !options.claudeAvailable : !options.codexAvailable) throw new Error(`未检测到可用的 ${engine === 'claude' ? 'Claude Code CLI' : 'Codex 桌面运行时'}`);
-  const codexHome = engine === 'claude' ? bot.claudeHome : bot.codexHome || options.defaultCodexHome;
-  if ((options.platform || process.platform) === "win32") {
+  if (engine !== 'antigravity' && (engine === 'claude' ? !options.claudeAvailable : !options.codexAvailable)) throw new Error(`未检测到可用的 ${engine === 'claude' ? 'Claude Code CLI' : 'Codex 桌面运行时'}`);
+  const codexHome = engine === 'antigravity' ? bot.antigravityHome : engine === 'claude' ? bot.claudeHome : bot.codexHome || options.defaultCodexHome;
+  if ((options.platform || process.platform) === "win32" && engine !== 'antigravity') {
     const scriptPath = path.join(options.engineRoot, "start-codex-feishu-bridge.ps1");
     if (!fs.existsSync(scriptPath)) throw new Error("客户端 Bridge 启动脚本缺失");
     const startArgs = managedBotStartArguments(bot, codexHome);
@@ -488,7 +508,7 @@ async function stopManagedBot(name, options) {
     error.activeRunCount = current.activeRunCount;
     throw error;
   }
-  if ((options.platform || process.platform) === "win32") {
+  if ((options.platform || process.platform) === "win32" && bot.engine !== 'antigravity') {
     const scriptPath = path.join(options.engineRoot, "stop-codex-feishu-bridge.ps1");
     if (!fs.existsSync(scriptPath)) throw new Error("客户端 Bridge 停止脚本缺失");
     await runPowerShell(scriptPath, managedBotStopArguments(name, options.force === true), {

@@ -21,7 +21,7 @@ test('Claude Bridge preserves text, maps tool activity, resumes native identity 
   const chat = { currentSessionId: session.id, sessions: [session] };
   const event = { chat_id: 'chat-a', sender_id: 'user-a', message_id: 'message-a', content: '  用户原话\n不加要求。  ' };
   const state = { meta: {}, blocks: [] };
-  const activeJobs = new Map(); const activeChildren = new Map(); const reduced = []; const replies = [];
+  const activeJobs = new Map(); const activeChildren = new Map(); const reduced = []; const replies = []; const phases = [];
   let saved = 0; let turnCount = 0; let bridge;
   const nativeId = crypto.randomUUID();
   bridge = createClaudeBridge({ config: { claudeProviderCatalog: catalog, claudeProviderId: 'provider', claudeBotConfig: botConfig,
@@ -29,7 +29,7 @@ test('Claude Bridge preserves text, maps tool activity, resumes native identity 
     getSession: () => session, getChatState: () => chat, resetSession: () => session,
     saveSessions: () => { saved += 1; }, userText: (content) => content, activeJobs, activeChildren,
     appendText: (current, text) => { current.text = (current.text || '') + text; },
-    reduceEvent: (_current, value) => reduced.push(value), markPhase: () => {},
+    reduceEvent: (_current, value) => reduced.push(value), markPhase: (_current, phase) => phases.push(phase),
     ensureDone: (current, text) => { current.final = text; }, markInterrupted: () => {}, markError: () => {},
     sendMarkdown: async (chatId, text) => {
       replies.push({ chatId, text });
@@ -50,6 +50,11 @@ test('Claude Bridge preserves text, maps tool activity, resumes native identity 
         await options.onSession(nativeId);
         options.onEvent({ type: 'initialized', sessionId: nativeId, model: 'claude-test', version: '2.1.327',
           permissionMode: options.permissionMode, tools: ['Read'], mcpServers: [], skills: [] });
+        options.onEvent({ type: 'api_retry', statusCode: 502, attempt: 1, maxRetries: 2, delayMs: 60_000 });
+        assert.equal(state.meta.upstreamRetry.statusCode, 502);
+        assert.equal(phases.at(-1), 'reconnecting');
+        options.onEvent({ type: 'model_progress' });
+        assert.equal(state.meta.upstreamRetry, undefined);
         if (options.permissionMode === 'manual') assert.equal(await options.onPermission({ id: 'permission', toolName: 'Write', sessionId: nativeId, input: { file_path: '/fixture' } }), true);
         options.onEvent({ type: 'tool_start', id: 'tool', name: 'Write', input: { file_path: '/fixture' } });
         options.onEvent({ type: 'tool_end', id: 'tool', name: 'Write', output: 'success', error: false });

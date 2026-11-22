@@ -109,7 +109,7 @@ export function renderRunActivityMarkdown(state, now = Date.now(), formatToolNam
   if (view.currentTool) lines.push(`当前工具：${view.currentTool}`);
   if (view.statusNote) lines.push(`状态提示：${view.statusNote}`);
   lines.push(`最近进展：${view.recentProgress}`);
-  lines.push(`Codex 连接：${view.connectionLabel}`);
+  lines.push(`${state?.meta?.engine === 'antigravity' ? 'Antigravity' : state?.meta?.engine === 'claude' ? 'Claude Code' : 'Codex'} 连接：${view.connectionLabel}`);
   lines.push(`上游模型：${view.upstreamLabel}`);
   lines.push(`本阶段：${view.phaseElapsed} · 任务总时长：${view.totalElapsed}`);
   return lines.join("\n");
@@ -148,9 +148,8 @@ export function runActivityView(state, now = Date.now(), formatToolName = toolDi
     phaseLabel: effectivePhase === 'initializing' && state?.meta?.engine === 'claude'
       ? '正在初始化 Claude Code' : PHASE_LABELS[effectivePhase] || "正在处理",
     currentTool: effectivePhase === "tool_running" ? formatToolName(currentTool) : "",
-    statusNote: unresolvedTools.length
-      ? `${unresolvedTools.length} 个较早工具尚未收到结束状态`
-      : "",
+    statusNote: [unresolvedTools.length ? `${unresolvedTools.length} 个较早工具尚未收到结束状态` : '',
+      effectivePhase === 'reconnecting' ? upstreamRetryNote(state.meta?.upstreamRetry, timestamp) : ''].filter(Boolean).join('；'),
     recentProgress: latestProgress.text(timestamp),
     connectionLabel: connectionLabel(activity.connection),
     upstreamLabel: upstreamLabel(effectivePhase, activity),
@@ -159,6 +158,14 @@ export function runActivityView(state, now = Date.now(), formatToolName = toolDi
     silenceMs,
     phase: effectivePhase,
   };
+}
+
+function upstreamRetryNote(retry, now) {
+  if (!retry) return '';
+  const waitSeconds = Math.max(0, Math.ceil((retry.at + retry.delayMs - now) / 1000));
+  return `${retry.provider || '上游'}${retry.statusCode ? ` 返回 HTTP ${retry.statusCode}` : ' 请求失败'}`
+    + `${retry.attempt ? `，第 ${retry.attempt}${retry.maxRetries ? `/${retry.maxRetries}` : ''} 次重试` : ''}`
+    + (waitSeconds ? `，约 ${waitSeconds} 秒后重新请求` : '，正在重新请求');
 }
 
 export function appServerToolStatus(item, { completed = false } = {}) {

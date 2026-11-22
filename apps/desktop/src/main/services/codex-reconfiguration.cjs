@@ -15,7 +15,7 @@ function write(root, state) {
 function queueCodexCredentialReload(dataRoot, bots, envKey) {
   const state = read(dataRoot), names = [];
   for (const bot of bots) {
-    if (bot.engine === 'claude' || bot.provider?.mode === 'custom' && bot.provider.envKey === envKey) continue;
+    if (['claude', 'antigravity'].includes(bot.engine) || bot.provider?.mode === 'custom' && bot.provider.envKey === envKey) continue;
     let config;
     try { config = TOML.parse(fs.readFileSync(path.join(bot.codexHome, 'config.toml'), 'utf8')); }
     catch (e) { if (e.code === 'ENOENT') continue; throw e; }
@@ -29,7 +29,7 @@ async function processCodexCredentialReload(options) {
   const result = { pending: [], restarted: [], failed: [] };
   for (const [name, entry] of Object.entries(read(options.dataRoot).bots)) {
     const bot = options.inspectBots().find(b => b.name === name);
-    if (bot?.engine === 'claude') throw new Error('Codex 重载队列不能操作 Claude Bot');
+    if (['claude', 'antigravity'].includes(bot?.engine)) throw new Error('Codex 重载队列不能操作 Claude Bot');
     if (bot?.online && bot.activeRunCount > 0 || entry.lastAttemptAt && Date.now() - entry.lastAttemptAt < 60000) { result.pending.push(name); continue; }
     const update = fn => { const state = read(options.dataRoot); if (state.bots[name]?.revision === entry.revision) { fn(state); write(options.dataRoot, state); } };
     try {

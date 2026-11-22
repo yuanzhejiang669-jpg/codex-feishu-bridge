@@ -7,6 +7,7 @@ import path from "node:path";
 import readline from "node:readline";
 import agentEngine from './src/agents/engine.cjs';
 import { createClaudeBridge } from './src/claude/bridge-runner.mjs';
+import { createAntigravityBridge } from './src/antigravity/bridge-runner.mjs';
 import { fileURLToPath } from "node:url";
 import {
   durationConfigLabel,
@@ -101,6 +102,7 @@ import {
   parseDeleteSelectionSpec,
 } from "./src/sessions/delete-selection.mjs";
 import { createSessionStore } from "./src/sessions/store.mjs";
+import { createSharedClaudeSessionStore } from './src/claude/shared-sessions.mjs';
 import {
   evaluateThreadHealth,
   markThreadHealthNotified,
@@ -153,6 +155,13 @@ const DESKTOP_CODEX_HOME_PATH = CONFIGURED_DESKTOP_CODEX_HOME
 
 const CONFIG = {
   engine: agentEngine.normalizeEngine(process.env.CODEX_FEISHU_ENGINE),
+  antigravityCli: parseToolEnv('ANTIGRAVITY_CLI_BIN', { command: process.platform === 'win32' ? 'agy.exe' : 'agy', argsPrefix: [] }),
+  antigravityHome: process.env.ANTIGRAVITY_CONFIG_DIR || path.join(os.homedir(), '.gemini'),
+  antigravityDataRoot: process.env.ANTIGRAVITY_BRIDGE_DATA_ROOT || path.join(os.homedir(), '.antigravity-feishu'),
+  antigravityBotConfig: process.env.ANTIGRAVITY_BOT_CONFIG || '',
+  antigravityMcpConfig: process.env.ANTIGRAVITY_MCP_CONFIG || '',
+  antigravityToolsRoot: process.env.ANTIGRAVITY_TOOLS_ROOT || '',
+  antigravitySharedSessionsRoot: process.env.ANTIGRAVITY_SHARED_SESSIONS_ROOT || '',
   claudeCli: parseToolEnv('CLAUDE_CLI_BIN', { command: process.platform === 'win32' ? 'claude.exe' : 'claude', argsPrefix: [] }),
   claudeHome: process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'),
   claudeProviderCatalog: process.env.CLAUDE_FEISHU_PROVIDER_CATALOG || '',
@@ -160,6 +169,9 @@ const CONFIG = {
   claudeBotConfig: process.env.CLAUDE_FEISHU_BOT_CONFIG || '',
   claudePermissionMode: process.env.CLAUDE_FEISHU_PERMISSION_MODE || 'manual',
   claudeToolsRoot: process.env.CLAUDE_FEISHU_TOOLS_ROOT || '',
+  claudeSharedSessionsRoot: process.env.CLAUDE_FEISHU_SHARED_SESSIONS_ROOT
+    || (process.env.CODEX_FEISHU_ENGINE === 'claude' && process.env.CLAUDE_FEISHU_TOOLS_ROOT
+      ? path.join(path.dirname(process.env.CLAUDE_FEISHU_TOOLS_ROOT), 'claude-shared-sessions') : ''),
   workspace: process.env.CODEX_FEISHU_WORKSPACE || process.cwd(),
   eventKeys: EVENT_KEYS,
   eventKey: EVENT_KEYS[0] || "im.message.receive_v1",
@@ -207,11 +219,11 @@ const CONFIG = {
   deleteConfirmTtlMs: Number(process.env.CODEX_FEISHU_DELETE_CONFIRM_TTL_MS || `${5 * 60_000}`),
   streamRecoveryEnabled: (process.env.CODEX_FEISHU_STREAM_RECOVERY || "1") !== "0",
   streamRecoveryMaxAttempts: Number(process.env.CODEX_FEISHU_STREAM_RECOVERY_MAX_ATTEMPTS || "1"),
-  syncSidebar: process.env.CODEX_FEISHU_ENGINE !== 'claude' && (process.env.CODEX_FEISHU_SYNC_SIDEBAR || "0") !== "0",
+  syncSidebar: !['claude', 'antigravity'].includes(process.env.CODEX_FEISHU_ENGINE) && (process.env.CODEX_FEISHU_SYNC_SIDEBAR || "0") !== "0",
   sidebarReconcileIntervalMs: parseDurationMs(process.env.CODEX_FEISHU_SIDEBAR_RECONCILE_INTERVAL_MS, 60_000),
-  syncSessionsFromCodex: process.env.CODEX_FEISHU_ENGINE !== 'claude' && (process.env.CODEX_FEISHU_SYNC_SESSIONS_FROM_CODEX || "1") !== "0",
+  syncSessionsFromCodex: !['claude', 'antigravity'].includes(process.env.CODEX_FEISHU_ENGINE) && (process.env.CODEX_FEISHU_SYNC_SESSIONS_FROM_CODEX || "1") !== "0",
   keepEmptySessionMs: Number(process.env.CODEX_FEISHU_KEEP_EMPTY_SESSION_MS || `${10 * 60_000}`),
-  threadHealthReminder: process.env.CODEX_FEISHU_ENGINE !== 'claude' && (process.env.CODEX_FEISHU_THREAD_HEALTH_REMINDER || "1") !== "0",
+  threadHealthReminder: !['claude', 'antigravity'].includes(process.env.CODEX_FEISHU_ENGINE) && (process.env.CODEX_FEISHU_THREAD_HEALTH_REMINDER || "1") !== "0",
   threadHealthWarningBytes: Number(process.env.CODEX_FEISHU_THREAD_HEALTH_WARNING_MB || "120") * 1_000_000,
   threadHealthCriticalBytes: Number(process.env.CODEX_FEISHU_THREAD_HEALTH_CRITICAL_MB || "200") * 1_000_000,
   threadHealthWarningResumeMs: parseDurationMs(process.env.CODEX_FEISHU_THREAD_HEALTH_WARNING_RESUME_MS, 15_000),
@@ -504,7 +516,8 @@ let sidebarReconcileInFlight = false;
 let sidebarReconcileQueuedReason = "";
 let sidebarReconcileTimer = null;
 let sidebarReconcilePendingReason = "";
-const sessionStore = createSessionStore({
+const sessionStore = ((CONFIG.engine === 'claude' && CONFIG.claudeSharedSessionsRoot) || (CONFIG.engine === 'antigravity' && CONFIG.antigravitySharedSessionsRoot) ? createSharedClaudeSessionStore : createSessionStore)({
+  config: CONFIG,
   preserveSessionIdentity: true,
   sessionsPath,
   createSessionData,
@@ -604,13 +617,21 @@ shutdownCallbacks.add(() => {
 });
 
 const claudeBridge = CONFIG.engine === 'claude' ? createClaudeBridge({
-  config: CONFIG, getSession, getChatState, resetSession, saveSessions, userText: userTextFromContent,
+  config: CONFIG, getSession, getChatState, getChats: () => sessions.chats, resetSession, saveSessions, userText: userTextFromContent,
   sendText, sendMarkdown, activeChildren, activeJobs: activeCodexJobs,
   appendText: appendRunText, reduceEvent: reduceCodexJsonEvent, markPhase: markRunPhase,
   ensureDone: ensureRunDone, markInterrupted: markRunInterrupted, markError: markRunError,
-  terminateProcessTree, log,
+  terminateProcessTree, log, queueSummary,
+  sharedSessions: sessionStore.shared,
 }) : null;
 shutdownCallbacks.add(() => claudeBridge?.close());
+const antigravityBridge = CONFIG.engine === 'antigravity' ? createAntigravityBridge({
+  config: CONFIG, getSession, getChatState, getChats: () => sessions.chats, resetSession, saveSessions, userText: userTextFromContent,
+  sendMarkdown, activeChildren, activeJobs: activeCodexJobs, appendText: appendRunText,
+  reduceEvent: reduceCodexJsonEvent, markPhase: markRunPhase, ensureDone: ensureRunDone,
+  markInterrupted: markRunInterrupted, markError: markRunError, queueSummary, sharedSessions: sessionStore.shared,
+}) : null;
+shutdownCallbacks.add(() => antigravityBridge?.close());
 
 function cleanOverride(value) {
   const text = String(value || "").trim();
@@ -618,6 +639,7 @@ function cleanOverride(value) {
 }
 
 function effectiveSessionSettings(session) {
+  if (CONFIG.engine === 'antigravity') return antigravityBridge.settings(session);
   if (CONFIG.engine === 'claude') return claudeBridge.settings(session);
   const model = cleanOverride(session?.modelOverride) || CONFIG.codexModel || resolveCodexConfigValue("model") || "";
   const provider = cleanOverride(session?.providerOverride) || (process.env.CODEX_FEISHU_OPENAI_DEFAULT_ACCOUNT ? "openai" : resolveCodexConfigValue("model_provider")) || "openai";
@@ -638,6 +660,7 @@ function assertReasoningSupported(settings) {
 
 function settingsSummary(session) {
   const settings = effectiveSessionSettings(session);
+  if (CONFIG.engine === 'antigravity') return `Antigravity CLI · provider ${settings.provider} · model ${settings.model || '官方默认'} · effort ${settings.reasoning || '官方默认'}`;
   if (CONFIG.engine === 'claude') return `Claude Code CLI · provider ${settings.provider} · model ${settings.model} · effort ${settings.reasoning}`;
   return [
     `provider ${settings.accountAlias || settings.provider || "默认"}`,
@@ -723,6 +746,15 @@ function normalizeSessionData(session) {
     pendingNativeInputs: normalizeNativeInputs(session?.pendingNativeInputs),
     engine: session?.engine || 'codex',
     claudeSessionId: typeof session?.claudeSessionId === 'string' ? session.claudeSessionId : '',
+    antigravitySessionId: typeof session?.antigravitySessionId === 'string' ? session.antigravitySessionId : '',
+    antigravitySourceId: typeof session?.antigravitySourceId === 'string' ? session.antigravitySourceId : '',
+    antigravityHome: typeof session?.antigravityHome === 'string' ? session.antigravityHome : '',
+    antigravityWorkspace: typeof session?.antigravityWorkspace === 'string' ? session.antigravityWorkspace : '',
+    antigravityOriginBot: typeof session?.antigravityOriginBot === 'string' ? session.antigravityOriginBot : '',
+    userRenamed: session?.userRenamed === true,
+    claudeSessionHome: typeof session?.claudeSessionHome === 'string' ? session.claudeSessionHome : '',
+    claudeWorkspace: typeof session?.claudeWorkspace === 'string' ? session.claudeWorkspace : '',
+    claudeOriginBot: typeof session?.claudeOriginBot === 'string' ? session.claudeOriginBot : '',
     lastTokenUsage: normalizeTokenUsage(session?.lastTokenUsage),
     lastContextUsage: normalizeContextUsage(session?.lastContextUsage),
     lastContextPeakUsage: normalizeContextUsage(session?.lastContextPeakUsage),
@@ -2321,7 +2353,7 @@ function ensureRunDone(state, finalText = "") {
     const tools = state.blocks.filter((block) => block.kind === "tool");
     state.blocks = [{ kind: "text", content: answer, streaming: false }, ...tools];
   } else if (state.blocks.length === 0) {
-    appendRunText(state, state.meta.engine === 'claude' ? '(Claude 没有返回内容)' : '(Codex 没有返回内容)');
+    appendRunText(state, state.meta.engine === 'antigravity' ? '(Antigravity 没有返回内容)' : state.meta.engine === 'claude' ? '(Claude 没有返回内容)' : '(Codex 没有返回内容)');
   }
   closeStreamingBlocks(state);
   state.terminal = "done";
@@ -2462,7 +2494,7 @@ function renderStaleRunCard(record) {
     },
     body: {
       elements: [
-        markdown(`**上一轮 ${CONFIG.engine === 'claude' ? 'Claude Code' : 'Codex'} 任务状态已丢失**\n\nBridge 启动时发现这张卡片仍处于运行状态，但原进程已经不在当前 Bridge 内。为避免误判为仍在执行，已将它标记为中断。`),
+        markdown(`**上一轮 ${CONFIG.engine === 'antigravity' ? 'Antigravity' : CONFIG.engine === 'claude' ? 'Claude Code' : 'Codex'} 任务状态已丢失**\n\nBridge 启动时发现这张卡片仍处于运行状态，但原进程已经不在当前 Bridge 内。为避免误判为仍在执行，已将它标记为中断。`),
         noteMd(`原始消息：${record?.messageId || ""}`),
         noteMd(`会话：${record?.sessionId || ""}`),
         startedAt ? noteMd(`开始时间：${formatTime(startedAt)}`) : null,
@@ -3210,7 +3242,7 @@ function cardTitle(state) {
     if (state.terminal === "done") return "Codex goal 已结束";
     return "Codex goal 进行中";
   }
-  const engine = state.meta?.engine === 'claude' ? 'Claude Code' : 'Codex';
+  const engine = state.meta?.engine === 'antigravity' ? 'Antigravity' : state.meta?.engine === 'claude' ? 'Claude Code' : 'Codex';
   if (state.terminal === "error") return state.failure?.label || `${engine} 处理失败`;
   if (state.terminal === "interrupted") return `${engine} 已停止`;
   if (state.terminal === "done") return `${engine} 已完成`;
@@ -6408,6 +6440,7 @@ function appServerNotificationMatchesRun(message, threadId, turnId) {
 }
 
 async function runCodex(event, session, state = null, onState = null) {
+  if (CONFIG.engine === 'antigravity') return antigravityBridge.run(event, session, state, onState);
   if (CONFIG.engine === 'claude') return claudeBridge.run(event, session, state, onState);
   await providerSwitcher.recover(session);
   receiveNativeInput(session, event.message_id || event.id, userTextFromContent(event.content), event.attachments || []);
@@ -6693,10 +6726,14 @@ function handleRecallEvent(rawEvent) {
 }
 
 function isOutOfBandCommand(command) {
-  if (CONFIG.engine !== 'claude' && ['/provider', '/model'].includes(command?.name)
+  if (CONFIG.engine === 'codex' && ['/provider', '/model'].includes(command?.name)
       && !/^(?:$|status\b|view\b|list\b|refresh\b|capabilit)/i.test(String(command.rest || '').trim())) {
     return eventDispatcher.activeJobs > 0;
   }
+  // Native Claude commands which run a CLI must occupy the same queue slot as a
+  // normal message. When busy, handle them immediately only to report the guard.
+  if (CONFIG.engine === 'claude' && (command?.name === '/compact'
+      || (command?.name === '/model' && /^test(?:\s|$)/i.test(command.rest)))) return activeCodexJobs.size > 0;
   return Boolean(command?.name);
 }
 
@@ -6991,7 +7028,7 @@ async function handleEvent(rawEvent, dispatchControl = {}) {
         await sendMarkdown(
           chatId,
           [
-            `**${CONFIG.engine === 'claude' ? 'Claude Code' : 'Codex'} 处理失败**`,
+            `**${CONFIG.engine === 'antigravity' ? 'Antigravity' : CONFIG.engine === 'claude' ? 'Claude Code' : 'Codex'} 处理失败**`,
             "",
             "动态卡片最终刷新失败，以下是错误兜底：",
             "",
@@ -7009,7 +7046,7 @@ async function handleEvent(rawEvent, dispatchControl = {}) {
       await sendMarkdown(
         chatId,
         [
-          `**${CONFIG.engine === 'claude' ? 'Claude Code' : 'Codex'} 处理失败**`,
+          `**${CONFIG.engine === 'antigravity' ? 'Antigravity' : CONFIG.engine === 'claude' ? 'Claude Code' : 'Codex'} 处理失败**`,
           "",
           failureShortText(failure),
           "",
@@ -7048,6 +7085,7 @@ function cleanupClearedDownloads(attachments) {
 }
 
 async function handleCommand(event, command) {
+  if (CONFIG.engine === 'antigravity' && await antigravityBridge.handleCommand(event, command)) return;
   const chatId = event.chat_id;
   const messageId = event.message_id || event.id || chatId;
   log("INFO", "command received", { messageId, chatId, command: command.name });
@@ -8324,10 +8362,10 @@ async function stopCurrentJob(chatId, messageId, { clearMode = "" } = {}) {
   if (job.rootMessageId) stoppedJobs.add(job.rootMessageId);
   await sendText(chatId, "Stopping", "stop-start", messageId);
 
-  if (job.mode === 'claude' && job.client) {
+  if (['claude', 'antigravity'].includes(job.mode) && job.client) {
     job.client.interrupt();
     setTimeout(() => {
-      if (activeCodexJobs.get(chatId)?.pid === job.pid) terminateProcessTree(job.pid, true);
+      if (activeCodexJobs.get(chatId) === job && job.pid) terminateProcessTree(job.pid, true);
     }, 5000).unref?.();
     return;
   }

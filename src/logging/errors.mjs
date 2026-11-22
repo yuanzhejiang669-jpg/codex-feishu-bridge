@@ -103,11 +103,23 @@ export function classifyCodexFailure(value, fallback = "Codex 运行失败") {
     kind: "unknown",
     label: "未知错误",
     recoverable: false,
-    message: "Codex 运行失败，但 Bridge 无法明确判断原因。",
+    message: `${value?.engine === 'antigravity' ? 'Antigravity' : value?.engine === 'claude' ? 'Claude Code' : 'Codex'} 运行失败，但 Bridge 无法明确判断原因。`,
     suggestion: "查看日志中的原始错误；如果是偶发问题，可以手动重试。",
     detail,
     at: Date.now(),
   };
+
+  if (errorCode === 'CLAUDE_UPSTREAM_TIMEOUT') {
+    return { ...base, kind: 'upstream_timeout', label: '上游响应超时',
+      message: 'Claude Code 等待上游响应超过连续无进展时限，本轮已结束。',
+      suggestion: '原会话和工作区已保留。服务恢复后可继续；本轮不会无限等待或自动重放已执行的工具。' };
+  }
+
+  if (httpStatus >= 500 && httpStatus <= 599) {
+    return { ...base, kind: 'upstream_http', label: `上游服务异常（HTTP ${httpStatus}）`,
+      message: `模型服务商返回 HTTP ${httpStatus}，本轮请求未能完成。`,
+      suggestion: '原会话和工作区已保留。请在渠道恢复后继续；如果反复发生，需要服务商检查网关和后端。' };
+  }
 
   if (
     ["EACCES", "EBUSY", "EPERM"].includes(errorCode)

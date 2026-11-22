@@ -43,6 +43,7 @@ async function registerBotWithQr(raw, options, onProgress = () => {}) {
           stage: "qr-ready",
           message: "请使用飞书扫描二维码并完成授权",
           qrDataUrl: dataUrl,
+          qrUrl: info.url,
           expiresIn: Number(info.expireIn || 0),
         });
       },

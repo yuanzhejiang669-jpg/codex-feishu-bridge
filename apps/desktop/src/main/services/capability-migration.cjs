@@ -89,6 +89,7 @@ function sharedSkillPlan(sourceItem, targetPath, sharedSkillsRoot) {
 function findBot(name, dataRoot) {
   const bot = readManagedBots(dataRoot).find((item) => item.name === name);
   if (!bot) throw new Error(`找不到客户端管理的 Bot：${name}`);
+  if (bot.engine === 'antigravity') throw new Error('Antigravity Bot 请使用专用 MCP / Skills 工具库');
   if (bot.engine === 'claude') throw new Error('Claude Bot 请使用 Claude MCP / Skills 工具库');
   if (bot.codexHomeMode !== "isolated") throw new Error("只有隔离 Codex Home 才需要迁移 MCP 或 Skills");
   return bot;
@@ -97,7 +98,7 @@ function findBot(name, dataRoot) {
 function previewCapabilityMigration(name, selection, options) {
   const bot = findBot(name, options.dataRoot);
   const affectedBots = readManagedBots(options.dataRoot)
-    .filter((item) => item.engine !== 'claude' && item.codexHomeMode === "isolated" && path.resolve(item.codexHome).toLowerCase() === path.resolve(bot.codexHome).toLowerCase())
+    .filter((item) => !['claude', 'antigravity'].includes(item.engine) && item.codexHomeMode === "isolated" && path.resolve(item.codexHome).toLowerCase() === path.resolve(bot.codexHome).toLowerCase())
     .map((item) => item.name);
   const source = inspectCapabilities(options.sourceCodexHome);
   const sourceConfig = readToml(source.configPath).value;

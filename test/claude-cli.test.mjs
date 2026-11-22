@@ -35,8 +35,9 @@ function client(handle, overrides = {}) {
 test('Claude launch isolates authentication, leaves tool credentials intact and never places keys in argv', () => {
   const source = { ANTHROPIC_API_KEY: 'other', CLAUDE_CODE_OAUTH_TOKEN: 'old-login',
     CLAUDE_CODE_USE_BEDROCK: '1', CLAUDE_PROVIDER_OTHER_API_KEY: 'other-provider', TOOL_ACCESS_TOKEN: 'tool', PATH: 'path' };
-  const env = claudeEnvironment(source, { home: 'per-bot-home', provider });
+  const env = claudeEnvironment(source, { home: 'per-bot-home', toolHome: 'current-bot-tools', provider });
   assert.equal(env.CLAUDE_CONFIG_DIR, 'per-bot-home');
+  assert.equal(env.CFB_CLAUDE_BOT_HOME, 'current-bot-tools');
   assert.equal(env.ANTHROPIC_AUTH_TOKEN, provider.apiKey);
   assert.equal(env.ANTHROPIC_BASE_URL, 'https://provider.example');
   assert.equal(env.ANTHROPIC_API_KEY, undefined);
@@ -44,6 +45,9 @@ test('Claude launch isolates authentication, leaves tool credentials intact and 
   assert.equal(env.CLAUDE_CODE_USE_BEDROCK, undefined);
   assert.equal(env.CLAUDE_PROVIDER_OTHER_API_KEY, undefined);
   assert.equal(env.TOOL_ACCESS_TOKEN, 'tool');
+  assert.equal(env.CLAUDE_CODE_MAX_RETRIES, '2');
+  assert.equal(env.PYTHONUTF8, '1');
+  assert.equal(env.PYTHONIOENCODING, 'utf-8');
   assert.equal(source.ANTHROPIC_API_KEY, 'other');
   const args = claudeArguments({ sessionId, model: provider.model, effort: 'high' });
   assert.equal(args.includes(provider.apiKey), false);
@@ -53,9 +57,127 @@ test('Claude launch isolates authentication, leaves tool credentials intact and 
   assert.throws(() => claudeArguments({ sessionId: '-'.repeat(36), model: 'model' }), /session ID/);
 });
 
-test('native Claude skills and compact go through the queued turn while Bridge approval remains out of band', () => {
+test('Claude retry events expose upstream status without forwarding raw secrets', async () => {
+  const events = [];
+  const instance = client((message, child) => {
+    if (message.type !== 'user') return;
+    child.send({ type: 'system', subtype: 'api_retry', attempt: 1, max_retries: 2,
+      retry_delay_ms: 60_000, error_status: 502, error: `server_error ${provider.apiKey}` });
+    child.send({ type: 'system', subtype: 'api_error', retryAttempt: 2, maxRetries: 2,
+      retryInMs: 10_000, error: { message: `API Error: 524 ${provider.apiKey}` } });
+    child.send({ type: 'result', is_error: false, result: 'recovered' });
+  }, { onEvent: (event) => events.push(event) });
+  await instance.run('message');
+  const retries = events.filter((e) => e.type === 'api_retry');
+  assert.deepEqual(retries.map((e) => [e.statusCode, e.attempt, e.maxRetries, e.delayMs]),
+    [[502, 1, 2, 60_000], [524, 2, 2, 10_000]]);
+  assert.equal(JSON.stringify(retries).includes(provider.apiKey), false);
+});
+
+test('native slash dispatch is explicit while normal messages retain verbatim delivery', async () => {
+  for (const dispatchCommand of [false, true]) {
+    const instance = client((message, child) => {
+      if (message.type !== 'user') return;
+      assert.equal(message.client_composed, !dispatchCommand);
+      assert.equal(message.message.content, '/compact keep facts');
+      child.send({ type: 'result', is_error: false, result: 'done' });
+    }, { dispatchCommand });
+    assert.equal((await instance.run('/compact keep facts')).result, 'done');
+  }
+});
+
+test('steering waits for every submitted input UUID before closing the native session', async () => {
+  let initial; let instance;
+  instance = client((message, child) => {
+    if (message.type !== 'user') return;
+    if (!initial) {
+      initial = message.uuid;
+      child.send({ type: 'system', subtype: 'init', session_id: sessionId });
+      setTimeout(() => instance.steer('change course'), 5);
+    } else {
+      assert.equal(message.priority, 'next');
+      assert.equal(message.client_composed, true);
+      child.send({ type: 'result', is_error: false, result: 'first', user_message_uuids: [initial] });
+      setTimeout(() => child.send({ type: 'result', is_error: false, result: 'steered', user_message_uuids: [message.uuid] }), 10);
+    }
+  });
+  assert.equal((await instance.run('initial')).result, 'steered');
+  assert.equal(instance.pendingInputs.size, 0);
+  assert.throws(() => instance.steer('too late'), /已结束/);
+});
+
+test('retry notifications and stderr heartbeats cannot extend the upstream no-progress deadline', async () => {
+  let interval;
+  const instance = client((message, child) => {
+    if (message.type !== 'user') return;
+    interval = setInterval(() => {
+      child.stderr.write('waiting\n');
+      child.send({ type: 'system', subtype: 'api_retry', attempt: 1, error: { status: 502 } });
+    }, 4);
+    child.once('close', () => clearInterval(interval));
+  }, { upstreamTimeoutMs: 30 });
+  try {
+    await assert.rejects(instance.run('message'), { code: 'CLAUDE_UPSTREAM_TIMEOUT' });
+  } finally { clearInterval(interval); }
+});
+
+test('parallel tools may run longer than the upstream wait limit', async () => {
+  const instance = client((message, child) => {
+    if (message.type !== 'user') return;
+    child.send({ type: 'assistant', message: { content: [
+      { type: 'tool_use', id: 'one', name: 'Bash', input: {} },
+      { type: 'tool_use', id: 'two', name: 'Bash', input: {} },
+    ] } });
+    setTimeout(() => child.send({ type: 'user', message: { content: [
+      { type: 'tool_result', tool_use_id: 'one', content: 'one done' },
+    ] } }), 10);
+    setTimeout(() => {
+      child.send({ type: 'user', message: { content: [
+        { type: 'tool_result', tool_use_id: 'two', content: 'two done' },
+      ] } });
+      child.send({ type: 'result', is_error: false, result: 'done' });
+    }, 70);
+  }, { upstreamTimeoutMs: 30 });
+  assert.equal((await instance.run('message')).result, 'done');
+});
+
+test('auto-compaction gets its own longer deadline and resumes normal response waiting', async () => {
+  const events = [];
+  const instance = client((message, child) => {
+    if (message.type !== 'user') return;
+    child.send({ type: 'system', subtype: 'status', status: 'compacting' });
+    setTimeout(() => {
+      child.send({ type: 'system', subtype: 'compact_boundary', compact_metadata: { trigger: 'auto' } });
+      child.send({ type: 'result', is_error: false, result: 'compacted' });
+    }, 70);
+  }, { upstreamTimeoutMs: 30, compactionTimeoutMs: 150, onEvent: (e) => events.push(e) });
+  assert.equal((await instance.run('message')).result, 'compacted');
+  assert.ok(events.some((e) => e.type === 'compacting_started'));
+  assert.ok(events.some((e) => e.type === 'compacted'));
+});
+
+test('thinking deltas count as progress without exposing reasoning as answer text', async () => {
+  const events = []; let interval;
+  const instance = client((message, child) => {
+    if (message.type !== 'user') return;
+    interval = setInterval(() => child.send({ type: 'stream_event', event: {
+      type: 'content_block_delta', delta: { type: 'thinking_delta', thinking: 'private reasoning' },
+    } }), 8);
+    setTimeout(() => {
+      clearInterval(interval);
+      child.send({ type: 'result', is_error: false, result: 'done' });
+    }, 70);
+  }, { upstreamTimeoutMs: 30, onEvent: (e) => events.push(e) });
+  try {
+    assert.equal((await instance.run('message')).result, 'done');
+    assert.ok(events.some((e) => e.type === 'model_progress'));
+    assert.equal(JSON.stringify(events).includes('private reasoning'), false);
+  } finally { clearInterval(interval); }
+});
+
+test('native Claude skills stay queued while compact and Bridge approval are managed commands', () => {
   assert.equal(parseCommand('/my-skill exact original words', { engine: 'claude' }), null);
-  assert.equal(parseCommand('/compact', { engine: 'claude' }), null);
+  assert.equal(parseCommand('/compact', { engine: 'claude' }).name, '/compact');
   assert.equal(parseCommand('/approve abc', { engine: 'claude' }).name, '/approve');
   assert.equal(parseCommand('/unknown', { engine: 'codex' }).name, '/unknown');
 });

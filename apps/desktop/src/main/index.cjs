@@ -82,6 +82,9 @@ const { readTrustedCodexHomes } = require("./services/trusted-codex-homes.cjs");
 const { startAccountLogin, setBotAccount, forgetAccount } = require("./services/openai-accounts.cjs");
 const { createWindowReadiness } = require("./services/window-readiness.cjs");
 const { inspectClaudeRuntime } = require('./services/agent-engines.cjs');
+const { inspectAntigravityRuntime, inspectAntigravity, listAntigravityModels, probeAntigravityProvider,
+  saveAntigravityProvider, captureAntigravityAccount, switchAntigravityAccount,
+  inspectAntigravityClients, openAntigravityLogin, assignAntigravityProvider } = require('./services/antigravity.cjs');
 const { inspectClaudeProviders, listClaudeModels, probeClaudeProvider, saveClaudeProvider,
   replaceClaudeProviderKey } = require('./services/claude-providers.cjs');
 const { assignClaudeProvider } = require('./services/claude-bots.cjs');
@@ -127,6 +130,7 @@ let desktopSettings = { launchAtLogin: false, closeToTray: true, error: "" };
 const desktopStartup = createDesktopStartup(app);
 let providerCredentialStore = null;
 let claudeCredentialStore = null;
+let antigravityCredentialStore = null;
 let claudeConfigurationTimer = null;
 let runtimeInitializing = true;
 let batchRestartInFlight = false;
@@ -141,6 +145,18 @@ async function initializeClaudeCredentialStore() {
     isAvailable: () => inspectSecureStorage(safeStorage, process.platform).available,
     createStore: () => claudeCredentialStore });
   if (!result.ready || result.hydration.failed.length) throw new Error('Claude Provider 安全凭据未能解锁，请检查系统凭据存储');
+}
+
+async function initializeAntigravityCredentialStore() {
+  const root = path.join(managedDataRoot(), 'antigravity-provider-credentials');
+  antigravityCredentialStore = createCredentialStore({ root,
+    encrypt: (value) => { assertSecureStorage(safeStorage, process.platform); return safeStorage.encryptString(value); },
+    decrypt: (value) => { assertSecureStorage(safeStorage, process.platform); return safeStorage.decryptString(value); } });
+  if (!fs.existsSync(root) || !fs.readdirSync(root).some((name) => name.endsWith('.bin'))) return;
+  const result = await waitForCredentialStoreHydration({ attempts: 61, delayMs: 1_000,
+    isAvailable: () => inspectSecureStorage(safeStorage, process.platform).available,
+    createStore: () => antigravityCredentialStore });
+  if (!result.ready || result.hydration.failed.length) throw new Error('Antigravity 渠道安全凭据未能解锁');
 }
 
 async function initializeProtectedProviderCredentialStore() {
@@ -258,6 +274,7 @@ function supervisorOptions() {
   return {
     userHome: app.getPath('home'),
     claudePath: currentState?.claude?.runtimePath || '',
+    antigravityPath: currentState?.antigravity?.runtimePath || '',
     resolveCodex: () => inspectCodex(detectorScriptPath(), { home: app.getPath('home') }),
     dataRoot: managedDataRoot(),
     localAppData: runtimeLocalAppData(),
@@ -324,6 +341,38 @@ function claudeOptions() {
     } };
 }
 
+function antigravityOptions() {
+  return { dataRoot: managedDataRoot(), userHome: app.getPath('home'), platform: process.platform,
+    sourceCodexHome: path.join(app.getPath('home'), '.codex'), toolEngine: 'antigravity',
+    engineRoot: currentState?.engine?.engineRoot || '', antigravityPath: currentState?.antigravity?.runtimePath || '',
+    environment: process.env,
+    readCredential: (name) => {
+      if (!antigravityCredentialStore) throw new Error('安全凭据存储尚未初始化');
+      return antigravityCredentialStore.read(name);
+    },
+    setCredential: (name, value) => {
+      if (!antigravityCredentialStore) throw new Error('安全凭据存储尚未初始化');
+      return antigravityCredentialStore.set(name, value);
+    },
+    encrypt: (value) => { assertSecureStorage(safeStorage, process.platform); return safeStorage.encryptString(value); },
+    decrypt: (value) => { assertSecureStorage(safeStorage, process.platform); return safeStorage.decryptString(value); },
+    inspectBots: () => inspectManagedBots(managedDataRoot(), runtimeLocalAppData()),
+    inspectExternalClients: inspectAntigravityClients };
+}
+
+let antigravityReconfigurationRunning = false;
+async function applyPendingAntigravityConfiguration() {
+  if (antigravityReconfigurationRunning || runtimeInitializing || isQuitting
+      || !Object.keys(readClaudePending(managedDataRoot(), 'antigravity').bots).length) return;
+  antigravityReconfigurationRunning = true; recoverySupervisor?.stop();
+  try {
+    await processClaudeReconfiguration({ dataRoot: managedDataRoot(), engine: 'antigravity',
+      inspectBots: () => inspectManagedBots(managedDataRoot(), runtimeLocalAppData()),
+      stopBot: (name) => stopManagedBot(name, supervisorOptions()),
+      startBot: (name) => startManagedBot(name, supervisorOptions()) });
+  } finally { antigravityReconfigurationRunning = false; if (!isQuitting) recoverySupervisor?.start(); }
+}
+
 function queueClaudeProviderUsers(providerId) {
   const names = readManagedBots(managedDataRoot()).filter((bot) => bot.engine === 'claude' && bot.provider?.id === providerId).map((bot) => bot.name);
   return queueClaudeReconfiguration(managedDataRoot(), names);
@@ -364,6 +413,7 @@ function queueCodexProviderReload(result) {
 async function applyPendingProviderConfiguration() {
   await applyPendingClaudeConfiguration();
   await applyPendingCodexConfiguration();
+  await applyPendingAntigravityConfiguration();
 }
 
 function modelSourceOptions() {
@@ -445,6 +495,8 @@ function readinessOptions() {
     codexAvailable: Boolean(currentState?.codex?.runtimeFound),
     claudeAvailable: Boolean(currentState?.claude?.available),
     claudeProviders: currentState?.claudeProviders,
+    antigravityAvailable: Boolean(currentState?.antigravity?.available),
+    antigravityProviders: currentState?.antigravityConfiguration,
     engineAvailable: Boolean(currentState?.engine?.available),
     currentProvider: currentState?.provider || {},
     codexLoginState: currentState?.codex?.loginState || "unknown",
@@ -582,7 +634,7 @@ async function loadState() {
   const managedBots = inspectManagedBots(managedDataRoot(), runtimeLocalAppData());
   const capabilityHomes = inspectCapabilityHomes([
     capabilities.codexHome,
-    ...managedBots.filter((bot) => bot.engine !== 'claude').map((bot) => bot.codexHome),
+    ...managedBots.filter((bot) => !['claude', 'antigravity'].includes(bot.engine)).map((bot) => bot.codexHome),
   ]);
   const providerCatalog = inspectProviderCatalog(path.join(app.getPath("home"), ".codex"));
   const secureStorage = inspectSecureStorage(safeStorage, process.platform);
@@ -591,6 +643,10 @@ async function loadState() {
     claudeProviders: inspectClaudeProviders(managedDataRoot()),
     claudeCapabilities: inspectClaudeCapabilities(claudeOptions()),
     claudePendingConfiguration: readClaudePending(managedDataRoot()),
+    antigravity: await inspectAntigravityRuntime({ userHome: app.getPath('home') }),
+    antigravityConfiguration: inspectAntigravity(antigravityOptions()),
+    antigravityCapabilities: inspectClaudeCapabilities(antigravityOptions()),
+    antigravityPendingConfiguration: readClaudePending(managedDataRoot(), 'antigravity'),
     generatedAt: new Date().toISOString(),
     app: {
       version: app.getVersion(),
@@ -736,6 +792,9 @@ function createWindow() {
             const report = await mainWindow.webContents.executeJavaScript(`({
               version: document.querySelector('#app-version').textContent,
               error: document.querySelector('#error-band').textContent,
+              antigravitySections: ['agy-providers', 'agy-factory', 'agy-tools', 'agy-runtime'].every((id) => Boolean(document.getElementById(id))),
+              antigravityCount: document.querySelector('#agy-factory-form').elements.count.value,
+              antigravityCredentialInputType: document.querySelector('#agy-provider-form').elements.apiKey.type,
               claudeSections: ['claude-provider-section', 'claude-factory-section', 'claude-tools-section', 'claude-runtime-section'].every((id) => Boolean(document.getElementById(id))),
               runtime: document.querySelector('#claude-runtime-details').textContent,
               factoryCount: document.querySelector('#claude-factory-form').elements.count.value,
@@ -744,7 +803,7 @@ function createWindow() {
               activeView: document.querySelector('.nav-item.active')?.dataset.view
             })`);
             fs.writeFileSync(process.env.CFB_DESKTOP_CAPTURE_REPORT, JSON.stringify(report, null, 2)+'\n', 'utf8');
-            if (!report.claudeSections || report.version !== `v${app.getVersion()}` || report.error.trim()
+            if (!report.claudeSections || !report.antigravitySections || report.antigravityCount !== '5' || report.antigravityCredentialInputType !== 'password' || report.version !== `v${app.getVersion()}` || report.error.trim()
                 || (captureView && captureView !== 'factory' && report.activeView !== captureView)) throw new Error('Desktop capture validation failed');
           }
           app.exit(0);
@@ -780,6 +839,7 @@ if (!singleInstance) {
         await Promise.all([
           initializeProtectedProviderCredentialStore(),
           initializeClaudeCredentialStore(),
+          initializeAntigravityCredentialStore(),
           initializeMacProviderEnvironment(),
         ]);
         if (desktopSettings.launchAtLogin && desktopStartup.supported()) desktopStartup.setEnabled(true);
@@ -820,6 +880,32 @@ if (!singleInstance) {
     });
     ipcMain.handle("desktop:preview-bot", (_event, input) => previewBot(input, setupOptions()));
     ipcMain.handle('desktop:claude-list-models', (_event, input) => listClaudeModels(input, claudeOptions()));
+    ipcMain.handle('desktop:antigravity-list-models', (_event, input) => listAntigravityModels(input, antigravityOptions()));
+    ipcMain.handle('desktop:antigravity-probe-provider', (_event, input) => probeAntigravityProvider(input, antigravityOptions()));
+    ipcMain.handle('desktop:antigravity-save-provider', async (_event, input) => {
+      assertStartupReady();
+      const result = await saveAntigravityProvider(input, antigravityOptions());
+      const names = readManagedBots(managedDataRoot()).filter((bot) => bot.engine === 'antigravity').map((bot) => bot.name);
+      result.queuedBots = queueClaudeReconfiguration(managedDataRoot(), names, 'antigravity');
+      await loadState(); return result;
+    });
+    ipcMain.handle('desktop:antigravity-capture-account', async (_event, input) => {
+      assertStartupReady(); const result = captureAntigravityAccount(input, antigravityOptions()); await loadState(); return result;
+    });
+    ipcMain.handle('desktop:antigravity-switch-account', async (_event, input) => {
+      assertStartupReady(); const result = await switchAntigravityAccount(input, antigravityOptions()); await loadState(); return result;
+    });
+    ipcMain.handle('desktop:antigravity-open-login', () => { assertStartupReady(); return openAntigravityLogin(antigravityOptions()); });
+    ipcMain.handle('desktop:antigravity-save-mcp', async (_event, input) => {
+      assertStartupReady(); const result = saveClaudeMcp(input, antigravityOptions()); await loadState(); return result;
+    });
+    ipcMain.handle('desktop:antigravity-migrate-capabilities', async (_event, input) => {
+      assertStartupReady(); const result = migrateClaudeCapabilities(input, antigravityOptions()); await loadState(); return result;
+    });
+    ipcMain.handle('desktop:antigravity-assign-provider', async (_event, input) => {
+      assertStartupReady(); const result = assignAntigravityProvider(input, antigravityOptions(), readManagedBots(managedDataRoot()));
+      await loadState(); return result;
+    });
     ipcMain.handle('desktop:claude-probe-provider', (_event, input) => probeClaudeProvider(input, claudeOptions()));
     ipcMain.handle('desktop:claude-save-provider', async (_event, input) => {
       assertStartupReady();

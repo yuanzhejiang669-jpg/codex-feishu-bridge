@@ -83,6 +83,22 @@ test("a generic upstream request timeout is not mislabeled as Bridge timeout", (
   assert.equal(failure.kind, "unknown");
 });
 
+for (const status of [502, 503, 524, 529]) test(`Claude upstream HTTP ${status} has an actionable provider failure`, () => {
+  const failure = classifyCodexFailure(Object.assign(new Error(`API Error: ${status} gateway error`), { engine: 'claude' }));
+  assert.equal(failure.kind, 'upstream_http');
+  assert.match(failure.label, new RegExp(String(status)));
+  assert.equal(failure.recoverable, false);
+  assert.doesNotMatch(failure.message, /Codex/);
+  assert.match(failure.suggestion, /会话/);
+});
+
+test('Claude upstream no-progress timeout is not a user stop or unknown error', () => {
+  const error = Object.assign(new Error('upstream did not respond'), { code: 'CLAUDE_UPSTREAM_TIMEOUT', engine: 'claude' });
+  const failure = classifyCodexFailure(error);
+  assert.equal(failure.kind, 'upstream_timeout');
+  assert.equal(failure.recoverable, false);
+});
+
 test("local Windows file locks never trigger service tier fallback", () => {
   const error = new Error("EPERM: operation not permitted, rename active-runs.json.tmp -> active-runs.json");
   error.code = "EPERM";

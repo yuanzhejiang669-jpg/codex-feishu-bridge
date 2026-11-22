@@ -152,6 +152,10 @@ th:nth-child(1) { width: 20%; } th:nth-child(2) { width: 11%; } th:nth-child(3) 
 #claude-factory-section summary { cursor: pointer; color: #287d64; }
 #claude-factory-section details[open] summary { margin-bottom: 18px; }
 #claude-provider-list .capability-item { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 12px 0; }
+#agy-provider-list .capability-item, #agy-accounts .capability-item { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 12px 0; }
+#agy-providers details, #agy-tools details { margin-top: 18px; }
+#agy-providers summary, #agy-tools summary { cursor: pointer; margin-bottom: 12px; font-weight: 600; }
+#agy-source-skills, #agy-source-mcp { max-height: 340px; overflow-y: auto; }
 .stack-form label { display: grid; gap: 6px; color: #596570; font-size: 11px; }
 .stack-form input, .stack-form select { width: 100%; height: 38px; border: 1px solid #c9d0d7; border-radius: 4px; padding: 7px 9px; background: #fff; color: #1f2933; font-size: 12px; outline: none; }
 .stack-form input:focus, .stack-form select:focus { border-color: #287d64; box-shadow: 0 0 0 2px rgb(40 125 100 / 12%); }

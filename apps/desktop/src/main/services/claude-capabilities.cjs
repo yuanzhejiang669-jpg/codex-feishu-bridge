@@ -4,9 +4,9 @@ const path = require('node:path');
 const TOML = require('smol-toml');
 const { inspectCapabilities, listSkills, resolveCommandPath } = require('./capabilities.cjs');
 
-function toolRoot(dataRoot) { return path.join(dataRoot, 'claude-tools'); }
-function mcpPath(dataRoot) { return path.join(toolRoot(dataRoot), '.mcp.json'); }
-function skillsRoot(dataRoot) { return path.join(toolRoot(dataRoot), '.claude', 'skills'); }
+function toolRoot(dataRoot, engine = 'claude') { return path.join(dataRoot, engine === 'antigravity' ? 'antigravity-tools' : 'claude-tools'); }
+function mcpPath(dataRoot, engine) { return path.join(toolRoot(dataRoot, engine), '.mcp.json'); }
+function skillsRoot(dataRoot, engine) { return path.join(toolRoot(dataRoot, engine), engine === 'antigravity' ? '.agents' : '.claude', 'skills'); }
 
 function assertNoInlineSecret(value, key = '') {
   if (typeof value === 'string') {
@@ -38,14 +38,19 @@ function validateMcp(value) {
   return value;
 }
 
-function readMcp(dataRoot) {
-  try { return validateMcp(JSON.parse(fs.readFileSync(mcpPath(dataRoot), 'utf8'))); }
+function readMcp(dataRoot, engine) {
+  try { return validateMcp(JSON.parse(fs.readFileSync(mcpPath(dataRoot, engine), 'utf8'))); }
   catch (error) { if (error.code === 'ENOENT') return { mcpServers: {} }; throw error; }
 }
 
 function saveClaudeMcp(raw, options) {
   const value = validateMcp(typeof raw === 'string' ? JSON.parse(raw) : raw);
-  const target = mcpPath(options.dataRoot);
+  if (options.toolEngine === 'antigravity') {
+    for (const [name, server] of Object.entries(value.mcpServers)) {
+      if (server.type && !['stdio', 'http', 'sse'].includes(server.type)) throw new Error(`MCP ${name} 的传输类型不受 Antigravity ACP 支持`);
+    }
+  }
+  const target = mcpPath(options.dataRoot, options.toolEngine);
   fs.mkdirSync(path.dirname(target), { recursive: true });
   const temporary = `${target}.${crypto.randomUUID()}.tmp`;
   fs.writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
@@ -55,14 +60,14 @@ function saveClaudeMcp(raw, options) {
 
 function inspectClaudeCapabilities(options) {
   let config = { mcpServers: {} }; let error = '';
-  try { config = readMcp(options.dataRoot); } catch (failure) { error = failure.message; }
+  try { config = readMcp(options.dataRoot, options.toolEngine); } catch (failure) { error = failure.message; }
   const source = inspectCapabilities(options.sourceCodexHome);
   const extraSkills = options.userHome ? listSkills(path.join(options.userHome, '.agents', 'skills')) : [];
   const sourceSkills = [...source.skills, ...extraSkills].filter((item, index, all) => all.findIndex((other) => other.name === item.name) === index)
     .map((item) => { let content = ''; try { content = fs.readFileSync(item.skillFile, 'utf8'); } catch {}
       return { ...item, needsReview: /functions\.(exec|wait)|mcp__cua_repl|CODEX_HOME|codex app-server/.test(content) }; });
-  return { engine: 'claude', root: toolRoot(options.dataRoot), configPath: mcpPath(options.dataRoot),
-    skillsRoot: skillsRoot(options.dataRoot), skills: listSkills(skillsRoot(options.dataRoot)),
+  return { engine: options.toolEngine || 'claude', root: toolRoot(options.dataRoot, options.toolEngine), configPath: mcpPath(options.dataRoot, options.toolEngine),
+    skillsRoot: skillsRoot(options.dataRoot, options.toolEngine), skills: listSkills(skillsRoot(options.dataRoot, options.toolEngine)),
     mcpServers: Object.entries(config.mcpServers).map(([name, raw]) => ({ name, type: raw.type || 'stdio',
       command: raw.command || '', url: raw.url || '', configured: true,
       commandAvailable: raw.command ? Boolean(resolveCommandPath(raw.command)) : null })),
@@ -81,11 +86,11 @@ function migrateClaudeCapabilities(selection, options) {
   const sourceFile = path.join(options.sourceCodexHome, 'config.toml');
   const sourceConfig = (selection.mcp || []).length ? TOML.parse(fs.readFileSync(sourceFile, 'utf8')) : {};
   for (const name of new Set(selection.mcp || [])) if (!sourceConfig.mcp_servers?.[name]) throw new Error(`源 MCP 不存在：${name}`);
-  const config = readMcp(options.dataRoot);
-  fs.mkdirSync(skillsRoot(options.dataRoot), { recursive: true });
+  const config = readMcp(options.dataRoot, options.toolEngine);
+  fs.mkdirSync(skillsRoot(options.dataRoot, options.toolEngine), { recursive: true });
   for (const source of sources) {
     const name = source.name;
-    const target = path.join(skillsRoot(options.dataRoot), name);
+    const target = path.join(skillsRoot(options.dataRoot, options.toolEngine), name);
     if (fs.existsSync(target)) { skipped.push({ name, reason: '目标技能已存在，保留现有内容' }); continue; }
     fs.symlinkSync(source.realPath || source.path, target, process.platform === 'win32' ? 'junction' : 'dir');
     const content = fs.readFileSync(source.skillFile, 'utf8');

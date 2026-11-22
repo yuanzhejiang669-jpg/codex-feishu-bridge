@@ -4,7 +4,7 @@ import readline from 'node:readline';
 
 const EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
 
-export function claudeEnvironment(environment, { home, provider }) {
+export function claudeEnvironment(environment, { home, provider, toolHome = home }) {
   const env = { ...environment };
   for (const key of Object.keys(env)) {
     if (/^(ANTHROPIC_|CLAUDE_PROVIDER_)/.test(key)
@@ -13,14 +13,18 @@ export function claudeEnvironment(environment, { home, provider }) {
   }
   if (!provider?.apiKey) throw new Error('Claude Provider API Key 不可用');
   env.CLAUDE_CONFIG_DIR = home;
+  env.CFB_CLAUDE_BOT_HOME = toolHome;
   env.ANTHROPIC_BASE_URL = String(provider.baseUrl).replace(/\/+$/, '').replace(/\/v1$/, '');
   env[provider.auth === 'x-api-key' ? 'ANTHROPIC_API_KEY' : 'ANTHROPIC_AUTH_TOKEN'] = provider.apiKey;
   env.ANTHROPIC_DEFAULT_HAIKU_MODEL = provider.model;
+  env.CLAUDE_CODE_MAX_RETRIES ??= '2';
+  env.PYTHONUTF8 ??= '1';
+  env.PYTHONIOENCODING ??= 'utf-8';
   return env;
 }
 
 export function claudeArguments({ sessionId, resume, model, effort = 'high', permissionMode = 'manual',
-  mcpConfigs = [], disableMcp = false, allowedTools = [], tools, additionalDirectories = [] }) {
+  mcpConfigs = [], disableMcp = false, allowedTools = [], tools, additionalDirectories = [], persistSession = true }) {
   if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(sessionId || '')) throw new Error('Claude session ID 无效');
   if (!model || /[\r\n\0]/.test(model)) throw new Error('Claude 模型无效');
   if (!EFFORTS.has(effort)) throw new Error('Claude 思考强度无效');
@@ -29,6 +33,7 @@ export function claudeArguments({ sessionId, resume, model, effort = 'high', per
     '--include-partial-messages', '--permission-prompt-tool', 'stdio', '--permission-mode', permissionMode,
     '--model', model, '--effort', effort, resume ? '--resume' : '--session-id', sessionId];
   if (permissionMode === 'bypassPermissions') args.push('--dangerously-skip-permissions');
+  if (!persistSession) args.push('--no-session-persistence');
   if (allowedTools.length) args.push('--allowedTools', allowedTools.join(','));
   if (tools !== undefined) args.push('--tools', tools);
   if (additionalDirectories.length) args.push('--add-dir', ...additionalDirectories);
@@ -42,26 +47,71 @@ function toolResultText(content) {
   return (Array.isArray(content) ? content : []).map((item) => item.text || `[${item.type || 'content'}]`).join('\n');
 }
 
+function apiRetryEvent(message) {
+  const error = message.error || {};
+  const text = typeof error === 'string' ? error : String(error.message || JSON.stringify(error));
+  const status = Number(message.error_status || message.status_code || message.statusCode || error.status || error.status_code
+    || text.match(/(?:API Error:|HTTP|"status"\s*:)\s*(\d{3})/i)?.[1]) || null;
+  return { type: 'api_retry', statusCode: status,
+    attempt: Math.max(0, Number(message.attempt ?? message.retryAttempt) || 0),
+    maxRetries: Math.max(0, Number(message.max_retries ?? message.maxRetries) || 0),
+    delayMs: Math.max(0, Number(message.retry_delay_ms ?? message.retryInMs) || 0),
+    message: status ? `上游 API 返回 HTTP ${status}` : '上游 API 请求失败' };
+}
+
 export class ClaudeCliClient {
-  constructor({ command, cwd, home, provider, sessionId = crypto.randomUUID(), resume = false,
+  constructor({ command, cwd, home, toolHome = home, provider, sessionId = crypto.randomUUID(), resume = false,
     model = provider?.model, effort = 'high', permissionMode = 'manual', mcpConfigs = [],
     disableMcp = false, allowedTools = [], tools, additionalDirectories = [], environment = process.env, spawnProcess = spawn,
+    persistSession = true, dispatchCommand = false,
     onEvent = () => {}, onPermission = async () => false, onSession = () => {},
-    onStarted = () => {}, onClosed = () => {}, totalTimeoutMs = 0, idleTimeoutMs = 60 * 60_000 }) {
-    Object.assign(this, { command, cwd, home, provider, sessionId, resume, model, effort, permissionMode,
-      mcpConfigs, disableMcp, allowedTools, tools, additionalDirectories, environment, spawnProcess, onEvent, onPermission,
-      onSession, onStarted, onClosed, totalTimeoutMs, idleTimeoutMs });
+    onStarted = () => {}, onClosed = () => {}, totalTimeoutMs = 0, idleTimeoutMs = 60 * 60_000,
+    upstreamTimeoutMs = 4 * 60_000, compactionTimeoutMs = 10 * 60_000 }) {
+    Object.assign(this, { command, cwd, home, toolHome, provider, sessionId, resume, model, effort, permissionMode,
+      mcpConfigs, disableMcp, allowedTools, tools, additionalDirectories, environment, spawnProcess, persistSession, dispatchCommand, onEvent, onPermission,
+      onSession, onStarted, onClosed, totalTimeoutMs, idleTimeoutMs, upstreamTimeoutMs, compactionTimeoutMs });
     this.pendingControls = new Set();
     this.seenTools = new Map();
+    this.pendingTools = new Set();
     this.streamedMessages = new Set();
+    this.pendingInputs = new Set();
     this.messageId = '';
     this.stopped = false;
     this.closed = false;
   }
 
+  waitForUpstream() {
+    clearTimeout(this.upstreamTimer);
+    if (!(this.upstreamTimeoutMs > 0) || this.pendingTools.size) return;
+    const waitMs = this.compacting ? Math.max(this.compactionTimeoutMs, this.upstreamTimeoutMs) : this.upstreamTimeoutMs;
+    this.upstreamTimer = setTimeout(() => {
+      this.upstreamTimedOut = true;
+      this.upstreamTimedOutMs = waitMs;
+      this.interrupt();
+      this.child?.kill();
+    }, waitMs);
+    this.upstreamTimer.unref?.();
+  }
+
+  pauseUpstreamWait() { clearTimeout(this.upstreamTimer); }
+
   write(message) {
-    if (!this.child?.stdin?.writable) throw new Error('Claude Code 控制通道已关闭');
+    if (!this.child?.stdin?.writable || this.child.stdin.writableEnded || this.closed) throw new Error('Claude Code 控制通道已关闭');
     this.child.stdin.write(`${JSON.stringify(message)}\n`);
+  }
+
+  sendInput(content, { nativeCommand = false, priority } = {}) {
+    const uuid = crypto.randomUUID();
+    this.write({ type: 'user', session_id: this.sessionId, parent_tool_use_id: null,
+      uuid, client_composed: !nativeCommand, ...(priority ? { priority } : {}), message: { role: 'user', content } });
+    this.pendingInputs.add(uuid);
+    return uuid;
+  }
+
+  steer(content) {
+    if (!this.initialized || this.result || this.stopped || this.closed) throw new Error('当前 Claude 任务尚未就绪或已结束，请稍后重试');
+    this.hasSteered = true;
+    return this.sendInput(content, { priority: 'next' });
   }
 
   interrupt() {
@@ -78,6 +128,8 @@ export class ClaudeCliClient {
         error: `Unsupported host request: ${request.subtype}` } });
       return;
     }
+    this.pauseUpstreamWait();
+    if (request.tool_use_id) this.pendingTools.add(request.tool_use_id);
     this.pendingControls.add(requestId);
     try {
       let allowed = false;
@@ -107,24 +159,50 @@ export class ClaudeCliClient {
       this.onEvent({ type: 'permission_cancelled', id: message.request_id });
       return;
     }
+    if (message.type === 'system' && ['api_retry', 'api_error'].includes(message.subtype)) {
+      this.lastUpstreamError = apiRetryEvent(message);
+      this.onEvent(this.lastUpstreamError);
+      return;
+    }
+    if (message.type === 'system' && message.subtype === 'status') {
+      if (message.status === 'compacting' && !this.compacting) {
+        this.compacting = true;
+        this.waitForUpstream();
+        this.onEvent({ type: 'compacting_started' });
+      } else if (message.status == null && this.compacting) {
+        this.compacting = false;
+        this.waitForUpstream();
+      }
+      return;
+    }
     if (message.type === 'system' && message.subtype === 'init') {
+      this.initialized = true;
       if (message.session_id) this.sessionId = message.session_id;
       await this.onSession(this.sessionId);
       this.onEvent({ type: 'initialized', sessionId: this.sessionId, model: message.model,
         version: message.claude_code_version || '', permissionMode: message.permissionMode || '',
         tools: message.tools || [], mcpServers: message.mcp_servers || [], skills: message.skills || [] });
     } else if (message.type === 'system' && message.subtype === 'compact_boundary') {
+      this.compacting = false;
+      this.waitForUpstream();
       this.onEvent({ type: 'compacted', at: Date.now(), metadata: message.compact_metadata });
     } else if (message.type === 'stream_event') {
       const event = message.event || {};
       if (event.type === 'message_start') {
+        this.waitForUpstream();
+        this.onEvent({ type: 'model_progress' });
         this.messageId = event.message?.id || crypto.randomUUID();
         const usage = event.message?.usage;
         if (usage) this.onEvent({ type: 'context', usedTokens: Number(usage.input_tokens || 0)
           + Number(usage.cache_creation_input_tokens || 0) + Number(usage.cache_read_input_tokens || 0) });
       } else if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
+        this.waitForUpstream();
         this.streamedMessages.add(this.messageId);
         this.onEvent({ type: 'text_delta', text: event.delta.text || '' });
+      } else if (event.type === 'content_block_delta'
+          && ['thinking_delta', 'input_json_delta'].includes(event.delta?.type)) {
+        this.waitForUpstream();
+        this.onEvent({ type: 'model_progress' });
       } else if (event.type === 'content_block_start' && event.content_block?.type === 'tool_use') {
         const tool = event.content_block;
         if (!this.seenTools.has(tool.id)) {
@@ -133,10 +211,18 @@ export class ClaudeCliClient {
         }
       }
     } else if (message.type === 'assistant') {
+      if (message.isApiErrorMessage || (message.error && message.message?.model === '<synthetic>')) {
+        this.lastUpstreamError = apiRetryEvent({ error: { message: toolResultText(message.message?.content) } });
+        this.onEvent(this.lastUpstreamError);
+        return;
+      }
+      this.waitForUpstream();
       for (const block of message.message?.content || []) {
         if (block.type === 'text' && !this.streamedMessages.has(message.message?.id)) {
           this.onEvent({ type: 'text_delta', text: block.text || '' });
         } else if (block.type === 'tool_use') {
+          this.pendingTools.add(block.id);
+          this.pauseUpstreamWait();
           const exists = this.seenTools.has(block.id);
           this.seenTools.set(block.id, block.name);
           this.onEvent({ type: exists ? 'tool_update' : 'tool_start', id: block.id, name: block.name, input: block.input || {} });
@@ -144,11 +230,25 @@ export class ClaudeCliClient {
       }
     } else if (message.type === 'user') {
       for (const block of Array.isArray(message.message?.content) ? message.message.content : []) {
-        if (block.type === 'tool_result') this.onEvent({ type: 'tool_end', id: block.tool_use_id,
-          name: this.seenTools.get(block.tool_use_id) || 'tool',
-          output: toolResultText(block.content), error: Boolean(block.is_error) });
+        if (block.type === 'tool_result') {
+          this.pendingTools.delete(block.tool_use_id);
+          this.waitForUpstream();
+          this.onEvent({ type: 'tool_end', id: block.tool_use_id,
+            name: this.seenTools.get(block.tool_use_id) || 'tool',
+            output: toolResultText(block.content), error: Boolean(block.is_error) });
+        }
       }
     } else if (message.type === 'result') {
+      const answered = message.user_message_uuids || (message.user_message_uuid ? [message.user_message_uuid] : []);
+      if (this.hasSteered && !answered.length && !message.is_error) {
+        throw new Error('Claude CLI 未返回补充消息的处理标识，无法确认补充指令已处理；请更新 CLI 后重试');
+      }
+      for (const uuid of answered) this.pendingInputs.delete(uuid);
+      if (this.hasSteered && this.pendingInputs.size && !message.is_error) {
+        this.waitForUpstream();
+        return;
+      }
+      this.pauseUpstreamWait();
       this.result = message;
       this.onEvent({ type: 'result', result: message });
       this.child.stdin.end();
@@ -180,6 +280,7 @@ export class ClaudeCliClient {
     }, this.totalTimeoutMs) : null;
     total?.unref?.();
     touch();
+    this.waitForUpstream();
     this.child.stderr.on('data', (chunk) => { touch(); stderr = (stderr + chunk).slice(-1_048_576); });
     this.child.stdin.on('error', () => {});
     const lines = readline.createInterface({ input: this.child.stdout, crlfDelay: Infinity });
@@ -198,13 +299,19 @@ export class ClaudeCliClient {
     });
     try {
       // This is the native CLI's SDK control protocol, not a replacement agent loop.
-      this.write({ type: 'user', session_id: this.sessionId, parent_tool_use_id: null,
-        uuid: crypto.randomUUID(), client_composed: true, message: { role: 'user', content } });
+      if (this.dispatchCommand && /^\/compact(?:\s|$)/.test(typeof content === 'string' ? content : content[0]?.text || '')) {
+        this.compacting = true;
+        this.waitForUpstream();
+      }
+      this.sendInput(content, { nativeCommand: this.dispatchCommand });
       const status = await closed;
       await stream;
       if (status.error) throw new Error(redact(status.error.message));
       if (streamError) throw streamError;
       if (timedOut) throw new Error(timedOut);
+      if (this.upstreamTimedOut) throw Object.assign(
+        new Error(`上游连续 ${Math.round(this.upstreamTimedOutMs / 1000)} 秒没有产生新响应，本轮等待已结束。`),
+        { code: 'CLAUDE_UPSTREAM_TIMEOUT', engine: 'claude', statusCode: this.lastUpstreamError?.statusCode });
       if (this.stopped) throw Object.assign(new Error('Claude Code 已停止'), { code: 'USER_STOP' });
       if (!this.result || this.result.is_error || status.code !== 0) {
         throw new Error(redact(this.result?.errors?.join('; ') || this.result?.result
@@ -215,8 +322,10 @@ export class ClaudeCliClient {
       this.closed = true;
       if (!this.child.killed && this.child.exitCode === null) this.child.kill();
       clearTimeout(timer); clearTimeout(total);
+      this.pauseUpstreamWait();
       lines.close();
       this.pendingControls.clear();
+      this.pendingTools.clear();
       this.onClosed(this.child);
     }
   }

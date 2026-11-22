@@ -6,6 +6,7 @@ const { readManagedBots } = require("./bot-setup.cjs");
 const { normalizeReasoningEffort, resolveReasoningSelection } = require("./reasoning-effort.cjs");
 const { normalizeEngine } = require('./agent-engines.cjs');
 const { previewClaudeFactory } = require('./claude-bots.cjs');
+const { previewAntigravityFactory } = require('./antigravity.cjs');
 
 const SLUG_PATTERN = /^[a-z0-9][a-z0-9-]{0,59}$/;
 const NAME_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,62}[A-Za-z0-9])?$/;
@@ -103,6 +104,8 @@ function normalizeFactory(raw = {}, options = {}) {
 }
 
 function previewWorkspaceFactory(raw, options) {
+  if (normalizeEngine(raw.engine) === 'antigravity') return previewAntigravityFactory(raw, options,
+    [...(options.existingNames || []), ...readManagedBots(options.dataRoot).map((bot) => bot.name)]);
   if (normalizeEngine(raw.engine) === 'claude') return previewClaudeFactory(raw, options,
     [...(options.existingNames || []), ...readManagedBots(options.dataRoot).map((bot) => bot.name)]);
   const factory = normalizeFactory(raw, options);
@@ -157,7 +160,7 @@ function createWorkspaceFactoryQueue(raw, options) {
   }
   const preview = previewWorkspaceFactory(raw, options);
   if (!preview.available) throw new Error("创建方案存在冲突，请先查看预览");
-  if (preview.factory.engine === 'claude') {
+  if (['claude', 'antigravity'].includes(preview.factory.engine)) {
     const state = { schemaVersion: 2, status: 'pending', createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(), factory: preview.factory,
       bots: preview.bots.map((bot) => ({ ...bot, conflicts: undefined, status: 'pending', error: '', createdBot: null })) };
@@ -239,7 +242,8 @@ async function registerFactoryBot(name, options, onProgress = () => {}) {
   state.updatedAt = new Date().toISOString();
   atomicWrite(queuePath(options.dataRoot), `${JSON.stringify(state, null, 2)}\n`);
   try {
-    const registrationInput = state.factory.engine === 'claude' ? { ...bot, provider: state.factory.providerReference } : bot;
+    const registrationInput = ['claude', 'antigravity'].includes(state.factory.engine)
+      ? { ...bot, provider: state.factory.providerReference, permissionMode: state.factory.permissionMode } : bot;
     const created = await options.registerBot(registrationInput, options.registrationOptions, (progress) => {
       onProgress({ ...progress, botName: bot.name, botLabel: bot.label });
     });

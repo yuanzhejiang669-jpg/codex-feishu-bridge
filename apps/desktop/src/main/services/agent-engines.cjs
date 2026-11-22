@@ -16,7 +16,7 @@ function supportedClaudeVersion(version) {
 
 function normalizeEngine(value) {
   const engine = String(value || 'codex').trim().toLowerCase();
-  if (!['codex', 'claude'].includes(engine)) throw new Error(`执行内核无效：${engine}`);
+  if (!['codex', 'claude', 'antigravity'].includes(engine)) throw new Error(`执行内核无效：${engine}`);
   return engine;
 }
 

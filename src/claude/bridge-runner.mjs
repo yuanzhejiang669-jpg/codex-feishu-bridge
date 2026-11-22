@@ -4,6 +4,8 @@ import path from 'node:path';
 import { ClaudeCliClient } from './cli-client.mjs';
 import { writeJsonFileAtomicSync } from '../utils/json.mjs';
 import { feishuMcpConfiguration } from './feishu-tools.mjs';
+import { createClaudeSessionDeletion } from './session-deletion.mjs';
+import { createClaudeCommands } from './commands.mjs';
 
 const EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
 
@@ -25,12 +27,45 @@ export function claudeContent(text, attachments = []) {
   return content.length ? content : [{ type: 'text', text: '(attachment only)' }];
 }
 
-export function createClaudeBridge({ config, getSession, getChatState, resetSession, saveSessions,
+export function createClaudeBridge({ config, getSession, getChatState, getChats, resetSession, saveSessions,
   userText, sendText, sendMarkdown, activeChildren, activeJobs, appendText, reduceEvent,
   markPhase, ensureDone, markInterrupted, markError, terminateProcessTree, log,
+  queueSummary, refreshModels, sharedSessions,
   createClient = (options) => new ClaudeCliClient(options) }) {
   const permissions = new Map();
   const permissionTimers = new Set();
+  const commandJobs = new Set();
+  const listViews = new Map();
+  const viewKey = (event) => JSON.stringify([event.chat_id, event.sender_id || '']);
+  function resolveSession(event, target) {
+    const chat = getChatState(event.chat_id);
+    if (/^[1-9]\d*$/.test(target)) {
+      const view = listViews.get(viewKey(event));
+      const id = view && Date.now() - view.at < 5 * 60_000 ? view.ids[Number(target) - 1] : chat.sessions[Number(target) - 1]?.id;
+      return chat.sessions.find((s) => s.id === id);
+    }
+    return chat.sessions.find((s) => s.id === target || s.claudeSessionId === target);
+  }
+  const sessionDeletion = createClaudeSessionDeletion({ config, getChatState, getChats, saveSessions, activeJobs, sharedSessions });
+  const commands = createClaudeCommands({ config, settings, botConfiguration, providers, saveSessions,
+    activeJobs, getChatState, getSession, queueSummary, refreshModels, sharedSessions, resolveSession,
+    testModel: async (event, session, model) => {
+      const selected = settings(session);
+      const definition = providers().find((p) => p.id === selected.provider);
+      const started = Date.now();
+      const client = createClient({ command: config.claudeCli.command, cwd: config.workspace, home: config.claudeHome,
+        provider: { ...definition, model, apiKey: process.env[definition.envKey] }, model, effort: selected.reasoning,
+        disableMcp: true, tools: '', persistSession: false, permissionMode: selected.permissionMode,
+        totalTimeoutMs: 90_000, upstreamTimeoutMs: 60_000,
+        onStarted: (child) => {
+          activeChildren.set(child.pid, { child, label: 'Claude model test' });
+          activeJobs.set(event.chat_id, { pid: child.pid, mode: 'claude', client, sessionId: session.id, startedAt: started });
+        },
+        onClosed: (child) => { activeChildren.delete(child.pid); if (activeJobs.get(event.chat_id)?.pid === child.pid) activeJobs.delete(event.chat_id); },
+      });
+      const result = await client.run([{ type: 'text', text: 'Reply only OK.' }]);
+      return { text: String(result.result || '').slice(0, 200), durationMs: Date.now() - started };
+    } });
 
   function botConfiguration() {
     if (!config.claudeBotConfig) return {};
@@ -74,7 +109,7 @@ export function createClaudeBridge({ config, getSession, getChatState, resetSess
     }
   }
 
-  async function run(event, session, state, onState) {
+  async function run(event, session, state, onState, contentOverride) {
     if (session.engine && session.engine !== 'claude') throw new Error('该会话属于其他内核，请新建 Claude 会话');
     const selected = settings(session);
     const definition = providers().find((item) => item.id === selected.provider);
@@ -91,16 +126,32 @@ export function createClaudeBridge({ config, getSession, getChatState, resetSess
     const schedule = () => { if (!flushTimer) flushTimer = setTimeout(() => { void flush().catch(() => {}); }, 100); };
     let contextTokens = null;
     const sessionId = session.claudeSessionId || crypto.randomUUID();
-    const client = createClient({ command: config.claudeCli.command, cwd: config.workspace,
-      home: config.claudeHome, provider: { ...definition, model: selected.model, apiKey },
+    const text = contentOverride ?? userText(event.content);
+    const nativeHome = sharedSessions ? sharedSessions.sessionHome(session) : config.claudeHome;
+    const workspace = sharedSessions ? session.claudeWorkspace || config.workspace : config.workspace;
+    const sharedMcpFile = config.claudeToolsRoot ? path.join(config.claudeToolsRoot, '.mcp.json') : '';
+    let sharedMcpConfig = sharedMcpFile;
+    if (sharedSessions && !config.disableMcp && sharedMcpFile && fs.existsSync(sharedMcpFile)) {
+      const mcp = JSON.parse(fs.readFileSync(sharedMcpFile, 'utf8'));
+      const cloak = mcp.mcpServers?.cloakbrowser;
+      if (cloak) cloak.env = { ...cloak.env,
+        PLAYWRIGHT_MCP_USER_DATA_DIR: path.join(config.claudeHome, 'browser-profiles', 'cloakbrowser'),
+        PLAYWRIGHT_MCP_OUTPUT_DIR: path.join(config.claudeHome, 'browser-output', 'cloakbrowser') };
+      sharedMcpConfig = JSON.stringify(mcp);
+    }
+    const releaseSession = sharedSessions?.acquire(session);
+    let client;
+    try { client = createClient({ command: config.claudeCli.command, cwd: workspace,
+      home: nativeHome, toolHome: config.claudeHome, provider: { ...definition, model: selected.model, apiKey },
       sessionId, resume: Boolean(session.claudeSessionId), model: selected.model, effort: selected.reasoning,
       permissionMode: selected.permissionMode, disableMcp: config.disableMcp,
       allowedTools: ['Read', 'Glob', 'Grep', 'LS', 'Skill', 'mcp__feishu_bridge__current_conversation'],
-      additionalDirectories: config.claudeToolsRoot && fs.existsSync(config.claudeToolsRoot) ? [config.claudeToolsRoot] : [],
-      mcpConfigs: [config.claudeToolsRoot ? path.join(config.claudeToolsRoot, '.mcp.json') : '',
-        path.join(config.claudeHome, '.mcp.json'), path.join(config.workspace, '.mcp.json')].filter((file) => file && fs.existsSync(file))
-        .concat(config.larkCli ? [feishuMcpConfiguration(config, event)] : []),
+      additionalDirectories: [config.claudeToolsRoot, workspace !== config.workspace ? config.workspace : ''].filter((dir) => dir && fs.existsSync(dir)),
+      mcpConfigs: [sharedMcpFile && fs.existsSync(sharedMcpFile) ? sharedMcpConfig : '',
+        ...[path.join(config.claudeHome, '.mcp.json'), path.join(workspace, '.mcp.json')].filter((file) => fs.existsSync(file))].filter(Boolean)
+        .concat(config.larkCli ? [feishuMcpConfiguration({ ...config, workspace }, event)] : []),
       totalTimeoutMs: config.codexTimeoutMs, idleTimeoutMs: config.codexIdleTimeoutMs,
+      dispatchCommand: /^\/[\w:-]+(?:\s|$)/u.test(text),
       onSession: (id) => { session.engine = 'claude'; session.claudeSessionId = id; saveSessions(); },
       onPermission: (request) => requestPermission(event, request),
       onStarted: (child) => {
@@ -113,18 +164,35 @@ export function createClaudeBridge({ config, getSession, getChatState, resetSess
         if (item.type === 'permission_cancelled') {
           for (const [token, pending] of permissions) if (pending.id === item.id) { pending.resolve(false); permissions.delete(token); }
         }
+        if (item.type === 'compacted') {
+          session.lastCompactedAt = item.at;
+          session.lastContextUsage = null;
+          if (state) state.meta.contextUsage = null;
+          saveSessions();
+        }
         if (!state) return;
-        if (item.type === 'initialized') {
+        if (item.type === 'api_retry') {
+          state.meta.upstreamRetry = { statusCode: item.statusCode, attempt: item.attempt,
+            maxRetries: item.maxRetries, delayMs: item.delayMs, at: Date.now(), provider: definition.name || selected.provider };
+          markPhase(state, 'reconnecting', { connection: 'connected', retryAttempt: item.attempt, progress: false });
+          log?.('WARN', 'Claude upstream request retry', { provider: selected.provider,
+            statusCode: item.statusCode, attempt: item.attempt, maxRetries: item.maxRetries, delayMs: item.delayMs });
+        } else if (item.type === 'model_progress') {
+          delete state.meta.upstreamRetry;
+          markPhase(state, 'model_thinking', { connection: 'connected' });
+          if (state.activity) state.activity.lastModelEventAt = Date.now();
+        } else if (item.type === 'initialized') {
           state.threadId = item.sessionId;
           state.meta.engine = 'claude'; state.meta.model = item.model || selected.model;
           writeJsonFileAtomicSync(path.join(config.stateDir, 'claude-runtime.json'), {
             engine: 'claude', pid: client.child.pid, sessionId: item.sessionId,
             version: item.version, model: item.model, permissionMode: item.permissionMode,
             tools: item.tools, mcpServers: item.mcpServers, skills: item.skills,
-            configHome: config.claudeHome, observedAt: new Date().toISOString(),
+            configHome: nativeHome, botConfigHome: config.claudeHome, workspace, observedAt: new Date().toISOString(),
           });
           markPhase(state, 'model_thinking', { connection: 'connected' });
         } else if (item.type === 'text_delta') {
+          delete state.meta.upstreamRetry;
           appendText(state, item.text);
           markPhase(state, 'model_streaming', { connection: 'connected' });
         } else if (item.type === 'tool_start') {
@@ -139,9 +207,11 @@ export function createClaudeBridge({ config, getSession, getChatState, resetSess
           contextTokens = item.usedTokens;
           session.lastContextUsage = { usedTokens: contextTokens, contextWindow: null, percent: null, updatedAt: Date.now() };
           state.meta.contextUsage = session.lastContextUsage;
+        } else if (item.type === 'compacting_started') {
+          markPhase(state, 'compacting', { connection: 'connected' });
         } else if (item.type === 'compacted') {
           session.lastCompactedAt = item.at; state.meta.compactedAt = item.at;
-          markPhase(state, 'compacting', { connection: 'connected' });
+          markPhase(state, 'model_thinking', { connection: 'connected' });
         } else if (item.type === 'result') {
           const usage = item.result.usage || {};
           state.meta.inputTokens = Number(usage.input_tokens || 0) + Number(usage.cache_read_input_tokens || 0)
@@ -153,18 +223,20 @@ export function createClaudeBridge({ config, getSession, getChatState, resetSess
         }
         schedule();
       },
-    });
+    }); } catch (error) { releaseSession?.(); throw error; }
     try {
       if (state) { state.meta.engine = 'claude'; markPhase(state, 'model_thinking', { connection: 'starting' }); await flush(); }
-      const result = await client.run(claudeContent(userText(event.content), event.attachments));
+      const result = await client.run(claudeContent(text, event.attachments));
       if (state) { ensureDone(state, result.result || ''); state.meta.durationMs = Date.now() - startedAt; await flush(); }
       return { text: result.result || '(Claude 没有返回文字)', durationMs: Date.now() - startedAt,
         tokens: `${state?.meta?.inputTokens || 0}↑ ${state?.meta?.outputTokens || 0}↓` };
     } catch (error) {
+      if (error && typeof error === 'object') error.engine = 'claude';
       if (state) { if (error.code === 'USER_STOP') markInterrupted(state); else markError(state, error); await flush(); }
       throw error;
     } finally {
       clearTimeout(flushTimer);
+      releaseSession?.();
       for (const [token, pending] of permissions) if (pending.sessionId === sessionId) {
         permissions.delete(token); pending.resolve(false);
       }
@@ -177,6 +249,8 @@ export function createClaudeBridge({ config, getSession, getChatState, resetSess
     const session = getSession(chatId);
     const reply = (text) => sendMarkdown(chatId, text, `claude-${command.name.slice(1)}`, messageId);
     const chat = getChatState(chatId);
+    if (await sessionDeletion.handle(event, command, reply)) return true;
+    if (await commands.handle(event, command, reply)) return true;
     if (['/approve', '/deny'].includes(command.name)) {
       const pending = permissions.get(command.rest.trim());
       if (!pending || pending.chatId !== chatId || (pending.senderId && pending.senderId !== event.sender_id)) {
@@ -186,56 +260,64 @@ export function createClaudeBridge({ config, getSession, getChatState, resetSess
     }
     if (command.name === '/new') { const next = resetSession(chatId, command.rest || '新会话'); await reply(`已创建 Claude 会话：${next.title} (${next.id})`); return true; }
     if (['/sessions', '/list'].includes(command.name)) {
-      await reply(chat.sessions.map((item, i) => `${i+1}. ${item.id === chat.currentSessionId ? '当前 · ' : ''}${item.title} (${item.id})`).join('\n')); return true;
+      listViews.set(viewKey(event), { ids: chat.sessions.map((s) => s.id), at: Date.now() });
+      sessionDeletion.rememberList(event, chat.sessions);
+      await reply((sharedSessions ? '**Claude 共享会话库 · 所有 Claude Bot 可切换续接**\n\n' : '')
+        + chat.sessions.map((item, i) => `${i+1}. ${item.id === chat.currentSessionId ? '当前 · ' : ''}${item.title} (${item.id})${sharedSessions ? ` · 来自 ${item.claudeOriginBot || 'Claude'}` : ''}`).join('\n')
+        + '\n\n使用 `/switch 序号或ID` 切换；`/rename 新标题` 或 `/rename 序号 新标题` 改名；`/new [标题]` 创建会话；`/delete 序号或ID` 预览删除，支持 `1 2`、`1-3`；按预览中的 `/confirm delete 序号或区间` 确认。'); return true;
     }
     if (command.name === '/switch') {
       if (activeJobs.has(chatId)) throw new Error('请在当前任务结束后切换会话');
-      const target = chat.sessions[Number(command.rest)-1] || chat.sessions.find((item) => item.id === command.rest);
+      const target = resolveSession(event, command.rest);
       if (!target) throw new Error('Claude 会话不存在');
+      sharedSessions?.assertIdle(target);
       chat.currentSessionId = target.id; saveSessions(); await reply(`当前 Claude 会话：${target.title} (${target.id})`); return true;
     }
-    if (command.name === '/rename') { if (!command.rest.trim()) throw new Error('请输入会话名称'); session.title = command.rest.trim().slice(0,120); saveSessions(); await reply(`会话已命名为：${session.title}`); return true; }
     if (command.name === '/reset') {
       if (activeJobs.has(chatId)) throw new Error('请先停止当前任务');
-      session.claudeSessionId = ''; session.messages = []; session.lastContextUsage = null; session.lastTokenUsage = null; saveSessions(); await reply('已重置当前 Claude 会话的上下文绑定。'); return true;
+      const release = sharedSessions?.acquire(session, 'reset');
+      try {
+        session.claudeSessionId = ''; session.messages = []; session.lastContextUsage = null; session.lastTokenUsage = null;
+        session.lastCompactedAt = null; saveSessions();
+      } finally { release?.(); }
+      await reply(`已清空当前 Claude ${sharedSessions ? '共享' : ''}会话上下文。下一条普通消息从空白上下文开始。`); return true;
     }
-    if (['/status', '/context', '/how', '/now'].includes(command.name)) {
-      const selected = settings(session); const job = activeJobs.get(chatId);
-      await reply(`内核：Claude Code CLI\nBot：${config.larkProfile}\n会话：${session.title} (${session.id})\n`
-        + `Provider：${selected.provider}\n模型：${selected.model}\n思考强度：${selected.reasoning}\n`
-        + `权限模式：${selected.permissionMode === 'bypassPermissions' ? '完全授权（bypassPermissions）' : selected.permissionMode}\n`
-        + `任务：${job ? '运行中' : '空闲'}\n当前请求上下文：${session.lastContextUsage?.usedTokens ?? '未知'} tokens\n`
-        + `压缩阈值：由 Claude Code 管理，Bridge 未获得精确阈值\nMCP／Skills：${config.claudeHome}`); return true;
+    if (command.name === '/compact') {
+      if (activeJobs.size || commandJobs.size) throw new Error('当前 Claude 任务还在运行，请等这一轮结束或先 /stop，再 /compact');
+      if (!session.claudeSessionId) { await reply('当前会话尚无 Claude 原生聊天记录，先发送一条普通消息再 /compact。'); return true; }
+      sharedSessions?.assertIdle(session);
+      commandJobs.add(chatId);
+      const previous = session.lastCompactedAt;
+      try {
+        await reply('开始压缩当前 Claude 原生会话。');
+        const result = await run(event, session, null, null, `/compact${command.rest ? ` ${command.rest}` : ''}`);
+        await reply(session.lastCompactedAt !== previous
+          ? `Claude 上下文已压缩。\n时间：${new Date(session.lastCompactedAt).toLocaleString('zh-CN')}\n耗时：${Math.round(result.durationMs / 1000)} 秒`
+          : `本次未发生压缩：${result.text}`);
+      } finally { commandJobs.delete(chatId); }
+      return true;
     }
-    if (command.name === '/provider') {
-      const target = command.rest.trim();
-      if (!target || target === 'list') { await reply(providers().map((p) => `${p.id} · ${p.name} · ${p.baseUrl}`).join('\n') || '尚无 Claude Provider'); return true; }
-      if (activeJobs.has(chatId)) throw new Error('请在当前任务结束后更换渠道');
-      const provider = providers().find((p) => p.id === target);
-      if (!provider || !process.env[provider.envKey]) throw new Error('Claude 渠道或密钥不可用，请在客户端配置并应用');
-      session.providerOverride = target; session.modelOverride = provider.model; session.reasoningOverride = provider.effort; saveSessions(); await reply(`当前会话使用 Claude 渠道 ${provider.name}`); return true;
+    if (command.name === '/steer') {
+      const job = activeJobs.get(chatId);
+      if (!command.rest.trim() && !event.attachments?.length) { await reply('用法：/steer <要追加到当前任务的补充指令>'); return true; }
+      if (!job || job.mode !== 'claude' || !job.client?.steer) { await reply('当前没有可追加指令的 Claude 任务。'); return true; }
+      const failed = event.attachmentDownload?.failed;
+      if (failed?.image || failed?.file) throw new Error('附件下载不完整，本次补充指令未发送，请重试');
+      job.client.steer(claudeContent(command.rest, event.attachments));
+      const running = chat.sessions.find((s) => s.id === job.sessionId);
+      if (running) {
+        running.messages ||= []; running.messages.push({ role: 'user', content: command.rest, at: Date.now() }); saveSessions();
+      }
+      await reply('已将补充指令发送到当前 Claude 任务，在工具调用结束后读取；不会另开会话。'); return true;
     }
-    if (command.name === '/model') {
-      const provider = providers().find((p) => p.id === settings(session).provider);
-      const target = command.rest.trim();
-      if (!target || target === 'list') { await reply(`当前模型：${settings(session).model}\n可选模型：\n${provider.models.join('\n')}`); return true; }
-      if (activeJobs.has(chatId)) throw new Error('请在当前任务结束后更换模型');
-      if (!provider.models.includes(target)) throw new Error('模型不在该渠道已发现的列表中，请先在客户端刷新');
-      session.modelOverride = target; saveSessions(); await reply(`Claude 模型已切换为 ${target}`); return true;
-    }
-    if (command.name === '/effort') {
-      if (!EFFORTS.has(command.rest)) throw new Error('可用强度：low、medium、high、xhigh、max');
-      session.reasoningOverride = command.rest; saveSessions(); await reply(`Claude 思考强度：${command.rest}`); return true;
-    }
-    if (command.name === '/help') {
-      await reply('Claude Code CLI\n\n/new · /list · /switch 序号 · /rename 名称 · /reset\n/status · /context · /model list · /model 模型\n/provider list · /provider 渠道 · /effort high\n/stop · /stopall · /queue · /approve 请求码 · /deny 请求码\n\n消息正文原样交给 Claude Code；附件信息另附。'); return true;
-    }
-    if (['/goal', '/fast', '/compact', '/delete', '/del', '/rm', '/confirm', '/steer'].includes(command.name)) {
-      await reply('该命令尚未映射到 Claude Code。普通消息、会话管理和 /stop 可用；压缩由原生 CLI 自动管理。'); return true;
+    if (['/goal', '/fast'].includes(command.name)) {
+      await reply(command.name === '/goal'
+        ? 'Codex 原生 Goal 是 Codex 专属能力，当前 Claude CLI 未接入等价接口。可直接发送目标让 Claude 执行。'
+        : 'Codex Fast 是 Codex 专属服务档位，不能直接应用于 Claude 渠道。当前 Claude 模型和思考强度保持原设置。'); return true;
     }
     return false;
   }
 
-  function close() { for (const pending of permissions.values()) pending.resolve(false); permissions.clear(); for (const timer of permissionTimers) clearTimeout(timer); }
+  function close() { listViews.clear(); sessionDeletion.close(); for (const pending of permissions.values()) pending.resolve(false); permissions.clear(); for (const timer of permissionTimers) clearTimeout(timer); }
   return { run, settings, handleCommand, close };
 }

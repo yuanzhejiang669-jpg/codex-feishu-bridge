@@ -1,6 +1,6 @@
 const path = require('node:path');
 
-const ENGINES = Object.freeze({ codex: 'Codex', claude: 'Claude Code CLI' });
+const ENGINES = Object.freeze({ codex: 'Codex', claude: 'Claude Code CLI', antigravity: 'Antigravity CLI' });
 
 function normalizeEngine(value) {
   const engine = String(value || 'codex').trim().toLowerCase();
@@ -9,6 +9,7 @@ function normalizeEngine(value) {
 }
 
 function agentHome(bot, fallback = '') {
+  if (normalizeEngine(bot?.engine) === 'antigravity') return String(bot.antigravityHome || fallback);
   return normalizeEngine(bot?.engine) === 'claude'
     ? String(bot.claudeHome || fallback)
     : String(bot?.codexHome || fallback);

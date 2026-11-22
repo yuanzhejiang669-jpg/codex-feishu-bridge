@@ -21,7 +21,7 @@ function loginManager(options) {
 }
 
 function bindings(options) {
-  return readManagedBots(options.dataRoot).filter((bot) => bot.engine !== 'claude').map((bot) => ({
+  return readManagedBots(options.dataRoot).filter((bot) => !['claude', 'antigravity'].includes(bot.engine)).map((bot) => ({
     codexHome: bot.codexHome || options.defaultCodexHome,
     source: "desktop",
     bot: { name: bot.name, label: bot.label || bot.name, owner: "desktop" },
@@ -49,7 +49,7 @@ function botStates(home, options) {
   const target = shared.canonicalPath(home.codexHome).toLowerCase();
   const inspect = options.inspectBots || inspectManagedBots;
   return inspect(options.dataRoot, options.localAppData)
-    .filter((bot) => bot.engine !== 'claude' && shared.canonicalPath(bot.codexHome || options.defaultCodexHome).toLowerCase() === target)
+    .filter((bot) => !['claude', 'antigravity'].includes(bot.engine) && shared.canonicalPath(bot.codexHome || options.defaultCodexHome).toLowerCase() === target)
     .map((bot) => ({
       name: bot.name,
       label: bot.label || bot.name,

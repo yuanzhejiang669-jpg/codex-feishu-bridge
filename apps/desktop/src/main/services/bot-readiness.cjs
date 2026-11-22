@@ -42,6 +42,12 @@ async function queryJson(runCli, tool, args, profileHome) {
 }
 
 function providerCheck(bot, currentProvider = {}, codexLoginState = "unknown") {
+  if (bot.engine === 'antigravity') {
+    const provider = (currentProvider.providers || []).find((item) => item.id === bot.provider?.id);
+    const available = provider && (provider.mode === 'official' || provider.credentialAvailable);
+    return { id: 'provider', label: 'Antigravity 渠道', status: available ? 'good' : 'bad',
+      detail: available ? `${provider.name || provider.id} / ${bot.provider.model || provider.model || '原生默认'}${provider.mode === 'official' ? '；官方登录需原生生成验证' : ''}` : 'Antigravity 渠道或密钥不可用' };
+  }
   if (bot.engine === 'claude') {
     const provider = (currentProvider.providers || []).find((item) => item.id === bot.provider?.id);
     return { id: 'provider', label: 'Claude Provider', status: provider?.credentialAvailable ? 'good' : 'bad',
@@ -177,13 +183,13 @@ async function checkBotReadiness(name, options) {
         ? `已收到 ${REQUIRED_EVENT_KEYS.join(", ")}；最近验证于 ${messageEventTime || "已记录"}`
         : `Bridge 将监听 ${REQUIRED_EVENT_KEYS.join(", ")}；需要在飞书发送真实消息完成验证`,
     },
-    providerCheck(bot, bot.engine === 'claude' ? options.claudeProviders : options.currentProvider, options.codexLoginState),
+    providerCheck(bot, bot.engine === 'antigravity' ? options.antigravityProviders : bot.engine === 'claude' ? options.claudeProviders : options.currentProvider, options.codexLoginState),
     localCheck(
-      bot.engine === 'claude' ? 'claude' : 'codex',
-      bot.engine === 'claude' ? 'Claude Code CLI' : 'Codex 运行时',
-      Boolean(bot.engine === 'claude' ? options.claudeAvailable : options.codexAvailable),
-      `已检测到可用 ${bot.engine === 'claude' ? 'Claude Code CLI' : 'Codex 运行时'}`,
-      `未检测到可用 ${bot.engine === 'claude' ? 'Claude Code CLI' : 'Codex 运行时'}`,
+      bot.engine || 'codex',
+      bot.engine === 'antigravity' ? 'Antigravity CLI' : bot.engine === 'claude' ? 'Claude Code CLI' : 'Codex 运行时',
+      Boolean(bot.engine === 'antigravity' ? options.antigravityAvailable : bot.engine === 'claude' ? options.claudeAvailable : options.codexAvailable),
+      `已检测到可用 ${bot.engine === 'antigravity' ? 'Antigravity CLI' : bot.engine === 'claude' ? 'Claude Code CLI' : 'Codex 运行时'}`,
+      `未检测到可用 ${bot.engine === 'antigravity' ? 'Antigravity CLI' : bot.engine === 'claude' ? 'Claude Code CLI' : 'Codex 运行时'}`,
     ),
     localCheck(
       "engine",

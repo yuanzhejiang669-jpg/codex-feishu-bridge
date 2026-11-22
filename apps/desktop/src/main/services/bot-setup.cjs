@@ -8,6 +8,7 @@ const { prepareProviderConfiguration } = require("./provider-setup.cjs");
 const { discoverProviderCapacity, rememberCapacity } = require("./provider-capacity.cjs");
 const { normalizeEngine } = require('./agent-engines.cjs');
 const { previewClaudeBot, createClaudeBot } = require('./claude-bots.cjs');
+const { previewAntigravityBot, createAntigravityBot } = require('./antigravity.cjs');
 
 const NAME_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,62}[A-Za-z0-9])?$/;
 
@@ -52,6 +53,7 @@ function resolveBotCreationTarget(raw = {}, options = {}) {
 }
 
 function normalizeBotInput(raw = {}, { workspaceRoot, codexHomeRoot, defaultCodexHome } = {}) {
+  if (normalizeEngine(raw.engine) === 'antigravity') throw new Error('Antigravity Bot 必须通过专用创建流程配置');
   if (normalizeEngine(raw.engine) === 'claude') throw new Error('Claude Bot 必须通过 Claude 创建流程配置');
   const name = String(raw.name || "").trim();
   if (!NAME_PATTERN.test(name)) {
@@ -101,6 +103,7 @@ function readManagedBots(dataRoot) {
 }
 
 function previewBot(raw, options) {
+  if (normalizeEngine(raw.engine) === 'antigravity') return previewAntigravityBot(raw, options, readManagedBots(options.dataRoot).map((bot) => bot.name));
   if (normalizeEngine(raw.engine) === 'claude') return previewClaudeBot(raw, options, readManagedBots(options.dataRoot).map((bot) => bot.name));
   const resolved = resolveBotCreationTarget(raw, options);
   const bot = normalizeBotInput(resolved.input, options);
@@ -172,6 +175,8 @@ async function assertLarkProfileAvailable(profile, options) {
 }
 
 async function createManagedBot(raw, credentials, options) {
+  if (normalizeEngine(raw.engine) === 'antigravity') return createAntigravityBot(raw, credentials, options,
+    { readManagedBots, assertLarkProfileAvailable, runLarkCli });
   if (normalizeEngine(raw.engine) === 'claude') return createClaudeBot(raw, credentials, options,
     { readManagedBots, assertLarkProfileAvailable, runLarkCli });
   const preview = previewBot(raw, options);
