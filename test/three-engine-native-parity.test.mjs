@@ -577,28 +577,39 @@ test('Antigravity supports native /goal & /compact pass-through plus batch/range
   assert.match(replies.at(-1), /\*\*1\.\*\*/);
   assert.match(replies.at(-1), /\*\*4\.\*\*/);
 
-  // Trying to include busy item #2 rejects cleanly
-  await assert.rejects(() => bridge.handleCommand(dmEvt, { name: '/delete', rest: '1 2-4' }), /正在 Antigravity 客户端中运行/);
+  // Desktop-sidebar conversations (busy #2 and idle #3) are owned by the running Antigravity Desktop app:
+  // the Bot never deletes their files (Desktop would rewrite them as content-less ghosts). It lists them
+  // with sidebar right-click guidance and only deletes what it owns (#1 Bridge binding, #4 Bridge CLI store).
+  await bridge.handleCommand(dmEvt, { name: '/delete', rest: '1 2-4' });
+  assert.match(replies.at(-1), /待删除：2 条/);
+  assert.match(replies.at(-1), /以下 2 条是 Antigravity 客户端侧边栏里的对话/);
+  assert.match(replies.at(-1), /右键 → 删除/);
+  assert.match(replies.at(-1), /\/confirm delete 1,4|\/confirm delete 1 4/);
+
+  // Desktop-only selection never offers a confirm step
+  await bridge.handleCommand(dmEvt, { name: '/delete', rest: '3' });
+  assert.match(replies.at(-1), /本次没有需要 Bot 删除的会话/);
+  assert.doesNotMatch(replies.at(-1), /\/confirm delete/);
 
   // Group chat cannot delete native UUID (SEC-001)
   await bridge.handleCommand(grpEvt, { name: '/delete', rest: idleDeskUuid });
   assert.match(replies.at(-1), /未找到可访问的会话/);
 
-  // Owner DM batch/range /delete 1 3-4 -> preview -> /confirm delete 1 3-4 deletes all 3 cleanly!
+  // Owner DM batch/range /delete 1 3-4 -> preview -> /confirm deletes the Bot-owned ones only
+  await bridge.handleCommand(dmEvt, { name: '/list', rest: 'all' });
   await bridge.handleCommand(dmEvt, { name: '/delete', rest: '1 3-4' });
-  assert.match(replies.at(-1), /待删除：3 条/);
-  assert.match(replies.at(-1), /\/confirm delete 1 3-4/);
+  assert.match(replies.at(-1), /待删除：2 条/);
+  const confirmSpec = replies.at(-1).match(/\/confirm delete ([^`]+)`/)[1];
 
-  await bridge.handleCommand(dmEvt, { name: '/confirm', rest: 'delete 1 3-4' });
-  assert.match(replies.at(-1), /已删除 3 条会话（共享绑定 1 条，原生对话记录 2 条）/);
+  await bridge.handleCommand(dmEvt, { name: '/confirm', rest: `delete ${confirmSpec}` });
+  assert.match(replies.at(-1), /已删除 2 条会话（共享绑定 1 条，原生对话记录 1 条）/);
+  assert.match(replies.at(-1), /另有 1 条在 Antigravity 客户端侧边栏中/);
 
-  // Verify idle Desktop & CLI artifacts (.db/.db-wal/.db-shm/brain) and DB rows are gone while busy conversation stays untouched
-  assert.equal(fs.existsSync(path.join(desktopAppDir, 'conversations', `${idleDeskUuid}.db`)), false);
-  assert.equal(fs.existsSync(path.join(desktopAppDir, 'conversations', `${idleDeskUuid}.db-wal`)), false);
-  assert.equal(fs.existsSync(path.join(desktopAppDir, 'conversations', `${idleDeskUuid}.db-shm`)), false);
-  assert.equal(fs.existsSync(path.join(desktopAppDir, 'brain', idleDeskUuid)), false);
+  // Desktop conversations stay fully intact (files + index rows); only the Bot CLI store conversation is gone
+  assert.equal(fs.existsSync(path.join(desktopAppDir, 'conversations', `${idleDeskUuid}.db`)), true);
+  assert.equal(fs.existsSync(path.join(desktopAppDir, 'brain', idleDeskUuid)), true);
   assert.equal(fs.existsSync(path.join(cliAppDir, 'conversations', `${idleCliUuid}.db`)), false);
   assert.equal(fs.existsSync(path.join(desktopAppDir, 'conversations', `${busyUuid}.db`)), true);
-  assert.equal(listAntigravityNativeConversations({ geminiDir: desktopGeminiDir, appDataDir: 'antigravity' }).length, 1);
+  assert.equal(listAntigravityNativeConversations({ geminiDir: desktopGeminiDir, appDataDir: 'antigravity' }).length, 2);
   assert.equal(listAntigravityNativeConversations({ geminiDir: agyHome, appDataDir: 'antigravity-cli' }).length, 0);
 });

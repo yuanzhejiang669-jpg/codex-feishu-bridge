@@ -716,6 +716,8 @@ const antigravityBridge = CONFIG.engine === 'antigravity' ? createAntigravityBri
   sendMarkdown, activeChildren, activeJobs: activeCodexJobs, appendText: appendRunText,
   reduceEvent: reduceCodexJsonEvent, markPhase: markRunPhase, ensureDone: ensureRunDone,
   markInterrupted: markRunInterrupted, markError: markRunError, queueSummary, sharedSessions: sessionStore.shared,
+  pendingAttachments: pendingAttachmentStore,
+  cleanupClearedDownloads,
 }) : null;
 shutdownCallbacks.add(() => antigravityBridge?.close());
 Object.assign(bridgeRuntime, {

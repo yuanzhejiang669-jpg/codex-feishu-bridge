@@ -83,6 +83,57 @@ test('stop interrupts startup and shutdown rejects outstanding requests', async 
   assert.equal(before.requests.length, 0);
 });
 
+test('native steer: a second session/prompt joins the running turn and prompt() follows the hand-over', async () => {
+  // Mirrors live agy 1.5.14 behaviour: when a prompt arrives mid-turn, agy answers the earlier
+  // session/prompt with end_turn right away and the newest request carries the rest of the turn.
+  const prompts = [];
+  const f = fixture((request, send) => {
+    if (request.method !== 'session/prompt') return false;
+    prompts.push(request);
+    const chunk = (text) => send({ method: 'session/update', params: { sessionId: 'native-session', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } } } });
+    if (prompts.length === 1) { chunk('STEP1 '); return true; }
+    send({ id: prompts[0].id, result: { stopReason: 'end_turn' } });
+    setTimeout(() => { chunk('STEP2 STEER-OK'); send({ id: request.id, result: { stopReason: 'end_turn', usage: { inputTokens: 7 } } }); }, 30);
+    return true;
+  });
+  await f.client.openSession();
+  assert.equal(f.client.canSteer(), false);
+  assert.throws(() => f.client.steer([{ type: 'text', text: 'too early' }]), { code: 'ANTIGRAVITY_NO_ACTIVE_TURN' });
+  const running = f.client.prompt([{ type: 'text', text: 'run 3 steps' }]);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(f.client.canSteer(), true);
+  f.client.steer([{ type: 'text', text: 'append STEER-OK' }]);
+  const result = await running;
+  assert.equal(result.stopReason, 'end_turn');
+  assert.equal(result.usage.inputTokens, 7);
+  assert.equal(result.text, 'STEP1 STEP2 STEER-OK');
+  assert.equal(prompts.length, 2);
+  assert.equal(prompts[1].params.sessionId, 'native-session');
+  assert.deepEqual(prompts[1].params.prompt, [{ type: 'text', text: 'append STEER-OK' }]);
+  assert.equal(f.client.canSteer(), false);
+  await f.client.close();
+});
+
+test('native steer: a rejected steer request never takes the running turn down', async () => {
+  const prompts = [];
+  const f = fixture((request, send) => {
+    if (request.method !== 'session/prompt') return false;
+    prompts.push(request);
+    if (prompts.length === 1) return true;
+    send({ id: request.id, error: { code: -32000, message: 'steer refused' } });
+    setTimeout(() => send({ id: prompts[0].id, result: { stopReason: 'end_turn' } }), 30);
+    return true;
+  });
+  await f.client.openSession();
+  const running = f.client.prompt([{ type: 'text', text: 'long task' }]);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const steer = f.client.steer([{ type: 'text', text: 'extra' }]);
+  await assert.rejects(steer, /steer refused/);
+  const result = await running;
+  assert.equal(result.stopReason, 'end_turn');
+  await f.client.close();
+});
+
 test('provider secrets are isolated and redacted; native slash commands remain native', () => {
   assert.deepEqual(antigravityEnvironment({ PATH: 'p', GEMINI_API_KEY: 'old', GOOGLE_API_KEY: 'old', GOOGLE_GEMINI_BASE_URL: 'old' }, { mode: 'official' }), { PATH: 'p' });
   const api = antigravityEnvironment({}, { mode: 'gemini-api', apiKey: 'test-secret', baseUrl: 'https://example.invalid' });

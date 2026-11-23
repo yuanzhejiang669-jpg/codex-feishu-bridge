@@ -9,6 +9,13 @@ import { applyCloakBrowserIsolationToServer, resolveCloakBrowserDirs } from '../
 import { buildAccessContext, isOwnerDmContext } from '../sessions/access-control.mjs';
 import { compressIndexes, parseDeleteSelectionSpec } from '../sessions/delete-selection.mjs';
 import {
+  STEER_CANCELLED_BY_CLEARQUEUE_REPLY,
+  ensureSteerEntry,
+  isSteerEntryCancelled,
+  markSteerEntryDispatched,
+  removeSteerEntry,
+} from '../runtime/steer-generation.mjs';
+import {
   antigravityNativeArtifacts,
   deleteAntigravityNativeConversation,
   isAntigravityConversationBusy,
@@ -127,7 +134,20 @@ export function nativeMcpServers(config, event, environment = process.env) {
 export function createAntigravityBridge({ config, getSession, getChatState, getChats, resetSession, saveSessions,
   userText, sendMarkdown, activeChildren, activeJobs, appendText, reduceEvent, markPhase,
   ensureDone, markInterrupted, markError, queueSummary, sharedSessions,
+  pendingAttachments = null, cleanupClearedDownloads = null,
   createClient = (options) => new AntigravityAcpClient(options) }) {
+  const withAttachmentLock = (chatId, fn) => (
+    pendingAttachments?.withAttachmentLock
+      ? pendingAttachments.withAttachmentLock(chatId, fn)
+      : Promise.resolve().then(fn)
+  );
+  const takePendingForChat = (chatId) => (pendingAttachments?.take ? pendingAttachments.take(chatId) : []);
+  const restorePendingForChat = (chatId, items) => {
+    if (!items?.length) return;
+    if (pendingAttachments?.restore) pendingAttachments.restore(chatId, items);
+    else if (pendingAttachments?.add) pendingAttachments.add(chatId, items);
+  };
+  const cleanupPendingForChat = (chatId) => (pendingAttachments?.cleanup ? pendingAttachments.cleanup(chatId) : []);
   const clients = new Set(); const permissions = new Map(); const listViews = new Map(); const deleteViews = new Map();
   const modelCatalogCache = new Map();
   const MODEL_CATALOG_TTL_MS = 5 * 60_000;
@@ -458,7 +478,95 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
     const reply = (text) => sendMarkdown(event.chat_id, text, `antigravity-${command.name.slice(1)}`, event.message_id || event.id);
     if (['/stop', '/stopall', '/queue', '/clearqueue', '/clearqueueall'].includes(command.name)) return false;
     if (command.name === '/steer') {
-      await reply('[原生限制] Antigravity 原生 ACP 协议不支持回合内 /steer，请等待本轮结束或发送 /stop 后重新提问。');
+      // agy ACP native steering: another session/prompt during a running turn joins that turn,
+      // and the agent reads it after its current step. No new conversation is created.
+      const chatId = event.chat_id;
+      const messageId = event.message_id || event.id;
+      const directAttachments = Array.isArray(event.attachments) ? event.attachments : [];
+      const userContent = command.rest.trim();
+      const job = event._steerJob || activeJobs.get(chatId);
+      const entry = job ? ensureSteerEntry({ event, job, chatId, messageId }) : null;
+      const cleanupDirect = () => {
+        if (directAttachments.length && typeof cleanupClearedDownloads === 'function') cleanupClearedDownloads(directAttachments);
+      };
+      if (entry && isSteerEntryCancelled(job, entry)) {
+        removeSteerEntry(job, entry);
+        cleanupDirect();
+        await reply(STEER_CANCELLED_BY_CLEARQUEUE_REPLY);
+        return true;
+      }
+      const failed = event.attachmentDownload?.failed;
+      if (failed?.image || failed?.file) {
+        if (entry) { entry.state = 'failed'; removeSteerEntry(job, entry); }
+        if (directAttachments.length) await withAttachmentLock(chatId, () => restorePendingForChat(chatId, directAttachments));
+        throw new Error('附件下载不完整，本次补充指令未发送，请重试');
+      }
+      const pendingPreview = cleanupPendingForChat(chatId);
+      if (!userContent && !directAttachments.length && !pendingPreview.length) {
+        if (entry) { entry.state = 'failed'; removeSteerEntry(job, entry); }
+        await reply('用法：`/steer <要追加到当前任务的补充指令>`（任务运行中发送，Antigravity 做完当前这一步后读取）');
+        return true;
+      }
+      const liveJob = activeJobs.get(chatId);
+      const steerable = (candidate) => Boolean(candidate && candidate.mode === 'antigravity'
+        && typeof candidate.client?.steer === 'function' && candidate.client.canSteer?.() !== false);
+      if (!steerable(liveJob) || (job && liveJob !== job)) {
+        if (entry) { entry.state = 'failed'; removeSteerEntry(job, entry); }
+        delete event._steerEntry;
+        delete event._steerJob;
+        if (directAttachments.length) await withAttachmentLock(chatId, () => restorePendingForChat(chatId, directAttachments));
+        const starting = liveJob && liveJob === job && liveJob.mode === 'antigravity';
+        await reply(starting
+          ? '当前 Antigravity 任务还在启动，尚未进入可追加阶段，请几秒后再发 /steer。'
+          : (job && liveJob !== job ? '当前任务已结束，未追加任何内容。' : '当前没有正在运行的 Antigravity 任务；直接发送消息即可开始新一轮。'));
+        return true;
+      }
+      const previous = liveJob.steerInFlight || Promise.resolve();
+      let outcome = 'sent';
+      let takenAttachments = [];
+      const current = previous.catch(() => {}).then(async () => {
+        if (entry && isSteerEntryCancelled(liveJob, entry)) { outcome = 'cancelled'; cleanupDirect(); return; }
+        if (activeJobs.get(chatId) !== liveJob || !steerable(liveJob)) {
+          outcome = 'ended';
+          if (directAttachments.length) await withAttachmentLock(chatId, () => restorePendingForChat(chatId, directAttachments));
+          return;
+        }
+        takenAttachments = await withAttachmentLock(chatId, () => [...takePendingForChat(chatId), ...directAttachments]);
+        const payload = antigravityContent(userContent, takenAttachments);
+        if (entry && isSteerEntryCancelled(liveJob, entry)) {
+          outcome = 'cancelled';
+          const pendingOnly = takenAttachments.filter((item) => !directAttachments.includes(item));
+          if (pendingOnly.length) await withAttachmentLock(chatId, () => restorePendingForChat(chatId, pendingOnly));
+          cleanupDirect();
+          return;
+        }
+        // Point of no return: mark dispatched before writing the steer prompt to native agy.
+        markSteerEntryDispatched(liveJob, entry);
+        liveJob.client.steer(payload);
+        const running = chat.sessions.find((s) => s.id === liveJob.sessionId);
+        if (running) {
+          running.messages ||= [];
+          running.messages.push({ role: 'user', content: userContent, at: Date.now() });
+          saveSessions();
+        }
+      });
+      liveJob.steerInFlight = current;
+      try {
+        await current;
+        if (outcome === 'cancelled') await reply(STEER_CANCELLED_BY_CLEARQUEUE_REPLY);
+        else if (outcome === 'ended') await reply('当前任务已结束，未追加任何内容。');
+        else await reply('已将补充指令并入当前 Antigravity 任务，它做完手头这一步后就会读取；不会另开会话。');
+      } catch (error) {
+        if (entry && entry.state === 'pending') entry.state = 'failed';
+        const restore = takenAttachments.length ? takenAttachments : directAttachments;
+        if (restore.length) await withAttachmentLock(chatId, () => restorePendingForChat(chatId, restore));
+        throw error;
+      } finally {
+        if (entry) removeSteerEntry(liveJob, entry);
+        delete event._steerEntry;
+        delete event._steerJob;
+        if (liveJob.steerInFlight === current) liveJob.steerInFlight = null;
+      }
       return true;
     }
     if (command.name === '/fast') {
@@ -474,13 +582,14 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
     if (command.name === '/help') {
       await reply(['**Antigravity Bot · 官方 CLI / ACP**',
         '/new [标题] · /list [all] · /switch 序号或ID · /rename [序号] 新标题 · /reset',
-        '/delete <序号或区间>（支持 `1 3-14`、`1-3`）· /confirm delete <预览中的序号或区间>',
+        '/delete <序号或区间>（支持 `1 3-14`、`1-3`）· /confirm delete <预览中的序号或区间>；客户端侧边栏对话只解除飞书关联，需在 Antigravity 客户端左侧栏右键删除',
         '/provider [list|渠道ID|save|clear] · /model [status|list|refresh|模型ID [强度]|save|clear]',
         '/effort [low|medium|high|xhigh|max|clear]（独立切换思考强度，以所选模型支持为准）',
         '/mode [always-proceed|auto|accept-edits|default|plan] · /context · /status',
+        '/steer <补充指令>（任务运行中追加要求，并入当前这一轮，做完手头这一步后读取）',
         '/stop · /stopall · /queue · /clearqueue [all] · /approve · /deny',
         '原生斜杠指令直接透传执行：/goal · /compact · /plan · /boost · /teamwork · /swarm · /schedule · /browser · /grill-me · /learn · /btw 及全部原生技能。',
-        '不支持的指令（[原生限制]）：/steer、/fast、/model test。',
+        '不支持的指令（[原生限制]）：/fast、/model test。',
         '官方账号登录与手动切换请在客户端的 Antigravity 区域操作；不会自动轮换账号。'].join('\n')); return true;
     }
     if (command.name === '/new' || command.name === '/reset') {
@@ -596,6 +705,11 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
       const view = listViews.get(viewKey(event));
       const viewValid = Boolean(view && Date.now() - view.at <= 5 * 60_000 && Array.isArray(view.items));
       const resolvedItems = [];
+      // Conversations in the Antigravity Desktop store are owned by the running Desktop app: it keeps
+      // its sidebar list in memory and rewrites the index from it, so deleting their files from outside
+      // only leaves content-less ghosts that come back. The Bot never deletes them; it lists them and
+      // points the user to the Desktop sidebar's own delete.
+      const desktopOnlyItems = [];
 
       const pushResolved = (resolved, index) => {
         if (!resolved) return false;
@@ -603,13 +717,15 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
           const s = resolved.session;
           const nativeId = String(s.antigravitySessionId || '').trim();
           const targetInfo = nativeId ? resolveSessionTarget(s, selectProvider(catalogRoot, settings(s).provider)) : null;
+          const desktopOwned = Boolean(nativeId) && (targetInfo?.appDataDir || s.antigravityAppDataDir) === 'antigravity';
           resolvedItems.push({
             index,
             kind: 'bridge',
             id: s.id,
             nativeId,
             title: s.title || '未命名会话',
-            sourceLabel: s.antigravityAppDataDir === 'antigravity' ? '共享绑定 + 客户端侧边栏' : '共享会话绑定',
+            sourceLabel: desktopOwned ? '仅解除飞书关联（原对话在客户端侧边栏）' : '共享会话绑定',
+            desktopOwned,
             geminiDir: targetInfo?.geminiDir || '',
             appDataDir: targetInfo?.appDataDir || '',
           });
@@ -618,16 +734,19 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
         if (resolved.kind === 'native') {
           if (!isOwnerDmContext(accessCtx)) return false;
           const n = resolved.native;
-          resolvedItems.push({
+          const item = {
             index,
             kind: 'native',
             id: n.conversationId.slice(0, 8),
             nativeId: n.conversationId,
             title: n.title || n.conversationId.slice(0, 8),
             sourceLabel: n.sourceLabel || (n.appDataDir === 'antigravity' ? '客户端侧边栏' : 'Bridge 原生库'),
+            desktopOwned: n.appDataDir === 'antigravity',
             geminiDir: n.geminiDir,
             appDataDir: n.appDataDir,
-          });
+          };
+          if (item.desktopOwned) desktopOnlyItems.push(item);
+          else resolvedItems.push(item);
           return true;
         }
         return false;
@@ -673,7 +792,17 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
         }
       }
 
+      const desktopGuide = (items) => [
+        `以下 ${items.length} 条是 Antigravity 客户端侧边栏里的对话，归客户端管理，Bot 不会从外部删除（外部删除会被客户端写回、只剩空壳）。请在 Antigravity 客户端左侧栏对它们右键 → 删除：`,
+        ...items.slice(0, 20).map((item) => `**${item.index}.** ${item.title} · \`${item.id}\``),
+        ...(items.length > 20 ? [`… 其余 ${items.length - 20} 条已省略`] : []),
+      ];
+
       if (!resolvedItems.length) {
+        if (desktopOnlyItems.length) {
+          await reply(['**Antigravity 会话删除**', '', ...desktopGuide(desktopOnlyItems), '', '本次没有需要 Bot 删除的会话。'].join('\n'));
+          return true;
+        }
         await reply(`未找到可访问的会话：${rawSpec}，请先发送 /list 或 /list all 查看可用序号。`);
         return true;
       }
@@ -688,7 +817,7 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
           }
           sharedSessions?.assertIdle(found);
         }
-        if (item.nativeId && item.geminiDir) {
+        if (item.nativeId && item.geminiDir && !item.desktopOwned) {
           if (isAntigravityConversationBusy({ geminiDir: item.geminiDir, appDataDir: item.appDataDir, conversationId: item.nativeId })) {
             throw new Error(`对话「${item.title}」正在 Antigravity 客户端中运行，请等待结束后再删除。`);
           }
@@ -699,7 +828,9 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
       const confirmText = parsed.indexes ? compressIndexes(resolvedItems.map((item) => item.index)) : rawSpec;
       const ttl = Number(config.deleteConfirmTtlMs) > 0 ? Number(config.deleteConfirmTtlMs) : 5 * 60_000;
       const expiresAt = Date.now() + ttl;
-      deleteViews.set(viewKey(event), { items: resolvedItems, confirmText, isIndexSpec: Boolean(parsed.indexes), at: Date.now(), expiresAt });
+      deleteViews.set(viewKey(event), {
+        items: resolvedItems, desktopOnlyItems, confirmText, isIndexSpec: Boolean(parsed.indexes), at: Date.now(), expiresAt,
+      });
 
       const previewLines = resolvedItems.slice(0, 20).map((item) => (
         `**${item.index}.** ${item.title} · \`${item.id}\` · ${item.sourceLabel}${item.kind === 'bridge' && item.id === chat.currentSessionId ? ' · 当前会话' : ''}`
@@ -710,6 +841,7 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
         '',
         `待删除：${resolvedItems.length} 条（关联本地会话文件/目录 ${artifactCount} 个）；工作区代码与文件完整保留。`,
         ...previewLines,
+        ...(desktopOnlyItems.length ? ['', ...desktopGuide(desktopOnlyItems)] : []),
         '',
         `确认删除请输入：\`/confirm delete ${confirmText}\``,
       ].join('\n'));
@@ -747,7 +879,7 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
         return { item, session: found };
       });
       for (const item of pending.items) {
-        if (item.nativeId && item.geminiDir
+        if (item.nativeId && item.geminiDir && !item.desktopOwned
           && isAntigravityConversationBusy({ geminiDir: item.geminiDir, appDataDir: item.appDataDir, conversationId: item.nativeId })) {
           throw new Error(`对话「${item.title}」正在 Antigravity 客户端中运行，已取消本次删除。`);
         }
@@ -761,6 +893,7 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
       let removedBridgeCount = 0;
       let removedNativeCount = 0;
       const deletedNativeIds = new Set();
+      const unboundDesktop = bridgeTargets.filter(({ item }) => item.desktopOwned).map(({ item }) => item);
       try {
         if (bridgeTargets.length) {
           const removeIds = bridgeTargets.map((entry) => entry.session.id);
@@ -774,6 +907,8 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
           removedBridgeCount = removeIds.length;
         }
         for (const { item } of bridgeTargets) {
+          // Desktop-owned conversations are only unbound; their files stay under the Desktop app's control.
+          if (item.desktopOwned) continue;
           if (item.nativeId && item.geminiDir && !deletedNativeIds.has(`${item.geminiDir}\0${item.appDataDir}\0${item.nativeId}`)) {
             try {
               deleteAntigravityNativeConversation({ geminiDir: item.geminiDir, appDataDir: item.appDataDir, conversationId: item.nativeId });
@@ -784,6 +919,7 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
         }
         for (const item of nativeItems) {
           if (!isOwnerDmContext(accessCtx)) throw new Error('仅主用户私聊允许删除本机原生对话');
+          if (item.desktopOwned || item.appDataDir === 'antigravity') continue;
           const key = `${item.geminiDir}\0${item.appDataDir}\0${item.nativeId}`;
           if (deletedNativeIds.has(key)) continue;
           deleteAntigravityNativeConversation({ geminiDir: item.geminiDir, appDataDir: item.appDataDir, conversationId: item.nativeId });
@@ -793,7 +929,13 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
         deleteViews.delete(viewKey(event));
         listViews.delete(viewKey(event));
       } finally { release?.(); }
-      await reply(`已删除 ${pending.items.length} 条会话（共享绑定 ${removedBridgeCount} 条，原生对话记录 ${removedNativeCount} 条），工作区文件已保留。`);
+      const desktopLeft = [...unboundDesktop, ...(pending.desktopOnlyItems || [])];
+      await reply([
+        `已删除 ${pending.items.length} 条会话（共享绑定 ${removedBridgeCount} 条，原生对话记录 ${removedNativeCount} 条），工作区文件已保留。`,
+        ...(desktopLeft.length
+          ? [`另有 ${desktopLeft.length} 条在 Antigravity 客户端侧边栏中（${desktopLeft.slice(0, 5).map((item) => `「${item.title}」`).join('')}${desktopLeft.length > 5 ? ' 等' : ''}），Bot 未从客户端删除，请在客户端左侧栏右键 → 删除。`]
+          : []),
+      ].join('\n'));
       return true;
     }
     const session = currentSession();

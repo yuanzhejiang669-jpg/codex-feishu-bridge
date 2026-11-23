@@ -730,7 +730,7 @@ test("SCHED-003 Case 6: Claude Code active job cancels preflight /steer s1 via /
   assert.deepEqual(executed, ["A", "C"]);
 });
 
-test("SCHED-003 Case 7: Antigravity parses /steer as out-of-band command returning [原生限制] without queuing, while /clearqueue + C work", async (t) => {
+test("SCHED-003 Case 7: Antigravity /steer joins the running native turn out-of-band without queuing, while /clearqueue + C work", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "cfb-sched-agy-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
 
@@ -740,6 +740,7 @@ test("SCHED-003 Case 7: Antigravity parses /steer as out-of-band command returni
   const replies = [];
   const executed = [];
   const jobGates = new Map();
+  const steered = [];
 
   const agBridge = createAntigravityBridge({
     config: {
@@ -790,7 +791,8 @@ test("SCHED-003 Case 7: Antigravity parses /steer as out-of-band command returni
     handleEvent: async (event, control) => {
       if (!control.commit()) return;
       const gate = createDeferred();
-      const job = { chatId: event.chat_id, mode: "antigravity", clearGeneration: 0, pendingSteerEntries: [], steerInFlight: null };
+      const client = { canSteer: () => true, steer: (payload) => { steered.push(payload); } };
+      const job = { chatId: event.chat_id, mode: "antigravity", client, sessionId: "ag-1", clearGeneration: 0, pendingSteerEntries: [], steerInFlight: null };
       activeJobs.set(event.chat_id, job);
       jobGates.set(event.message_id, gate);
       executed.push(event.message_id);
@@ -813,10 +815,12 @@ test("SCHED-003 Case 7: Antigravity parses /steer as out-of-band command returni
     removedQueued: 1, cancelledPreflight: 0, cancelledPendingSteers: 0,
   });
 
-  // /steer 1 is recognized as command, returns [原生限制], NEVER queued!
-  dispatcher.enqueue({ chat_id: "chat-ag", sender_id: "u1", message_id: "st-1", content: "/steer 1" });
+  // /steer is an out-of-band command: it joins the running native turn and is NEVER queued
+  dispatcher.enqueue({ chat_id: "chat-ag", sender_id: "u1", message_id: "st-1", content: "/steer 另外把测试也跑一下" });
   await waitFor(() => replies.some((r) => r.messageId === "st-1"));
-  assert.match(replies.find((r) => r.messageId === "st-1").text, /\[原生限制\].*\/steer/);
+  assert.match(replies.find((r) => r.messageId === "st-1").text, /已将补充指令并入当前 Antigravity 任务/);
+  assert.deepEqual(steered, [[{ type: "text", text: "另外把测试也跑一下" }]]);
+  assert.deepEqual(session.messages.map((m) => m.content), ["另外把测试也跑一下"]);
   assert.equal(dispatcher.pendingCount, 0);
 
   // /fast also returns [原生限制] without queuing; /goal and /compact pass through natively to agy ACP

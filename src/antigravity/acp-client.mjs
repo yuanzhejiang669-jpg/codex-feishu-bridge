@@ -319,11 +319,44 @@ export class AntigravityAcpClient {
     if (!this.sessionId) throw new Error('Antigravity 原生会话尚未创建');
     if (this.stopped) throw Object.assign(new Error('Antigravity 已停止'), { code: 'USER_STOP' });
     this.text = ''; this.turnActive = true; this.activity();
+    this.turnPromise = this.request('session/prompt', { sessionId: this.sessionId, prompt: content }, 0);
     try {
-      const result = await this.request('session/prompt', { sessionId: this.sessionId, prompt: content }, 0);
+      // Native steering: a session/prompt sent while a turn runs joins that turn. agy answers the
+      // earlier request right away and the newest request carries the rest of the turn, so follow
+      // the hand-over until the request that is current when it settles has finished.
+      let result;
+      for (;;) {
+        const awaited = this.turnPromise;
+        try { result = await awaited; } catch (error) {
+          if (awaited !== this.turnPromise && !this.stopped) continue;
+          throw error;
+        }
+        if (awaited === this.turnPromise || this.stopped) break;
+      }
       if (this.stopped || result.stopReason === 'cancelled') throw Object.assign(new Error('Antigravity 已停止'), { code: 'USER_STOP' });
       return { ...result, text: this.text, sessionId: this.sessionId, runtime: this.runtime };
-    } finally { this.turnActive = false; clearTimeout(this.idleTimer); }
+    } finally { this.turnActive = false; this.turnPromise = null; clearTimeout(this.idleTimer); }
+  }
+
+  canSteer() {
+    return Boolean(this.turnActive && this.turnPromise && this.sessionId && !this.stopped && !this.closed);
+  }
+
+  steer(content) {
+    if (!this.canSteer()) {
+      throw Object.assign(new Error('Antigravity 当前没有可追加指令的运行中回合'), { code: 'ANTIGRAVITY_NO_ACTIVE_TURN' });
+    }
+    const previous = this.turnPromise;
+    const tracked = this.request('session/prompt', { sessionId: this.sessionId, prompt: content }, 0)
+      .catch((error) => {
+        // A rejected steer must not take the running turn down with it.
+        if (this.turnPromise === tracked) this.turnPromise = previous;
+        throw error;
+      });
+    tracked.catch(() => {});
+    this.turnPromise = tracked;
+    this.activity();
+    return tracked;
   }
 
   interrupt() {
