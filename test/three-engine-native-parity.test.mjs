@@ -497,7 +497,9 @@ test('Antigravity supports native /goal & /compact pass-through plus batch/range
       ins.run(r.id, r.title, '', 5, r.ts, workspace, r.busy ? 'running' : 'idle', r.busy ? 1 : 0, 0, '', appDataDir);
       fs.mkdirSync(path.join(dir, 'conversations'), { recursive: true });
       fs.mkdirSync(path.join(dir, 'brain', r.id), { recursive: true });
-      fs.writeFileSync(path.join(dir, 'conversations', `${r.id}.pb`), 'pb-data');
+      fs.writeFileSync(path.join(dir, 'conversations', `${r.id}.db`), 'sqlite-data');
+      fs.writeFileSync(path.join(dir, 'conversations', `${r.id}.db-wal`), 'wal-data');
+      fs.writeFileSync(path.join(dir, 'conversations', `${r.id}.db-shm`), 'shm-data');
       fs.writeFileSync(path.join(dir, 'brain', r.id, 'note.md'), 'artifact');
     }
     db.close();
@@ -590,11 +592,13 @@ test('Antigravity supports native /goal & /compact pass-through plus batch/range
   await bridge.handleCommand(dmEvt, { name: '/confirm', rest: 'delete 1 3-4' });
   assert.match(replies.at(-1), /已删除 3 条会话（共享绑定 1 条，原生对话记录 2 条）/);
 
-  // Verify idle Desktop & CLI artifacts and DB rows are gone while busy conversation stays untouched
-  assert.equal(fs.existsSync(path.join(desktopAppDir, 'conversations', `${idleDeskUuid}.pb`)), false);
+  // Verify idle Desktop & CLI artifacts (.db/.db-wal/.db-shm/brain) and DB rows are gone while busy conversation stays untouched
+  assert.equal(fs.existsSync(path.join(desktopAppDir, 'conversations', `${idleDeskUuid}.db`)), false);
+  assert.equal(fs.existsSync(path.join(desktopAppDir, 'conversations', `${idleDeskUuid}.db-wal`)), false);
+  assert.equal(fs.existsSync(path.join(desktopAppDir, 'conversations', `${idleDeskUuid}.db-shm`)), false);
   assert.equal(fs.existsSync(path.join(desktopAppDir, 'brain', idleDeskUuid)), false);
-  assert.equal(fs.existsSync(path.join(cliAppDir, 'conversations', `${idleCliUuid}.pb`)), false);
-  assert.equal(fs.existsSync(path.join(desktopAppDir, 'conversations', `${busyUuid}.pb`)), true);
+  assert.equal(fs.existsSync(path.join(cliAppDir, 'conversations', `${idleCliUuid}.db`)), false);
+  assert.equal(fs.existsSync(path.join(desktopAppDir, 'conversations', `${busyUuid}.db`)), true);
   assert.equal(listAntigravityNativeConversations({ geminiDir: desktopGeminiDir, appDataDir: 'antigravity' }).length, 1);
   assert.equal(listAntigravityNativeConversations({ geminiDir: agyHome, appDataDir: 'antigravity-cli' }).length, 0);
 });

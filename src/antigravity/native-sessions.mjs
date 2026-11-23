@@ -106,11 +106,17 @@ export function antigravityNativeArtifacts({ geminiDir, appDataDir = 'antigravit
   if (!fs.existsSync(baseDir)) return [];
   const root = fs.realpathSync(baseDir);
   const candidates = [
+    path.join(root, 'conversations', `${id}.db`),
+    path.join(root, 'conversations', `${id}.db-wal`),
+    path.join(root, 'conversations', `${id}.db-shm`),
+    path.join(root, 'conversations', `${id}.db-journal`),
     path.join(root, 'conversations', `${id}.pb`),
     path.join(root, 'conversations', `${id}.pb.bak`),
     path.join(root, 'annotations', `${id}.pbtxt`),
+    path.join(root, 'annotations', `${id}.pb`),
     path.join(root, 'brain', id),
     path.join(root, 'implicit', `${id}.pb`),
+    path.join(root, 'implicit', `${id}.db`),
   ];
   const found = [];
   for (const target of candidates) {
@@ -134,6 +140,19 @@ export function deleteAntigravityNativeConversation({ geminiDir, appDataDir = 'a
   const baseDir = path.join(path.resolve(geminiDir), appDataDir);
   const dbPath = path.join(baseDir, 'conversation_summaries.db');
   const artifacts = antigravityNativeArtifacts({ geminiDir, appDataDir, conversationId: id });
+  const removedPaths = [];
+  for (const target of artifacts) {
+    const isPrimaryStore = target.endsWith(`${path.sep}conversations${path.sep}${id}.db`)
+      || target.endsWith(`${path.sep}conversations${path.sep}${id}.pb`);
+    try {
+      fs.rmSync(target, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+      removedPaths.push(target);
+    } catch (error) {
+      if (isPrimaryStore) {
+        throw new Error(`对话 ${id.slice(0, 8)} 的会话文件正被 Antigravity 客户端占用，无法删除（${error?.code || error?.message || error}）`);
+      }
+    }
+  }
   let db;
   if (fs.existsSync(dbPath)) {
     try {
@@ -161,13 +180,6 @@ export function deleteAntigravityNativeConversation({ geminiDir, appDataDir = 'a
     } finally {
       try { db?.close(); } catch {}
     }
-  }
-  const removedPaths = [];
-  for (const target of artifacts) {
-    try {
-      fs.rmSync(target, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
-      removedPaths.push(target);
-    } catch {}
   }
   return { deleted: true, conversationId: id, removedPaths };
 }
