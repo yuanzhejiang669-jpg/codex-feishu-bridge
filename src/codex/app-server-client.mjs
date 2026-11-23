@@ -1,8 +1,15 @@
 import { spawn } from "node:child_process";
-import { StringDecoder } from "node:string_decoder";
 
 export const DEFAULT_MAX_STDERR_BYTES = 1024 * 1024;
-export const DEFAULT_MAX_LINE_BYTES = 16 * 1024 * 1024;
+export const DEFAULT_MAX_LINE_BYTES = 128 * 1024 * 1024;
+export const MAX_ALLOWED_LINE_BYTES = 450 * 1024 * 1024;
+
+function resolveMaxLineBytes(value) {
+  const envRaw = process.env.CODEX_FEISHU_APP_SERVER_MAX_LINE_BYTES;
+  const parsed = Number(value ?? (envRaw ? Number(envRaw) : DEFAULT_MAX_LINE_BYTES));
+  const candidate = Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_MAX_LINE_BYTES;
+  return Math.min(MAX_ALLOWED_LINE_BYTES, Math.max(64 * 1024, Math.floor(candidate)));
+}
 
 export class AppServerRpcError extends Error {
   constructor(error, method, formatError = defaultErrorText) {
@@ -27,7 +34,7 @@ export class AppServerClient {
     terminateProcessTree = () => {},
     spawnProcess = spawn,
     maxStderrBytes = DEFAULT_MAX_STDERR_BYTES,
-    maxLineBytes = DEFAULT_MAX_LINE_BYTES,
+    maxLineBytes = undefined,
     stopGraceMs = 5000,
     environment = {},
     accountAlias = "",
@@ -47,9 +54,9 @@ export class AppServerClient {
     this.child = null;
     this.nextId = 1;
     this.pending = new Map();
-    this.buffer = "";
-    this.stdoutDecoder = new StringDecoder("utf8");
-    this.maxLineBytes = Math.max(64 * 1024, Number(maxLineBytes) || DEFAULT_MAX_LINE_BYTES);
+    this.lineChunks = [];
+    this.lineByteLength = 0;
+    this.maxLineBytes = resolveMaxLineBytes(maxLineBytes);
     this.exitPromise = null;
     this.notifications = [];
     this.notificationWaiters = [];
@@ -89,8 +96,16 @@ export class AppServerClient {
     });
     this.child.on("close", (code, signal) => {
       this.closed = true;
-      const tail = this.stdoutDecoder.end();
-      if (tail) this.buffer += tail;
+      if (this.lineByteLength > 0 && this.lineByteLength <= this.maxLineBytes) {
+        const tail = Buffer.concat(this.lineChunks, this.lineByteLength).toString("utf8").trim();
+        if (tail) {
+          try {
+            this.handleMessage(JSON.parse(tail));
+          } catch {}
+        }
+      }
+      this.lineChunks = [];
+      this.lineByteLength = 0;
       clearTimeout(this.stopEscalationTimer);
       this.stopEscalationTimer = null;
       this.activeChildren.delete(this.child?.pid);
@@ -102,12 +117,37 @@ export class AppServerClient {
   }
 
   onStdout(chunk) {
-    this.buffer += typeof chunk === "string" ? chunk : this.stdoutDecoder.write(chunk);
-    for (;;) {
-      const index = this.buffer.indexOf("\n");
-      if (index < 0) break;
-      const line = this.buffer.slice(0, index).trim();
-      this.buffer = this.buffer.slice(index + 1);
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk || ""), "utf8");
+    let offset = 0;
+    while (offset < buf.length) {
+      const nl = buf.indexOf(0x0a, offset);
+      if (nl < 0) {
+        const tail = offset === 0 ? buf : buf.subarray(offset);
+        this.lineChunks.push(tail);
+        this.lineByteLength += tail.length;
+        if (this.lineByteLength > this.maxLineBytes) {
+          this.handleLineLimitExceeded(this.lineByteLength);
+        }
+        return;
+      }
+      const segment = buf.subarray(offset, nl);
+      offset = nl + 1;
+      const totalBytes = this.lineByteLength + segment.length;
+      if (totalBytes > this.maxLineBytes) {
+        this.handleLineLimitExceeded(totalBytes);
+        return;
+      }
+      if (totalBytes === 0) {
+        this.lineChunks = [];
+        this.lineByteLength = 0;
+        continue;
+      }
+      const rawLine = this.lineChunks.length
+        ? Buffer.concat([...this.lineChunks, segment], totalBytes)
+        : segment;
+      this.lineChunks = [];
+      this.lineByteLength = 0;
+      const line = rawLine.toString("utf8").trim();
       if (!line) continue;
       let message;
       try {
@@ -121,16 +161,18 @@ export class AppServerClient {
       }
       this.handleMessage(message);
     }
-    if (Buffer.byteLength(this.buffer, "utf8") > this.maxLineBytes) {
-      const error = new Error(`codex app-server stdout line exceeded ${this.maxLineBytes} bytes limit`);
-      this.log("ERROR", "app-server stdout line limit exceeded", {
-        maxLineBytes: this.maxLineBytes,
-        bufferedBytes: Buffer.byteLength(this.buffer, "utf8"),
-      });
-      this.buffer = "";
-      this.rejectAll(error);
-      void this.stop();
-    }
+  }
+
+  handleLineLimitExceeded(bufferedBytes) {
+    const error = new Error(`codex app-server stdout line exceeded ${this.maxLineBytes} bytes limit`);
+    this.log("ERROR", "app-server stdout line limit exceeded", {
+      maxLineBytes: this.maxLineBytes,
+      bufferedBytes,
+    });
+    this.lineChunks = [];
+    this.lineByteLength = 0;
+    this.rejectAll(error);
+    void this.stop();
   }
 
   handleMessage(message) {

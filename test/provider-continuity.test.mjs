@@ -52,6 +52,9 @@ test('same provider resume/model changes preserve native ID and do not fork', as
     commitThreadBinding(f.session, b, f.save); assert.equal(f.session.codexThreadId, 'A0');
   }
   assert.equal(f.calls.filter(x => x.method === 'thread/fork').length, 0);
+  const resumes = f.calls.filter(x => x.method === 'thread/resume');
+  assert.equal(resumes.length, 2);
+  assert.ok(resumes.every(x => x.params.excludeTurns === true));
 });
 test('A to B to A forks the latest history and keeps the logical session, files and originals', async t => {
   const f = fixture(t); fs.writeFileSync(path.join(f.directory, 'work.txt'), 'kept');

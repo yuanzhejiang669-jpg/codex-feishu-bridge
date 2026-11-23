@@ -7,7 +7,8 @@ import { PassThrough } from "node:stream";
 import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
 
-import { AppServerClient } from "../src/codex/app-server-client.mjs";
+import { AppServerClient, DEFAULT_MAX_LINE_BYTES } from "../src/codex/app-server-client.mjs";
+import { classifyCodexFailure } from "../src/logging/errors.mjs";
 import {
   deleteCodexThreadRows,
   sqliteExecTransaction,
@@ -85,6 +86,34 @@ test("AppServerClient enforces maxLineBytes guard and stop() awaits child close"
   child2.stdout.emit("data", Buffer.alloc(70 * 1024, 0x61)); // >64KiB with no newline
   await assert.rejects(pendingReq, /exceeded.*limit/);
   assert.ok(logs.some((entry) => entry.level === "ERROR" && /line limit/.test(entry.message)));
+});
+
+test("AppServerClient handles >16MiB multi-chunk JSON lines in linear time and classifies line-limit errors", async () => {
+  assert.ok(DEFAULT_MAX_LINE_BYTES >= 128 * 1024 * 1024);
+  const child = createFakeChild({ closeDelayMs: 5 });
+  const client = new AppServerClient({
+    tool: { command: "codex", argsPrefix: [] },
+    workspace: "C:\\work",
+    spawnProcess: () => child,
+  }).start();
+
+  const bigBlob = "x".repeat(18 * 1024 * 1024); // 18 MiB (> old 16 MiB cap)
+  const payload = Buffer.from(`${JSON.stringify({ method: "thread/resumed", params: { blob: bigBlob } })}\n`, "utf8");
+  const started = Date.now();
+  const chunkSize = 64 * 1024;
+  for (let i = 0; i < payload.length; i += chunkSize) {
+    child.stdout.emit("data", payload.subarray(i, Math.min(i + chunkSize, payload.length)));
+  }
+  const msg = await client.nextNotification(5000);
+  const elapsedMs = Date.now() - started;
+  assert.equal(msg?.method, "thread/resumed");
+  assert.equal(msg?.params?.blob?.length, bigBlob.length);
+  assert.ok(elapsedMs < 5000, `expected linear-time framing for 18MiB line, got ${elapsedMs}ms`);
+  await client.stop();
+
+  const failure = classifyCodexFailure(new Error("codex app-server stdout line exceeded 134217728 bytes limit"));
+  assert.equal(failure.kind, "app_server_line_limit");
+  assert.match(failure.label, /单行输出超限/);
 });
 
 test("node:sqlite store handles quotes/SQL special chars safely without external sqlite3/python subprocesses", (t) => {

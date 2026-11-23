@@ -255,6 +255,17 @@ export function classifyCodexFailure(value, fallback = "Codex 运行失败") {
     };
   }
 
+  if (lower.includes("stdout line exceeded") && lower.includes("bytes limit")) {
+    return {
+      ...base,
+      kind: "app_server_line_limit",
+      label: "Codex 单行输出超限",
+      recoverable: false,
+      message: "Codex app-server 返回的单行 JSON 超过安全内存上限，本轮已中止。",
+      suggestion: "若当前历史会话体积过大，可发送 /new 开启新会话，或升级后使用轻量恢复（excludeTurns）。",
+    };
+  }
+
   if (lower.includes("ended before turn completed") || lower.includes("app-server exited")) {
     return {
       ...base,

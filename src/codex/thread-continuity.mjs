@@ -37,7 +37,7 @@ export async function prepareThreadContinuation({ client, session, params, save,
     if (!sourceProvider) throw new Error('原生会话没有返回 Provider，已保留原绑定');
   }
   if (sourceProvider === provider) {
-    const resumed = await client.request('thread/resume', { ...params, threadId: source }, timeoutMs);
+    const resumed = await client.request('thread/resume', { ...params, threadId: source, excludeTurns: true }, timeoutMs);
     if (resumed.modelProvider && resumed.modelProvider !== provider) throw new Error('恢复结果的 Provider 与目标不一致');
     return { threadId: resumed.thread.id, provider, lineage: session.codexThreadLineage || [], transition: session.codexThreadTransition };
   }
