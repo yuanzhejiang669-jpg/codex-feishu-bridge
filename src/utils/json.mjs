@@ -14,6 +14,52 @@ export function readJsonFile(file) {
   }
 }
 
+export function loadJsonWithCorruptBackup(
+  filePath,
+  validate,
+  emptyFactory,
+  log = () => {},
+  { renameSync = fs.renameSync, retryDelaysMs = [50, 50, 50] } = {},
+) {
+  let raw;
+  try {
+    raw = fs.readFileSync(filePath, "utf8").replace(/^\uFEFF/, "");
+  } catch (error) {
+    if (error?.code === "ENOENT") return emptyFactory();
+    throw error;
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    if (typeof validate !== "function" || validate(parsed)) return parsed;
+    throw new Error("schema validation failed");
+  } catch (parseError) {
+    const backupPath = `${filePath}.corrupt.${Date.now()}.bak`;
+    let lastRenameError = null;
+    let backedUp = false;
+    for (let attempt = 0; attempt <= retryDelaysMs.length; attempt += 1) {
+      try {
+        renameSync(filePath, backupPath);
+        backedUp = true;
+        break;
+      } catch (renameError) {
+        lastRenameError = renameError;
+        const delayMs = retryDelaysMs[attempt];
+        if (!TRANSIENT_RENAME_CODES.has(renameError?.code) || delayMs === undefined) {
+          throw renameError;
+        }
+        Atomics.wait(SLEEP_BUFFER, 0, 0, delayMs);
+      }
+    }
+    if (!backedUp) throw lastRenameError || new Error(`failed to back up corrupt state file: ${filePath}`);
+    log("ERROR", "corrupt state file backed up before reinitialization", {
+      filePath,
+      backupPath,
+      error: String(parseError?.message || parseError),
+    });
+    return emptyFactory();
+  }
+}
+
 export function writeJsonFileAtomicSync(file, value, { space = 2 } = {}) {
   const json = JSON.stringify(value, null, space);
   if (json === undefined) throw new TypeError("JSON value is not serializable");

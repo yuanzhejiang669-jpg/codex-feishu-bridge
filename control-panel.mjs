@@ -98,6 +98,14 @@ function getArg(name, fallback) {
 
 const host = getArg("host", process.env.CODEX_FEISHU_PANEL_HOST || DEFAULT_HOST);
 const port = Number(getArg("port", process.env.CODEX_FEISHU_PANEL_PORT || DEFAULT_PORT));
+const ALLOWED_LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
+if (!ALLOWED_LOOPBACK_HOSTS.has(host)) {
+  console.error(`拒绝绑定非回环地址：${host}。控制面板仅允许绑定 127.0.0.1 / ::1 / localhost。`);
+  process.exit(2);
+}
+const readOnlyMode = !process.argv.includes("--allow-writes");
+const panelToken = crypto.randomBytes(32).toString("hex");
+const panelTokenFile = path.join(panelStateDir, "panel-token.txt");
 
 function fallbackInstancesConfig() {
   const instances = [
@@ -3994,11 +4002,26 @@ async function serveStatic(req, res, url) {
   }
 
   try {
-    const body = await readFile(targetPath);
     const type = contentTypes.get(path.extname(targetPath).toLowerCase()) || "application/octet-stream";
+    if (path.basename(targetPath).toLowerCase() === "index.html") {
+      const html = (await readFile(targetPath, "utf8")).replace(
+        "</head>",
+        `    <meta name="cfb-panel-token" content="${panelToken}" />\n    <meta name="cfb-panel-readonly" content="${readOnlyMode ? "1" : "0"}" />\n  </head>`,
+      );
+      res.writeHead(200, {
+        "Content-Type": type,
+        "Cache-Control": "no-store",
+        "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; frame-ancestors 'none'",
+        "X-Frame-Options": "DENY",
+      });
+      res.end(html);
+      return;
+    }
+    const body = await readFile(targetPath);
     res.writeHead(200, {
       "Content-Type": type,
       "Cache-Control": "no-store",
+      "X-Frame-Options": "DENY",
     });
     res.end(body);
   } catch {
@@ -4006,12 +4029,58 @@ async function serveStatic(req, res, url) {
   }
 }
 
+function timingSafeEqualText(left, right) {
+  const a = Buffer.from(String(left || ""), "utf8");
+  const b = Buffer.from(String(right || ""), "utf8");
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+function isAllowedPanelHostHeader(hostHeader, activePort) {
+  const normalized = String(hostHeader || "").trim().toLowerCase();
+  return normalized === `127.0.0.1:${activePort}`
+    || normalized === `localhost:${activePort}`
+    || normalized === `[::1]:${activePort}`;
+}
+
 async function requestHandler(req, res) {
-  const url = new URL(req.url || "/", `http://${host}:${port}`);
+  const activePort = server?.address?.()?.port || port;
+  const hostHeader = String(req.headers.host || "").trim();
+  if (!isAllowedPanelHostHeader(hostHeader, activePort)) {
+    jsonResponse(res, 403, { ok: false, error: "Host 头不在本机回环白名单内" });
+    return;
+  }
+  const method = String(req.method || "GET").toUpperCase();
+  if (!["GET", "HEAD", "OPTIONS"].includes(method)) {
+    if (readOnlyMode) {
+      jsonResponse(res, 403, {
+        ok: false,
+        error: "控制面板默认只读，请使用桌面客户端或使用 --allow-writes 启动",
+      });
+      return;
+    }
+    const origin = String(req.headers.origin || "").trim();
+    if (origin && origin.toLowerCase() !== `http://${hostHeader.toLowerCase()}`) {
+      jsonResponse(res, 403, { ok: false, error: "拒绝跨站写请求（Origin 不匹配）" });
+      return;
+    }
+    const contentType = String(req.headers["content-type"] || "").trim().toLowerCase();
+    if (!contentType.startsWith("application/json")) {
+      jsonResponse(res, 415, { ok: false, error: "写请求必须使用 Content-Type: application/json" });
+      return;
+    }
+    const suppliedToken = String(req.headers["x-cfb-panel-token"] || "").trim();
+    if (!suppliedToken || !timingSafeEqualText(suppliedToken, panelToken)) {
+      jsonResponse(res, 401, { ok: false, error: "缺少或无效的 X-CFB-Panel-Token" });
+      return;
+    }
+  }
+
+  const url = new URL(req.url || "/", `http://${host}:${activePort}`);
   if (url.pathname === "/api/health") {
     jsonResponse(res, 200, {
       ok: true,
       title: APP_TITLE,
+      readOnly: readOnlyMode,
       generatedAt: new Date().toISOString(),
     });
     return;
@@ -4537,6 +4606,7 @@ async function writePidFile() {
   await mkdir(panelStateDir, { recursive: true });
   await mkdir(panelLogDir, { recursive: true });
   await writeFile(panelPidFile, `${process.pid}\n`, "utf8");
+  await writeFile(panelTokenFile, `${panelToken}\n`, { encoding: "utf8", mode: 0o600 });
 }
 
 async function removePidFile() {

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -10,7 +11,7 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 
 TOOLS_ROOT = Path(__file__).resolve().parents[1]
@@ -33,6 +34,20 @@ class TavilyRouterError(RuntimeError):
 
 class TavilyNoAvailableKeyError(TavilyRouterError):
     pass
+
+
+def sanitize_text(text: str, extra_secrets: Iterable[str] = (), *, max_chars: int = 2000) -> str:
+    clean = str(text or "")
+    secrets = sorted({str(s).strip() for s in extra_secrets if s and len(str(s).strip()) >= 4}, key=len, reverse=True)
+    for secret in secrets:
+        clean = clean.replace(secret, "[REDACTED]")
+    clean = re.sub(r"(?i)(authorization\s*[:=]\s*bearer\s+)\S+", r"\1[REDACTED]", clean)
+    clean = re.sub(r"(?i)(\bbearer\s+)\S+", r"\1[REDACTED]", clean)
+    clean = re.sub(r"(?i)((?:tavily_|firecrawl_)?api[_-]?key\s*[:=]\s*)\S+", r"\1[REDACTED]", clean)
+    clean = re.sub(r"(?i)(--api-key\s+)\S+", r"\1[REDACTED]", clean)
+    clean = re.sub(r"\btvly-[A-Za-z0-9_-]{8,}\b", "[REDACTED]", clean)
+    clean = re.sub(r"\bfc-[A-Za-z0-9_-]{8,}\b", "[REDACTED]", clean)
+    return clean[-max_chars:] if max_chars > 0 else clean
 
 
 @dataclass
@@ -80,16 +95,17 @@ class TavilyRouter:
                 error_body = exc.read().decode("utf-8", errors="replace")
                 category = self._categorize_http_error(exc.code, error_body)
                 retry_after = self._retry_after_seconds(exc.headers)
+                safe_detail = self.sanitize(error_body, pool, extra_secrets=(key.api_key,))
                 tried.append({"alias": alias, "status": category, "http_status": exc.code,
-                              "retry_after_seconds": retry_after, "detail": error_body})
+                              "retry_after_seconds": retry_after, "detail": safe_detail})
                 self._mutate_state(pool, lambda state: self._mark_failure(
-                    state, alias, category=category, detail=error_body,
+                    state, alias, category=category, detail=safe_detail,
                     retry_after_seconds=retry_after))
                 if category in {"quota_exhausted", "rate_limited", "auth_error", "transient_error"}:
                     continue
-                raise TavilyRouterError(f"Tavily request failed for {alias}: HTTP {exc.code}: {error_body}") from exc
+                raise TavilyRouterError(f"Tavily request failed for {alias}: HTTP {exc.code}: {safe_detail}") from exc
             except Exception as exc:
-                detail = str(exc)
+                detail = self.sanitize(str(exc), pool, extra_secrets=(key.api_key,))
                 tried.append({"alias": alias, "status": "transient_error", "detail": detail})
                 self._mutate_state(pool, lambda state: self._mark_failure(
                     state, alias, category="transient_error", detail=detail))
@@ -123,26 +139,37 @@ class TavilyRouter:
                         break
                 except Exception as exc:
                     refresh_attempts.append({"alias": alias, "status": "transient_error",
-                                             "detail": str(exc)[:500]})
-            state = self._state_snapshot(pool)
-            current = datetime.now(timezone.utc)
-            keys = []
-            for alias in state["order"]:
-                entry, status = pool[alias], state["key_status"][alias]
-                if not entry.enabled or not entry.api_key:
-                    continue
-                cooldown = self._parse_iso(status.get("cooldown_until"))
-                usage = status.get("usage") if isinstance(status.get("usage"), dict) else {}
-                keys.append({"alias": alias, "last_result": status.get("last_result", "unknown"),
-                             "cooldown_seconds_remaining": max(0, int((cooldown - current).total_seconds())) if cooldown else 0,
-                             "usage_checked_at": usage.get("checked_at"), "current_plan": usage.get("current_plan"),
-                             "plan_usage": usage.get("plan_usage"), "plan_limit": usage.get("plan_limit"),
-                             "remaining_credits": usage.get("remaining_credits")})
-            known_remaining = [item["remaining_credits"] for item in keys
-                               if isinstance(item.get("remaining_credits"), (int, float))]
-            return {"enabled_key_count": len(keys), "known_usage_key_count": len(known_remaining),
-                    "known_remaining_credits": int(sum(known_remaining)), "keys": keys,
-                    "refresh_attempts": refresh_attempts}
+                                             "detail": self.sanitize(str(exc), pool, extra_secrets=(pool[alias].api_key,), max_chars=500)})
+        state = self._state_snapshot(pool)
+        current = datetime.now(timezone.utc)
+        keys = []
+        for alias in state["order"]:
+            entry, status = pool[alias], state["key_status"][alias]
+            if not entry.enabled or not entry.api_key:
+                continue
+            cooldown = self._parse_iso(status.get("cooldown_until"))
+            usage = status.get("usage") if isinstance(status.get("usage"), dict) else {}
+            keys.append({"alias": alias, "last_result": status.get("last_result", "unknown"),
+                         "cooldown_seconds_remaining": max(0, int((cooldown - current).total_seconds())) if cooldown else 0,
+                         "usage_checked_at": usage.get("checked_at"), "current_plan": usage.get("current_plan"),
+                         "plan_usage": usage.get("plan_usage"), "plan_limit": usage.get("plan_limit"),
+                         "remaining_credits": usage.get("remaining_credits")})
+        known_remaining = [item["remaining_credits"] for item in keys
+                           if isinstance(item.get("remaining_credits"), (int, float))]
+        return {"enabled_key_count": len(keys), "known_usage_key_count": len(known_remaining),
+                "known_remaining_credits": int(sum(known_remaining)), "keys": keys,
+                "refresh_attempts": refresh_attempts}
+
+    def sanitize(self, text: str, pool: dict[str, KeyEntry] | None = None, *, extra_secrets: Iterable[str] = (), max_chars: int = 2000) -> str:
+        if pool is None:
+            try:
+                pool = self._load_pool()
+            except Exception:
+                pool = {}
+        secrets = [entry.api_key for entry in pool.values() if entry.api_key]
+        secrets.append(os.environ.get("TAVILY_API_KEY", "").strip())
+        secrets.extend(extra_secrets)
+        return sanitize_text(text, secrets, max_chars=max_chars)
 
     def _load_pool(self) -> dict[str, KeyEntry]:
         data = json.loads(self.pool_path.read_text(encoding="utf-8"))
@@ -224,7 +251,7 @@ class TavilyRouter:
 
     def _mark_failure(self, state: dict[str, Any], alias: str, *, category: str, detail: str,
                       retry_after_seconds: int | None = None) -> None:
-        state["key_status"][alias].update({"last_result": category, "last_error": detail[:2000],
+        state["key_status"][alias].update({"last_result": category, "last_error": self.sanitize(detail, max_chars=2000),
                                             "last_error_at": self._now_iso(),
                                             "cooldown_until": self._cooldown_for_category(
                                                 category, retry_after_seconds=retry_after_seconds)})

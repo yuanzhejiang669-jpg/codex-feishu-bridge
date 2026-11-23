@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { inspectCapabilityHomes, listSkills, parseMcpServerIds, parseMcpServers } = require("../src/main/services/capabilities.cjs");
+const { inspectClaudeCapabilities } = require("../src/main/services/claude-capabilities.cjs");
 
 test("parseMcpServerIds lists server headers without reading secret values", () => {
   const text = `
@@ -64,4 +65,19 @@ test("inspectCapabilityHomes reports each shared Codex Home once", (t) => {
   fs.mkdirSync(second, { recursive: true });
   const result = inspectCapabilityHomes([first, second, first]);
   assert.deepEqual(result.map((item) => item.codexHome), [first, second]);
+});
+
+test("inspectClaudeCapabilities exposes disabled MCP entries without counting them as active", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cfb-claude-disabled-mcp-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const tools = path.join(root, "claude-tools");
+  fs.mkdirSync(tools, { recursive: true });
+  fs.writeFileSync(path.join(tools, ".mcp.json"), JSON.stringify({ mcpServers: {
+    active: { command: "node" },
+    disabled: { command: "not-a-real-server", disabled: true },
+  } }));
+  const result = inspectClaudeCapabilities({ dataRoot: root, toolEngine: "claude", sourceCodexHome: root });
+  assert.equal(result.activeMcpCount, 1);
+  assert.deepEqual(result.mcpServers.map((item) => [item.name, item.disabled, item.configured]),
+    [["active", false, true], ["disabled", true, false]]);
 });

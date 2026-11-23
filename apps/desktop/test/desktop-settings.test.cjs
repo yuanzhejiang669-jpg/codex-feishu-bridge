@@ -16,7 +16,7 @@ function tempRoot() {
 test("uses safe desktop settings defaults", () => {
   const root = tempRoot();
   try {
-    assert.deepEqual(readDesktopSettings(root), { launchAtLogin: false, closeToTray: true, error: "" });
+    assert.deepEqual(readDesktopSettings(root), { launchAtLogin: false, closeToTray: true, ownerOpenId: "", error: "" });
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -27,7 +27,7 @@ test("writes desktop settings atomically and preserves unspecified values", () =
   try {
     writeDesktopSettings(root, { launchAtLogin: true });
     const result = writeDesktopSettings(root, { closeToTray: false });
-    assert.deepEqual(result, { launchAtLogin: true, closeToTray: false, error: "" });
+    assert.deepEqual(result, { launchAtLogin: true, closeToTray: false, ownerOpenId: "", error: "" });
     assert.equal(JSON.parse(fs.readFileSync(settingsPath(root), "utf8")).launchAtLogin, true);
     assert.equal(fs.readdirSync(root).some((name) => /\.(tmp|bak)$/.test(name)), false);
   } finally {

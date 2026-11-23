@@ -1,6 +1,9 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
+const sourceEngineRoot = process.resourcesPath && fs.existsSync(path.join(process.resourcesPath, 'engine', 'src', 'sessions', 'native-lock.cjs'))
+  ? path.join(process.resourcesPath, 'engine') : path.resolve(__dirname, '../../../../..');
+const { lockDirectoryAsync } = require(path.join(sourceEngineRoot, 'src', 'sessions', 'native-lock.cjs'));
 
 const ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
@@ -124,12 +127,17 @@ async function saveClaudeProviderOnce(raw, options) {
   await options.setCredential(provider.envKey, apiKey);
   provider.models = discovery.models;
   provider.updatedAt = new Date().toISOString();
+  const lockDir = path.join(options.dataRoot, 'claude-providers.lock');
+  const releaseLock = await lockDirectoryAsync(lockDir, { purpose: 'claude-providers', bot: 'desktop' }, 3000);
   try {
-    catalog.providers = [...catalog.providers.filter((item) => item.id !== provider.id), provider];
-    writeCatalog(options.dataRoot, catalog);
+    const latestCatalog = readCatalog(options.dataRoot);
+    latestCatalog.providers = [...latestCatalog.providers.filter((item) => item.id !== provider.id), provider];
+    writeCatalog(options.dataRoot, latestCatalog);
   } catch (error) {
     await options.setCredential(provider.envKey, oldKey || null);
     throw error;
+  } finally {
+    releaseLock();
   }
   return { provider: { ...provider, credentialAvailable: true }, keyChanged: oldKey !== apiKey };
 }

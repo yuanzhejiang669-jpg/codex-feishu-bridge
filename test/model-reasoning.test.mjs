@@ -94,10 +94,20 @@ test("reasoning registry rejects impossible settings and keeps unknown models ge
   assert.equal(unknown.capability.known, false);
 });
 
+test("reasoning registry resolves current flagship models and reports zero stale entries on 2026-11-23", () => {
+  assert.equal(registry.registryVersion, "2026-11-23");
+  assert.equal(resolveCapability({ provider: "openai", model: "gpt-5.6-sol" }, registry).id, "openai-gpt-5.6-sol");
+  assert.equal(resolveCapability({ provider: "anthropic", model: "claude-opus-5.5" }, registry).id, "anthropic-claude-opus-5.5");
+  assert.equal(resolveCapability({ provider: "google", model: "gemini-4-neon" }, registry).id, "google-gemini-4-neon");
+  for (const entry of registry.entries) {
+    assert.equal(reviewStatus(entry, registry, Date.parse("2026-11-23T00:00:00Z")).stale, false, entry.id);
+  }
+});
+
 test("reasoning registry reports when a model rule is due for review", () => {
   const capability = resolveCapability({ provider: "deepseek", model: "deepseek-v4-preview" }, registry);
-  assert.equal(reviewStatus(capability, registry, Date.parse("2026-08-01T00:00:00Z")).stale, false);
-  const overdue = reviewStatus(capability, registry, Date.parse("2026-11-01T00:00:00Z"));
+  assert.equal(reviewStatus(capability, registry, Date.parse("2026-12-01T00:00:00Z")).stale, false);
+  const overdue = reviewStatus(capability, registry, Date.parse("2027-03-01T00:00:00Z"));
   assert.equal(overdue.stale, true);
-  assert.equal(overdue.reviewDueAt, "2026-10-14");
+  assert.equal(overdue.reviewDueAt, "2027-02-21");
 });

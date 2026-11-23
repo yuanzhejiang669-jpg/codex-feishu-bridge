@@ -9,7 +9,7 @@ const {
 
 test("loads the shared reasoning registry in the desktop backend", () => {
   const registry = reasoningRegistry();
-  assert.equal(registry.registryVersion, "2026-07-20");
+  assert.equal(registry.registryVersion, "2026-11-23");
   assert.equal(registry.defaultRequestedEffort, "medium");
   assert.deepEqual(REASONING_EFFORTS, registry.canonicalEfforts);
 });

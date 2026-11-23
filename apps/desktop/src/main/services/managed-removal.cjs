@@ -28,6 +28,7 @@ function publicBot(bot, runtime) {
     workspace: bot.workspace,
     codexHome: bot.codexHome,
     claudeHome: bot.claudeHome,
+    antigravityHome: bot.antigravityHome || "",
     engine: bot.engine || 'codex',
     online: runtime?.online === true,
     activeRunCount: Number(runtime?.activeRunCount || 0),
@@ -38,8 +39,13 @@ function previewManagedBotRemoval(name, options) {
   const bot = readManagedBots(options.dataRoot).find((item) => item.name === String(name || "").trim());
   if (!bot) throw new Error(`找不到客户端管理的 Bot：${name}`);
   const runtime = inspectManagedBots(options.dataRoot, options.localAppData).find((item) => item.name === bot.name);
-  const shared = readManagedBots(options.dataRoot).filter((item) => (
+  const allBots = readManagedBots(options.dataRoot);
+  const shared = allBots.filter((item) => (
     bot.codexHome && item.codexHome && item.name !== bot.name && path.resolve(item.codexHome) === path.resolve(bot.codexHome)
+  ));
+  const sharedAntigravity = allBots.filter((item) => (
+    bot.antigravityHome && item.antigravityHome && item.name !== bot.name
+    && path.resolve(item.antigravityHome).toLowerCase() === path.resolve(bot.antigravityHome).toLowerCase()
   ));
   return {
     kind: "bot",
@@ -47,14 +53,16 @@ function previewManagedBotRemoval(name, options) {
     title: `删除 ${bot.label || bot.name}`,
     bots: [publicBot(bot, runtime)],
     sharedCodexHomeBotCount: shared.length,
+    sharedAntigravityHomeBotCount: sharedAntigravity.length,
     paths: {
       workspace: bot.workspace,
       codexHome: bot.codexHome,
       claudeHome: bot.claudeHome,
+      antigravityHome: bot.antigravityHome || "",
       managedRoot: path.dirname(bot.configPath),
       runtimeRoot: managedRuntimeRoot(options.localAppData, bot.name),
     },
-    defaults: { deleteWorkspaces: false, deleteCodexHome: false, deleteRuntime: true },
+    defaults: { deleteWorkspaces: false, deleteCodexHome: false, deleteAntigravityHome: false, deleteRuntime: true },
     cloudApplicationPreserved: true,
   };
 }
@@ -124,6 +132,21 @@ async function applyManagedRemoval(input, options) {
     const otherOwner = allBots.find((item) => !targets.has(item.name) && path.resolve(item.codexHome) === path.resolve(preview.paths.codexHome));
     if (otherOwner) throw new Error(`Codex Home 仍被 ${otherOwner.name} 使用，不能删除`);
   }
+  const shouldDeleteAntigravityHome = kind === "bot" && input?.deleteAntigravityHome === true && Boolean(preview.paths.antigravityHome);
+  if (shouldDeleteAntigravityHome) {
+    if (preview.sharedAntigravityHomeBotCount > 0) {
+      throw new Error("Antigravity Home 仍被其他 Antigravity Bot 共用，不能删除");
+    }
+    const otherAntigravityOwner = allBots.find((item) => (
+      !targets.has(item.name)
+      && item.antigravityHome
+      && path.resolve(item.antigravityHome).toLowerCase() === path.resolve(preview.paths.antigravityHome).toLowerCase()
+    ));
+    if (otherAntigravityOwner) {
+      throw new Error(`Antigravity Home 仍被 ${otherAntigravityOwner.name} 共用，不能删除`);
+    }
+    assertOwnedChild(options.dataRoot, preview.paths.antigravityHome, "Antigravity Home");
+  }
   const stopped = [];
   try {
     for (const bot of preview.bots.filter((item) => item.online)) {
@@ -151,6 +174,9 @@ async function applyManagedRemoval(input, options) {
     if (kind === "space" && input?.deleteCodexHome === true) {
       fs.rmSync(assertOwnedChild(options.codexHomeRoot, preview.paths.codexHome, "空间 Codex Home"), { recursive: true, force: true });
     }
+    if (shouldDeleteAntigravityHome) {
+      fs.rmSync(assertOwnedChild(options.dataRoot, preview.paths.antigravityHome, "Antigravity Home"), { recursive: true, force: true });
+    }
     pruneFactoryQueue(options.dataRoot, new Set(removed));
     return {
       ok: true,
@@ -158,6 +184,7 @@ async function applyManagedRemoval(input, options) {
       removed,
       workspacesDeleted: input?.deleteWorkspaces === true,
       codexHomeDeleted: kind === "space" && input?.deleteCodexHome === true,
+      antigravityHomeDeleted: shouldDeleteAntigravityHome,
       cloudApplicationsPreserved: true,
     };
   } catch (error) {

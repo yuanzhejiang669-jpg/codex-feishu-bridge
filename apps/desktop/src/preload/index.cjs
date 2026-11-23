@@ -5,7 +5,7 @@ contextBridge.exposeInMainWorld("bridgeDesktop", Object.freeze({
   addOpenAiAccount: (input) => ipcRenderer.invoke("desktop:add-openai-account", input),
   setBotOpenAiAccount: (input) => ipcRenderer.invoke("desktop:set-bot-openai-account", input),
   forgetOpenAiAccount: (input) => ipcRenderer.invoke("desktop:forget-openai-account", input),
-  getState: () => ipcRenderer.invoke("desktop:get-state"),
+  getState: (options) => ipcRenderer.invoke("desktop:get-state", options || {}),
   antigravityListModels: (value) => ipcRenderer.invoke('desktop:antigravity-list-models', value),
   antigravityProbeProvider: (value) => ipcRenderer.invoke('desktop:antigravity-probe-provider', value),
   antigravitySaveProvider: (value) => ipcRenderer.invoke('desktop:antigravity-save-provider', value),
@@ -62,6 +62,12 @@ contextBridge.exposeInMainWorld("bridgeDesktop", Object.freeze({
   authorizeLarkUser: (name) => ipcRenderer.invoke("desktop:authorize-lark-user", name),
   previewCapabilityMigration: (value) => ipcRenderer.invoke("desktop:preview-capability-migration", value),
   applyCapabilityMigration: (value) => ipcRenderer.invoke("desktop:apply-capability-migration", value),
+  updateBotConfig: (value) => ipcRenderer.invoke("desktop:update-bot-config", value),
+  readBotLogs: (value) => ipcRenderer.invoke("desktop:read-bot-logs", value),
+  retryWorkspaceFactoryBot: (value) => ipcRenderer.invoke("desktop:retry-workspace-factory-bot", value),
+  discardWorkspaceFactoryQueue: () => ipcRenderer.invoke("desktop:discard-workspace-factory-queue"),
+  probeMcpHealth: () => ipcRenderer.invoke("desktop:probe-mcp-health"),
+  setOwnerOpenId: (value) => ipcRenderer.invoke("desktop:set-owner-open-id", value),
   onRegistrationProgress: (callback) => {
     const listener = (_event, value) => callback(value);
     ipcRenderer.on("desktop:registration-progress", listener);

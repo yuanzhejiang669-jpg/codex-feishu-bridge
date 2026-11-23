@@ -103,16 +103,30 @@ export function withLarkProfile(tool, profile) {
   return { ...tool, argsPrefix: [...(tool.argsPrefix || []), "--profile", name] };
 }
 
-export function resolveLarkEventLockScope(profile) {
-  const appId = resolveLarkConfigAppId(profile);
+export function resolveLarkProfileHome(env = process.env) {
+  return String(env?.CODEX_FEISHU_LARK_PROFILE_HOME || "").trim();
+}
+
+export function buildLarkCliEnv(larkProfileHome, baseEnv = process.env) {
+  const home = String(larkProfileHome || "").trim();
+  if (!home) return baseEnv;
+  return { ...baseEnv, USERPROFILE: home, HOME: home };
+}
+
+export function resolveLarkEventLockScope(profile, options = {}) {
+  const appId = resolveLarkConfigAppId(profile, options);
   const raw = appId ? `app-${appId}` : `profile-${String(profile || "default").trim() || "default"}`;
   return raw.replace(/[^a-zA-Z0-9_.-]/g, "-").slice(0, 96) || "default";
 }
 
-export function resolveLarkConfigAppId(profile) {
+export function resolveLarkConfigAppId(profile, options = {}) {
   const wanted = String(profile || "").trim();
+  const larkProfileHome = String(
+    options?.larkProfileHome ?? resolveLarkProfileHome(options?.env || process.env)
+  ).trim();
+  const homeDir = larkProfileHome || String(options?.homeDir || os.homedir());
   try {
-    const configPath = path.join(os.homedir(), ".lark-cli", "config.json");
+    const configPath = path.join(homeDir, ".lark-cli", "config.json");
     const parsed = JSON.parse(fs.readFileSync(configPath, "utf8"));
     const apps = Array.isArray(parsed?.apps) ? parsed.apps : [];
     const app = wanted

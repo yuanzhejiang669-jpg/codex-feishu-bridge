@@ -119,7 +119,7 @@ async function createAntigravityBot(raw, credentials, options, helpers) {
   const provider = antigravityProviderReference(raw, options);
   if (!/^cli_[A-Za-z0-9]+$/.test(credentials?.appId || '') || !credentials?.appSecret) throw new Error('飞书应用凭据无效');
   await helpers.assertLarkProfileAvailable(preview.bot.profile, options);
-  const permissionMode = raw.permissionMode || 'default'; if (!NATIVE_MODES.has(permissionMode)) throw new Error('权限模式无效');
+  const permissionMode = raw.permissionMode || 'always-proceed'; if (!NATIVE_MODES.has(permissionMode)) throw new Error('权限模式无效');
   const destination = path.join(options.dataRoot, 'managed-bots', preview.bot.name);
   const transaction = path.join(options.dataRoot, '.transactions', crypto.randomUUID());
   fs.mkdirSync(transaction, { recursive: true });
@@ -156,7 +156,7 @@ function previewAntigravityFactory(raw, options, existing) {
   if (new Set(bots.map((item) => item.name)).size !== count) throw new Error('名称模板生成重复标识');
   return { factory: { engine: 'antigravity', count, baseIndex, spaceName: raw.spaceName || 'Antigravity', slug: 'antigravity',
     providerId: provider.id, providerReference: provider, model: provider.model, reasoning: provider.reasoning,
-    permissionMode: raw.permissionMode || 'default', namePattern: raw.namePattern || 'antigravity-{index}', labelPattern: raw.labelPattern || 'Antigravity-{index}',
+    permissionMode: raw.permissionMode || 'always-proceed', namePattern: raw.namePattern || 'antigravity-{index}', labelPattern: raw.labelPattern || 'Antigravity-{index}',
     codexHome: path.join(options.dataRoot, 'antigravity-home') }, bots, available: bots.every((item) => !item.conflicts.length) };
 }
 

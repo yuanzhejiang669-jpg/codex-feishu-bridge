@@ -59,7 +59,7 @@ test("a completed login is recovered after restart and simultaneous refreshes im
   const abandoned = accounts.loginStagingHome(root); const request = path.join(abandoned, "request.json");
   fs.writeFileSync(request, '{}'); fs.utimesSync(request, new Date(0), new Date(0));
   await service.accountState(options); assert.equal(fs.existsSync(abandoned), false);
-  const renderer = fs.readFileSync(path.join(__dirname, "../src/renderer/app.js"), "utf8");
+  const renderer = fs.readFileSync(path.join(__dirname, "../src/renderer/views/providers.js"), "utf8");
   assert.match(renderer, /\["running", "finishing"\]\.includes\(modelSources\.accountLoginJob\?\.status\)/);
 });
 

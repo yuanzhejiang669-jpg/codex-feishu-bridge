@@ -164,3 +164,19 @@ test('Codex provider sync cannot target a Claude Bot or its private home', (t) =
   assert.equal(supportedClaudeVersion('2.1.328'), true);
   assert.equal(supportedClaudeVersion('2.1.80'), false);
 });
+
+test('ENG-CLD-002: createClaudeBot preserves max effortLevel in settings.json without downgrading to high', async (t) => {
+  const value = fixture(t);
+  await providers.saveClaudeProvider({ ...rawProvider('maxp'), effort: 'max' }, value);
+  const bot = await createManagedBot(
+    { name: 'claude-max', profile: 'claude-max', label: 'Claude Max', engine: 'claude', providerId: 'maxp', model: 'claude-test', reasoning: 'max' },
+    { appId: 'cli_max123', appSecret: 'app-secret' },
+    {
+      ...value,
+      larkCliPath: 'lark',
+      runLarkCli: async (_cli, args) => ({ stdout: args[0] === 'profile' && args[1] === 'list' ? '[]' : '{}' }),
+    },
+  );
+  const nativeSettings = JSON.parse(fs.readFileSync(path.join(bot.claudeHome, 'settings.json'), 'utf8'));
+  assert.equal(nativeSettings.modelSettings['claude-test'].effortLevel, 'max');
+});

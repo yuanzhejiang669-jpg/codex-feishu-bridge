@@ -2,6 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { readJsonFile, writeJsonFileAtomicSync } from '../utils/json.mjs';
 import { claudeSessionArtifacts } from './session-deletion.mjs';
+import nativeLock from '../sessions/native-lock.cjs';
+const { lockDirectoryAsync } = nativeLock;
 
 export const CLAUDE_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
 const effortOf = (value) => String(value || '').trim().toLowerCase();
@@ -53,7 +55,7 @@ export function claudeHelpMarkdown({ shared = false } = {}) {
 
 export function createClaudeCommands({ config, settings, botConfiguration, providers, saveSessions,
   activeJobs, getChatState, getSession, queueSummary = () => '无', testModel,
-  refreshModels = null, now = Date.now, sharedSessions, resolveSession }) {
+  refreshModels = null, now = Date.now, sharedSessions, resolveSession, accessContextFor }) {
   function currentProvider(session) { return providers().find((p) => p.id === settings(session).provider); }
   function persistDefaults(patch) {
     if (!config.claudeBotConfig) throw new Error('当前 Bot 没有可写的默认配置路径');
@@ -108,10 +110,12 @@ export function createClaudeCommands({ config, settings, botConfiguration, provi
     return [...new Set(models)];
   }
   async function handle(event, command, reply) {
-    const session = getSession(event.chat_id);
+    const accessCtx = accessContextFor ? accessContextFor(event) : undefined;
     const args = command.rest.trim().split(/\s+/).filter(Boolean);
     const action = (args[0] || '').toLowerCase();
     if (command.name === '/help') { await reply(claudeHelpMarkdown({ shared: Boolean(sharedSessions) })); return true; }
+    if (!['/status', '/context', '/how', '/now', '/rename', '/provider', '/model', '/effort'].includes(command.name)) return false;
+    const session = getSession(event.chat_id, accessCtx);
     if (['/status', '/context', '/how', '/now'].includes(command.name)) {
       const selected = settings(session); const job = activeJobs.get(event.chat_id);
       const compact = claudeCompactionSettings(config);
@@ -135,12 +139,13 @@ export function createClaudeCommands({ config, settings, botConfiguration, provi
       ].join('\n')); return true;
     }
     if (command.name === '/rename') {
+      if (activeJobs.has(event.chat_id)) throw new Error('当前会话正在运行，请等待本轮结束后再重命名。');
       const match = command.rest.trim().match(/^(\d+)\s+(.+)$/s);
       if (!command.rest.trim() || /^\d+$/.test(command.rest.trim())) {
         await reply('用法：/rename 新标题；或 /rename <list序号> 新标题。'); return true;
       }
-      const target = match ? (resolveSession ? resolveSession(event, match[1]) : getChatState(event.chat_id).sessions[Number(match[1]) - 1]) : session;
-      if (!target) throw new Error('没有找到这个会话，请先 /list');
+      const target = match ? (resolveSession ? resolveSession(event, match[1]) : getChatState(event.chat_id, accessCtx).sessions[Number(match[1]) - 1]) : session;
+      if (!target) throw new Error(`未找到可访问的会话：${match ? match[1] : ''}，请先发送 /list 查看可用序号。`);
       const title = (match ? match[2] : command.rest).trim().replace(/[\r\n]+/g, ' ').slice(0, 120);
       if (target.claudeSessionId) {
         for (const file of claudeSessionArtifacts(sharedSessions ? sharedSessions.sessionHome(target) : config.claudeHome, target.claudeSessionId).filter((p) => p.endsWith('.jsonl'))) {
@@ -185,12 +190,18 @@ export function createClaudeCommands({ config, settings, botConfiguration, provi
       let models = provider.models || [provider.model]; let notice = '';
       try {
         models = await fetchModels(provider);
-        // Re-read before replacing one entry, so concurrent desktop edits survive.
-        const catalog = JSON.parse(fs.readFileSync(config.claudeProviderCatalog, 'utf8'));
-        const current = catalog.providers.find((p) => p.id === provider.id);
-        if (current) {
-          current.models = models;
-          writeJsonFileAtomicSync(config.claudeProviderCatalog, catalog);
+        // Hold the shared cross-process lock around catalog read-modify-write so desktop & bridge edits never clobber each other.
+        const lockDir = path.join(path.dirname(config.claudeProviderCatalog), 'claude-providers.lock');
+        const releaseLock = await lockDirectoryAsync(lockDir, { purpose: 'claude-providers', bot: config.larkProfile || 'bridge' }, 3000);
+        try {
+          const catalog = JSON.parse(fs.readFileSync(config.claudeProviderCatalog, 'utf8'));
+          const current = catalog.providers.find((p) => p.id === provider.id);
+          if (current) {
+            current.models = models;
+            writeJsonFileAtomicSync(config.claudeProviderCatalog, catalog);
+          }
+        } finally {
+          releaseLock();
         }
       } catch (error) { notice = `\n查询失败：${error.message}；以下使用已保存的模型列表。`; }
       await reply(`当前模型：${settings(session).model}${notice}\n可选模型：\n${models.join('\n')}`); return true;
@@ -201,10 +212,11 @@ export function createClaudeCommands({ config, settings, botConfiguration, provi
     if (op === 'test') {
       const model = args[1] || settings(session).model;
       if (!(provider.models || [provider.model]).includes(model)) throw new Error('模型不在渠道列表中，请先 /model list');
-      if (activeJobs.size) throw new Error('请在当前任务结束后测试模型');
+      if (activeJobs.has(event.chat_id)) throw new Error('请在当前任务结束后测试模型');
       const result = await testModel(event, session, model);
       await reply(`Claude 模型测试成功\n模型：${model}\n渠道：${provider.id}\n耗时：${result.durationMs} ms\n结果：${result.text}`); return true;
     }
+    if (activeJobs.has(event.chat_id)) throw new Error('当前任务运行中不能切换模型，请等待完成或 /stop 后再执行 /model。');
     if (['clear', 'default', 'reset'].includes(op)) {
       session.modelOverride = ''; session.reasoningOverride = ''; changed(session);
       await reply(modelStatus(session, '已恢复当前 Bot 默认模型与强度')); return true;

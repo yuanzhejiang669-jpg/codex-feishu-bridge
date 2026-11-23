@@ -207,10 +207,23 @@ test("refreshes a managed Provider model catalog live and preserves the requeste
   });
   try {
     await service.start();
-    let response = await fetch(`http://127.0.0.1:${gatewayPort}/v1/models`);
+    const health = await fetch(`http://127.0.0.1:${gatewayPort}/healthz`);
+    assert.equal(health.status, 200);
+    assert.deepEqual(await health.json(), { ok: true });
+    assert.equal(JSON.stringify(service.snapshot()).includes("innerPort"), false);
+
+    // Reject unauthenticated, wrong-bearer, and cross-origin requests
+    assert.equal((await fetch(`http://127.0.0.1:${gatewayPort}/v1/models`)).status, 401);
+    assert.equal((await fetch(`http://127.0.0.1:${gatewayPort}/v1/models`, { headers: { authorization: "Bearer wrong" } })).status, 401);
+    assert.equal((await fetch(`http://127.0.0.1:${gatewayPort}/v1/models`, { headers: { authorization: "Bearer secret", origin: "https://evil.example" } })).status, 403);
+
+    const authHeaders = { authorization: "Bearer secret" };
+    let response = await fetch(`http://127.0.0.1:${gatewayPort}/v1/models`, { headers: authHeaders });
+    assert.equal(response.status, 200);
     assert.deepEqual((await response.json()).data.map((item) => item.id), ["model-a"]);
     models = ["model-a", "model-b"];
-    response = await fetch(`http://127.0.0.1:${gatewayPort}/v1/models`);
+    response = await fetch(`http://127.0.0.1:${gatewayPort}/v1/models`, { headers: authHeaders });
+    assert.equal(response.status, 200);
     assert.deepEqual((await response.json()).data.map((item) => item.id), ["model-a", "model-b"]);
     assert.deepEqual(readRegistry(root).providers[0].models.map((item) => item.id), ["model-a", "model-b"]);
     const runtimeCatalog = JSON.parse(fs.readFileSync(path.join(
@@ -219,7 +232,7 @@ test("refreshes a managed Provider model catalog live and preserves the requeste
     assert.equal(runtimeCatalog.providers[0].models.find((item) => item.id === "model-b").supportsImages, true);
     response = await fetch(`http://127.0.0.1:${gatewayPort}/v1/responses`, {
       method: "POST",
-      headers: { "content-type": "application/json", authorization: "Bearer ignored" },
+      headers: { "content-type": "application/json", authorization: "Bearer secret" },
       body: JSON.stringify({
         model: "model-b",
         input: "Reply OK",
@@ -232,7 +245,7 @@ test("refreshes a managed Provider model catalog live and preserves the requeste
     assert.equal((await response.json()).model, "model-b");
     response = await fetch(`http://127.0.0.1:${gatewayPort}/v1/responses`, {
       method: "POST",
-      headers: { "content-type": "application/json", authorization: "Bearer ignored" },
+      headers: { "content-type": "application/json", authorization: "Bearer secret" },
       body: JSON.stringify({
         model: "model-b",
         input: [{
@@ -249,6 +262,22 @@ test("refreshes a managed Provider model catalog live and preserves the requeste
     });
     assert.equal(response.status, 200);
     await response.json();
+    assert.equal(service.activeRequestCount("dynamic"), 0);
+    // Simulate client abort mid-request and confirm activeRequests returns to 0
+    await new Promise((resolve) => {
+      const abortedReq = http.request({
+        host: "127.0.0.1",
+        port: gatewayPort,
+        method: "POST",
+        path: "/v1/responses",
+        headers: { "content-type": "application/json", authorization: "Bearer secret", "content-length": "500" },
+      });
+      abortedReq.on("error", () => resolve());
+      abortedReq.write('{"model":"model-b","input":"partial');
+      setTimeout(() => { abortedReq.destroy(); resolve(); }, 40);
+    });
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    assert.equal(service.activeRequestCount("dynamic"), 0);
     assert.deepEqual(requestedModels, ["model-b", "model-b"]);
     assert.equal(upstreamRequests[0].reasoning_effort, "minimal");
     assert.match(JSON.stringify(upstreamRequests[1]), /data:image\/png;base64,/);

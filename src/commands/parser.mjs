@@ -9,7 +9,8 @@ const CLAUDE_BRIDGE_COMMANDS = new Set(['/help', '/new', '/list', '/sessions', '
   '/clearqueue', '/clearqueueall', '/approve', '/deny', '/goal', '/fast', '/compact', '/delete', '/del', '/rm', '/confirm', '/steer']);
 const ANTIGRAVITY_BRIDGE_COMMANDS = new Set(['/help', '/new', '/list', '/sessions', '/switch', '/rename', '/reset',
   '/status', '/context', '/how', '/now', '/provider', '/model', '/effort', '/mode', '/stop', '/stopall', '/queue',
-  '/clearqueue', '/clearqueueall', '/approve', '/deny', '/delete', '/del', '/rm', '/confirm']);
+  '/clearqueue', '/clearqueueall', '/approve', '/deny', '/delete', '/del', '/rm', '/confirm',
+  '/steer', '/goal', '/fast', '/compact']);
 
 export function parseCommand(content, { extractText = null, engine = 'codex' } = {}) {
   const text = (typeof extractText === "function" ? extractText(content) : "") || normalizeUserContent(content);

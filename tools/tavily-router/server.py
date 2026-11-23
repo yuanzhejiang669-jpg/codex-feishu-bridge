@@ -4,7 +4,7 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from tavily_router_core import TavilyRouter
+from tavily_router_core import TavilyRouter, sanitize_text as sanitize
 
 mcp = FastMCP('tavily')
 router = TavilyRouter()

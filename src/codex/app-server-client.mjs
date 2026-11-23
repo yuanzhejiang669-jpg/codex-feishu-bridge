@@ -1,6 +1,8 @@
 import { spawn } from "node:child_process";
+import { StringDecoder } from "node:string_decoder";
 
 export const DEFAULT_MAX_STDERR_BYTES = 1024 * 1024;
+export const DEFAULT_MAX_LINE_BYTES = 16 * 1024 * 1024;
 
 export class AppServerRpcError extends Error {
   constructor(error, method, formatError = defaultErrorText) {
@@ -25,6 +27,7 @@ export class AppServerClient {
     terminateProcessTree = () => {},
     spawnProcess = spawn,
     maxStderrBytes = DEFAULT_MAX_STDERR_BYTES,
+    maxLineBytes = DEFAULT_MAX_LINE_BYTES,
     stopGraceMs = 5000,
     environment = {},
     accountAlias = "",
@@ -45,6 +48,9 @@ export class AppServerClient {
     this.nextId = 1;
     this.pending = new Map();
     this.buffer = "";
+    this.stdoutDecoder = new StringDecoder("utf8");
+    this.maxLineBytes = Math.max(64 * 1024, Number(maxLineBytes) || DEFAULT_MAX_LINE_BYTES);
+    this.exitPromise = null;
     this.notifications = [];
     this.notificationWaiters = [];
     this.maxStderrBytes = Math.max(1024, Number(maxStderrBytes) || DEFAULT_MAX_STDERR_BYTES);
@@ -78,8 +84,13 @@ export class AppServerClient {
     this.child.stderr.on("data", (chunk) => this.appendStderr(chunk));
     this.child.stdin.on("error", (error) => this.rejectAll(error));
     this.child.on("error", (error) => this.rejectAll(error));
+    this.exitPromise = new Promise((resolve) => {
+      this.child.once("close", (code, signal) => resolve({ code, signal }));
+    });
     this.child.on("close", (code, signal) => {
       this.closed = true;
+      const tail = this.stdoutDecoder.end();
+      if (tail) this.buffer += tail;
       clearTimeout(this.stopEscalationTimer);
       this.stopEscalationTimer = null;
       this.activeChildren.delete(this.child?.pid);
@@ -91,7 +102,7 @@ export class AppServerClient {
   }
 
   onStdout(chunk) {
-    this.buffer += chunk.toString("utf8");
+    this.buffer += typeof chunk === "string" ? chunk : this.stdoutDecoder.write(chunk);
     for (;;) {
       const index = this.buffer.indexOf("\n");
       if (index < 0) break;
@@ -109,6 +120,16 @@ export class AppServerClient {
         continue;
       }
       this.handleMessage(message);
+    }
+    if (Buffer.byteLength(this.buffer, "utf8") > this.maxLineBytes) {
+      const error = new Error(`codex app-server stdout line exceeded ${this.maxLineBytes} bytes limit`);
+      this.log("ERROR", "app-server stdout line limit exceeded", {
+        maxLineBytes: this.maxLineBytes,
+        bufferedBytes: Buffer.byteLength(this.buffer, "utf8"),
+      });
+      this.buffer = "";
+      this.rejectAll(error);
+      void this.stop();
     }
   }
 
@@ -228,11 +249,26 @@ export class AppServerClient {
       this.child.kill("SIGTERM");
     } catch {}
     if (this.closed) return;
+    clearTimeout(this.stopEscalationTimer);
     this.stopEscalationTimer = setTimeout(() => {
       this.stopEscalationTimer = null;
       if (!this.closed) this.terminateProcessTree(this.child?.pid, true);
     }, this.stopGraceMs);
     this.stopEscalationTimer.unref?.();
+    if (this.exitPromise) {
+      let waitTimer = null;
+      try {
+        await Promise.race([
+          this.exitPromise,
+          new Promise((resolve) => {
+            waitTimer = setTimeout(resolve, this.stopGraceMs + 1000);
+            waitTimer.unref?.();
+          }),
+        ]);
+      } finally {
+        clearTimeout(waitTimer);
+      }
+    }
   }
 
   rejectAll(error) {

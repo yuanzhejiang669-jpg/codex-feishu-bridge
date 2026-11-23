@@ -90,6 +90,7 @@ function handlerHarness(enrich = async (event) => event) {
     downloadImageAttachments: async () => { calls.downloads++; return []; },
     downloadFileAttachments: async () => { calls.downloads++; return []; },
     takePendingAttachments: () => { calls.pendingTaken++; return []; },
+    withAttachmentLock: async (_chatId, fn) => fn(),
     prepareCommandAttachments: async () => {},
     handleCommand: async () => { calls.commands++; },
   };

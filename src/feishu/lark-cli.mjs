@@ -3,9 +3,11 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { parseJsonLoose } from "../utils/json.mjs";
+import { buildLarkCliEnv } from "../config/env.mjs";
 
 export function createLarkClient({
   larkCli,
+  larkProfileHome = "",
   runTool,
   delay,
   splitText,
@@ -20,7 +22,14 @@ export function createLarkClient({
     const attempts = options.attempts ?? 3;
     let last;
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
-      last = await runTool(larkCli, args, { ...options, timeoutMs: options.timeoutMs || 60_000 });
+      const env = larkProfileHome
+        ? buildLarkCliEnv(larkProfileHome, { ...process.env, ...(options.env || {}) })
+        : options.env;
+      last = await runTool(larkCli, args, {
+        ...options,
+        ...(env ? { env } : {}),
+        timeoutMs: options.timeoutMs || 60_000,
+      });
       if (last.code === 0) return last;
       if (attempt < attempts && isTransientLarkError(last)) {
         await delay(1500 * attempt);
@@ -186,7 +195,8 @@ export function createLarkClient({
 
 export function isTransientLarkError(result) {
   const text = `${result?.stderr || ""}\n${result?.stdout || ""}`;
-  return /connectex|ECONN|ETIMEDOUT|open\.feishu\.cn|tenant_access_token|socket|cardid is invalid|ErrCode:\s*11310/i.test(text);
+  if (/\bHTTP\s*4(?:00|01|03|04|09|22)\b/i.test(text)) return false;
+  return /connectex|ECONN(?:RESET|REFUSED|ABORTED)|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|TLS|HTTP\s*(?:429|50[234])|tenant_access_token|cardid is invalid|ErrCode:\s*11310/i.test(text);
 }
 
 function findNestedValue(value, key) {

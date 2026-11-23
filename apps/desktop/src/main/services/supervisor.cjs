@@ -8,6 +8,7 @@ const { execFileSync, spawn } = require("node:child_process");
 const { activeRunCount, isProcessAlive, readJson } = require("./bridge-discovery.cjs");
 const { readManagedBots } = require("./bot-setup.cjs");
 const { inspectProviderCatalog } = require("./provider-manager.cjs");
+const { readDesktopSettings } = require("./desktop-settings.cjs");
 
 const ENV_NAME = /^[A-Z_][A-Z0-9_]{0,127}$/;
 
@@ -150,13 +151,22 @@ function processEnvironment(options, bot = null) {
   const environment = {
     ...process.env,
     LOCALAPPDATA: options.localAppData,
-    USERPROFILE: profileHome,
-    HOME: profileHome,
+    CODEX_FEISHU_LARK_PROFILE_HOME: profileHome,
     CODEX_FEISHU_OPENAI_ACCOUNTS_ROOT: path.join(options.defaultCodexHome || path.join(os.homedir(), ".codex"), "bridge-openai-accounts"),
     CODEX_FEISHU_OPENAI_DEFAULT_ACCOUNT: bot?.openaiAccount || "",
     LARK_CLI_BIN: options.larkCliPath,
+    ...(String(options.ownerOpenId || (options.dataRoot ? readDesktopSettings(options.dataRoot).ownerOpenId : "") || "").trim() ? { CODEX_FEISHU_OWNER_OPEN_ID: String(options.ownerOpenId || readDesktopSettings(options.dataRoot).ownerOpenId || "").trim() } : {}),
     PATH: [...toolDirs, process.env.PATH || ""].join(path.delimiter),
   };
+  if (bot?.name) {
+    const instanceStateDir = path.join(managedRuntimeRoot(options.localAppData, bot.name), "state");
+    if (!String(environment.PLAYWRIGHT_MCP_USER_DATA_DIR || "").trim()) {
+      environment.PLAYWRIGHT_MCP_USER_DATA_DIR = path.join(instanceStateDir, "browser-profiles", "cloakbrowser");
+    }
+    if (!String(environment.PLAYWRIGHT_MCP_OUTPUT_DIR || "").trim()) {
+      environment.PLAYWRIGHT_MCP_OUTPUT_DIR = path.join(instanceStateDir, "browser-output", "cloakbrowser");
+    }
+  }
   if (bot?.provider?.mode === "custom") {
     if (typeof options.decryptSecret !== "function") throw new Error("系统安全存储不可用，无法读取 Provider API Key");
     const secretPath = path.join(path.dirname(bot.configPath), "provider-secret.bin");
@@ -185,7 +195,7 @@ function processEnvironment(options, bot = null) {
     environment.CLAUDE_FEISHU_PROVIDER_ID = bot.provider?.id || '';
     environment.CLAUDE_FEISHU_BOT_CONFIG = bot.configPath;
     environment.CLAUDE_FEISHU_TOOLS_ROOT = path.join(options.dataRoot, 'claude-tools');
-    environment.CLAUDE_FEISHU_PERMISSION_MODE = bot.claude?.permissionMode || 'manual';
+    environment.CLAUDE_FEISHU_PERMISSION_MODE = bot.claude?.permissionMode || 'bypassPermissions';
   }
   return environment;
 }
@@ -291,7 +301,7 @@ function posixBridgeEnvironment(bot, codexHome, options, paths) {
     CODEX_FEISHU_LARK_PROFILE: bot.profile,
     CODEX_FEISHU_SANDBOX: "danger-full-access",
     CODEX_FEISHU_RUN_MODE: "app-server",
-    CODEX_FEISHU_EVENT_KEYS: "im.message.receive_v1",
+    CODEX_FEISHU_EVENT_KEYS: "im.message.receive_v1,im.message.recalled_v1",
     CODEX_FEISHU_REASONING: String(bot.provider?.reasoning || ""),
     CODEX_FEISHU_CODEX_TIMEOUT_MS: "0",
     CODEX_FEISHU_CODEX_IDLE_TIMEOUT_MS: "3600000",
@@ -352,40 +362,52 @@ async function stopManagedBotPosix(current, options) {
   fs.mkdirSync(paths.stateDir, { recursive: true });
   fs.writeFileSync(path.join(paths.stateDir, "bridge.stop"), `${new Date().toISOString()}\n`, "utf8");
   const force = options.force === true;
-  const deadline = Date.now() + (force ? 2_000 : 10_000);
+  const platform = options.platform || process.platform;
+  const deadline = Date.now() + (force ? 2_000 : platform === "win32" ? 5_000 : 10_000);
   while (Date.now() < deadline) {
     if (!isProcessAlive(current.processId)) break;
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
-  if (force) {
-    if ((options.platform || process.platform) === 'win32') {
-      try { await new Promise((resolve, reject) => require('node:child_process').execFile('taskkill.exe', ['/PID', String(current.processId), '/T', '/F'], { windowsHide: true }, (error) => error && isProcessAlive(current.processId) ? reject(error) : resolve())); }
-      catch (error) { if (isProcessAlive(current.processId)) throw error; }
-    }
-    try { process.kill(-current.processId, "SIGTERM"); } catch {
-      try { process.kill(current.processId, "SIGTERM"); } catch {}
-    }
-    const killDeadline = Date.now() + 5_000;
-    while (Date.now() < killDeadline && isProcessAlive(current.processId)) {
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-    if (isProcessAlive(current.processId)) {
-      try { process.kill(-current.processId, "SIGKILL"); } catch {
-        try { process.kill(current.processId, "SIGKILL"); } catch {}
+  if (isProcessAlive(current.processId)) {
+    if (platform === "win32") {
+      try {
+        await new Promise((resolve, reject) => require("node:child_process").execFile(
+          "taskkill.exe",
+          ["/PID", String(current.processId), "/T", "/F"],
+          { windowsHide: true },
+          (error) => (error && isProcessAlive(current.processId) ? reject(error) : resolve()),
+        ));
+      } catch (error) {
+        if (isProcessAlive(current.processId)) throw error;
       }
-      const forceDeadline = Date.now() + 2_000;
-      while (Date.now() < forceDeadline && isProcessAlive(current.processId)) {
+      const winDeadline = Date.now() + 2_000;
+      while (Date.now() < winDeadline && isProcessAlive(current.processId)) {
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
+      if (isProcessAlive(current.processId)) {
+        throw new Error(`Bridge process tree ${current.processId} did not stop after taskkill`);
+      }
+    } else {
+      try { process.kill(-current.processId, "SIGTERM"); } catch {
+        try { process.kill(current.processId, "SIGTERM"); } catch {}
+      }
+      const killDeadline = Date.now() + 5_000;
+      while (Date.now() < killDeadline && isProcessAlive(current.processId)) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      if (isProcessAlive(current.processId)) {
+        try { process.kill(-current.processId, "SIGKILL"); } catch {
+          try { process.kill(current.processId, "SIGKILL"); } catch {}
+        }
+        const forceDeadline = Date.now() + 2_000;
+        while (Date.now() < forceDeadline && isProcessAlive(current.processId)) {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+      }
+      if (isProcessAlive(current.processId)) {
+        throw new Error(`Bridge process group ${current.processId} did not stop after SIGKILL`);
+      }
     }
-    if (isProcessAlive(current.processId)) throw new Error(`Bridge process group ${current.processId} did not stop after SIGKILL`);
-  } else if (isProcessAlive(current.processId)) {
-    try { process.kill(current.processId, "SIGTERM"); } catch {}
-    const killDeadline = Date.now() + 5_000;
-    while (Date.now() < killDeadline && isProcessAlive(current.processId)) {
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-    if (isProcessAlive(current.processId)) throw new Error(`Bridge process ${current.processId} did not stop after SIGTERM`);
   }
   fs.rmSync(path.join(paths.stateDir, "bridge.pid"), { force: true });
   fs.rmSync(path.join(paths.stateDir, "bridge.stop"), { force: true });

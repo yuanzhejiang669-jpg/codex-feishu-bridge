@@ -55,11 +55,12 @@ export function claudeSessionArtifacts(home, nativeId) {
 }
 
 export function createClaudeSessionDeletion({ config, getChatState, getChats, saveSessions, activeJobs,
-  now = Date.now, sharedSessions }) {
+  now = Date.now, sharedSessions, accessContextFor }) {
   const lists = new Map();
   const pending = new Map();
   const ttl = Number(config.deleteConfirmTtlMs) > 0 ? Number(config.deleteConfirmTtlMs) : 5 * 60_000;
   const keyFor = (event) => JSON.stringify([event.chat_id, event.sender_id || '']);
+  const ctxFor = (event) => (accessContextFor ? accessContextFor(event) : sharedSessions?.accessContextForEvent?.(event));
   const snapshot = (items) => items.map((item, i) => ({ index: i + 1, id: item.id,
     nativeId: item.claudeSessionId || '', title: item.title || '未命名会话', engine: item.engine }));
   function cleanup() {
@@ -81,7 +82,7 @@ export function createClaudeSessionDeletion({ config, getChatState, getChats, sa
     return parsed;
   }
   function precheck(event, items) {
-    const chat = getChatState(event.chat_id);
+    const chat = getChatState(event.chat_id, ctxFor(event));
     const allChats = getChats ? getChats() : { [event.chat_id]: chat };
     const selected = new Set(items.map((item) => item.id));
     const activePath = config.stateDir && path.join(config.stateDir, 'active-runs.json');
@@ -107,6 +108,10 @@ export function createClaudeSessionDeletion({ config, getChatState, getChats, sa
   }
   async function handle(event, command, reply) {
     if (!['/delete', '/del', '/rm', '/confirm'].includes(command.name)) return false;
+    if (activeJobs.has(event.chat_id)) {
+      await reply('当前聊天有任务正在运行，请先 /stop 或等待结束后再执行 /delete。');
+      return true;
+    }
     cleanup();
     const key = keyFor(event);
     let releaseDelete;
@@ -117,10 +122,14 @@ export function createClaudeSessionDeletion({ config, getChatState, getChats, sa
           await reply('用法：/delete <序号或ID>，支持 /delete 1 2、/delete 1-3。先 /list 查看会话，删除需要按预览二次确认。'); return true;
         }
         const parsed = selection(command.rest);
-        const list = lists.get(key)?.items || snapshot(getChatState(event.chat_id).sessions);
-        const items = parsed.indexes ? parsed.indexes.map((index) => list[index - 1])
+        const accessCtx = ctxFor(event);
+        const visibleChat = getChatState(event.chat_id, accessCtx);
+        const visibleIds = new Set(visibleChat.sessions.map((row) => row.id));
+        const rawList = lists.get(key)?.items || snapshot(visibleChat.sessions);
+        const list = rawList.filter((item) => visibleIds.has(item.id));
+        const items = parsed.indexes ? parsed.indexes.map((index) => rawList[index - 1]).filter((item) => !item || visibleIds.has(item.id))
           : list.filter((item) => item.id === parsed.target || item.nativeId === parsed.target);
-        if (!items.length || items.some((item) => !item)) throw new Error('没有找到所选会话，请重新 /list 查看序号或 ID');
+        if (!items.length || items.some((item) => !item)) throw new Error(`未找到可访问的会话：${command.rest.trim()}，请先发送 /list 查看可用序号。`);
         const checked = precheck(event, items);
         const confirmText = compressIndexes(items.map((item) => item.index));
         const expiresAt = now() + ttl;
@@ -130,7 +139,7 @@ export function createClaudeSessionDeletion({ config, getChatState, getChats, sa
             ? '确认后将从所有 Claude Bot 的共享会话库删除所选会话，并删除其原生聊天记录及会话数据目录。各 Bot 将无法再续接这些会话。工作区文件保留。'
             : '确认后将删除所选 Bridge 会话绑定、当前 Bot Claude Home 中对应的原生聊天记录及其会话数据目录。工作区文件保留。',
           `待删除：${items.length} 条；本地会话记录路径：${new Set(checked.flatMap((item) => item.artifacts)).size} 个`,
-          ...items.map((item) => `${item.index}. ${item.title} (${item.id})${item.id === getChatState(event.chat_id).currentSessionId ? ' · 当前会话' : ''}`),
+          ...items.map((item) => `${item.index}. ${item.title} (${item.id})${item.id === visibleChat.currentSessionId ? ' · 当前会话' : ''}`),
           '', `确认有效期：${new Date(expiresAt).toLocaleString('zh-CN')}`,
           `确认删除请输入：\`/confirm delete ${confirmText}\``].join('\n'));
         return true;
@@ -142,7 +151,10 @@ export function createClaudeSessionDeletion({ config, getChatState, getChats, sa
       if (!confirmation || !parsed.indexes || compressIndexes(parsed.indexes) !== confirmation.confirmText) {
         throw new Error('删除确认不存在、已过期或与预览不一致，请重新 /delete 预览');
       }
-      releaseDelete = sharedSessions?.acquireMany(confirmation.items);
+      const accessCtx = ctxFor(event);
+      releaseDelete = sharedSessions
+        ? (sharedSessions.acquireManyAsync ? await sharedSessions.acquireManyAsync(confirmation.items) : sharedSessions.acquireMany(confirmation.items))
+        : null;
       const checked = precheck(event, confirmation.items);
       // No awaits between final precheck, file removal and binding persistence.
       // Other incoming messages cannot start a turn inside this critical section.
@@ -157,8 +169,8 @@ export function createClaudeSessionDeletion({ config, getChatState, getChats, sa
           removed.add(item.id);
         } catch (error) { failures.push(`${item.id}：${error.message}`); }
       }
-      sharedSessions?.remove([...removed]);
-      const chat = getChatState(event.chat_id);
+      sharedSessions?.remove([...removed], accessCtx);
+      const chat = getChatState(event.chat_id, accessCtx);
       chat.sessions = chat.sessions.filter((item) => !removed.has(item.id));
       if (!chat.sessions.some((item) => item.id === chat.currentSessionId)) chat.currentSessionId = chat.sessions[0]?.id || '';
       saveSessions();

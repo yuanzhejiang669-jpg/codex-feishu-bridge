@@ -436,7 +436,7 @@ test("event dispatcher clear cancels a queued event already in preflight", async
   dispatcher.enqueue({ chatId: "chat-a", messageId: "second" });
   releaseFirst();
   await preflightEntered;
-  assert.equal(dispatcher.clearForChat("chat-a"), 1);
+  assert.deepEqual(dispatcher.clearForChat("chat-a"), { removedQueued: 0, cancelledPreflight: 1 });
   assert.equal(dispatcher.pendingCount, 0);
   releasePreflight();
   await waitFor(() => dispatcher.activeJobs === 0);
@@ -468,7 +468,7 @@ test("event dispatcher clear does not cancel a queued event after commit", async
   dispatcher.enqueue({ chatId: "chat-a", messageId: "first" });
   dispatcher.enqueue({ chatId: "chat-a", messageId: "second" });
   await committed;
-  assert.equal(dispatcher.clearForChat("chat-a"), 0);
+  assert.deepEqual(dispatcher.clearForChat("chat-a"), { removedQueued: 0, cancelledPreflight: 0 });
   releaseCommitted();
   await waitFor(() => dispatcher.activeJobs === 0);
 });
@@ -559,14 +559,14 @@ test("event dispatcher clear is idempotent and all mode includes cross-chat pref
   dispatcher.enqueue({ chatId: "chat-current", messageId: "first" });
   dispatcher.enqueue({ chatId: "chat-a", messageId: "second" });
   dispatcher.enqueue({ chatId: "chat-b", messageId: "third" });
-  assert.equal(dispatcher.clearForChat("chat-a"), 1);
-  assert.equal(dispatcher.clearForChat("chat-a"), 0);
+  assert.deepEqual(dispatcher.clearForChat("chat-a"), { removedQueued: 1, cancelledPreflight: 0 });
+  assert.deepEqual(dispatcher.clearForChat("chat-a"), { removedQueued: 0, cancelledPreflight: 0 });
   assert.equal(dispatcher.summary("chat-a"), "总队列 1，当前聊天 0");
 
   releaseFirst();
   await preflightEntered;
-  assert.equal(dispatcher.clearForChat("", { all: true }), 1);
-  assert.equal(dispatcher.clearForChat("", { all: true }), 0);
+  assert.deepEqual(dispatcher.clearForChat("", { all: true }), { removedQueued: 0, cancelledPreflight: 1 });
+  assert.deepEqual(dispatcher.clearForChat("", { all: true }), { removedQueued: 0, cancelledPreflight: 0 });
   releasePreflight();
   await waitFor(() => dispatcher.activeJobs === 0);
   assert.equal(thirdCommitted, false);
@@ -675,28 +675,30 @@ test("workspace factory and runtime keep distinct Codex homes isolated", () => {
 
 test("explicit steer stays out of the ordinary queue and never starts a replacement turn", () => {
   const bridgeSource = fs.readFileSync(new URL("../codex-feishu-bridge.mjs", import.meta.url), "utf8");
-  const handlerStart = bridgeSource.indexOf("async function handleSteerCommand(");
-  const handlerEnd = bridgeSource.indexOf("async function handleCompactCommand(", handlerStart);
-  const handlerSource = bridgeSource.slice(handlerStart, handlerEnd);
+  const routerSource = fs.readFileSync(new URL("../src/commands/router.mjs", import.meta.url), "utf8");
+  const attachmentsSource = fs.readFileSync(new URL("../src/feishu/attachments.mjs", import.meta.url), "utf8");
+  const handlerStart = routerSource.indexOf("async function handleSteerCommand(");
+  const handlerEnd = routerSource.indexOf("async function handleCompactCommand(", handlerStart);
+  const handlerSource = routerSource.slice(handlerStart, handlerEnd);
 
   assert.ok(handlerStart >= 0 && handlerEnd > handlerStart);
-  assert.match(bridgeSource, /case "\/steer":[\s\S]*handleSteerCommand/);
+  assert.match(routerSource, /case "\/steer":[\s\S]*handleSteerCommand/);
   assert.match(handlerSource, /"turn\/steer"/);
   assert.doesNotMatch(handlerSource, /"turn\/start"/);
   assert.match(handlerSource, /activeCodexJobs\.get\(chatId\) !== job/);
   assert.match(handlerSource, /job\.steerInFlight/);
   assert.match(handlerSource, /takePendingAttachments\(chatId\)/);
   assert.match(handlerSource, /addPendingAttachments\(chatId, steerAttachments\)/);
-  assert.match(bridgeSource, /async function prepareCommandAttachments\(/);
+  assert.match(attachmentsSource, /async function prepareCommandAttachments\(/);
   assert.match(bridgeSource, /handleOutOfBandCommand[\s\S]*prepareCommandAttachments\(event, command\)[\s\S]*handleCommand\(event, command\)/);
   assert.match(bridgeSource, /if \(command\)[\s\S]*prepareCommandAttachments\(event, command\)[\s\S]*handleCommand\(event, command\)/);
-  assert.match(bridgeSource, /command\?\.name !== "\/steer"/);
-  assert.match(bridgeSource, /downloadImageAttachments\(event\)/);
-  assert.match(bridgeSource, /downloadFileAttachments\(event\)/);
-  assert.match(bridgeSource, /image download reported success without a saved file/);
-  assert.match(bridgeSource, /file download reported success without a saved file/);
+  assert.match(attachmentsSource, /command\?\.name !== "\/steer"/);
+  assert.match(attachmentsSource, /downloadImageAttachments\(event\)/);
+  assert.match(attachmentsSource, /downloadFileAttachments\(event\)/);
+  assert.match(attachmentsSource, /image download reported success without a saved file/);
+  assert.match(attachmentsSource, /file download reported success without a saved file/);
   assert.match(handlerSource, /downloadFailures/);
-  assert.match(bridgeSource, /`\/steer <补充内容>`/);
+  assert.match(routerSource, /`\/steer <补充内容>`/);
 });
 
 test("pending attachments are deduplicated when a failed steer is retried", () => {
@@ -721,6 +723,7 @@ test("pending attachments are deduplicated when a failed steer is retried", () =
 
 test("ordinary messages start Codex without awaiting CardKit and use the warm app-server pool", () => {
   const bridgeSource = fs.readFileSync(new URL("../codex-feishu-bridge.mjs", import.meta.url), "utf8");
+  const runnerSource = fs.readFileSync(new URL("../src/codex/runner.mjs", import.meta.url), "utf8");
   const handlerStart = bridgeSource.indexOf("async function handleEvent(");
   const handlerEnd = bridgeSource.indexOf("function cleanupClearedDownloads(", handlerStart);
   const handlerSource = bridgeSource.slice(handlerStart, handlerEnd);
@@ -728,9 +731,9 @@ test("ordinary messages start Codex without awaiting CardKit and use the warm ap
   const cardPromiseIndex = handlerSource.indexOf("const cardOpenPromise =");
   const runCodexIndex = handlerSource.indexOf("const result = await runCodex(");
   const awaitCardIndex = handlerSource.indexOf("await cardOpenPromise;", runCodexIndex);
-  const runStart = bridgeSource.indexOf("async function runCodexAppServer(");
-  const runEnd = bridgeSource.indexOf("async function runCodex(", runStart);
-  const runSource = bridgeSource.slice(runStart, runEnd);
+  const runStart = runnerSource.indexOf("async function runCodexAppServer(");
+  const runEnd = runnerSource.indexOf("async function runCodex(", runStart);
+  const runSource = runnerSource.slice(runStart, runEnd);
 
   assert.ok(activeRunIndex >= 0);
   assert.ok(cardPromiseIndex > activeRunIndex);

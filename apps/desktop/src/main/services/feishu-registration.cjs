@@ -30,6 +30,7 @@ async function registerBotWithQr(raw, options, onProgress = () => {}) {
     onProgress({ stage: "requesting", message: "正在请求飞书注册二维码" });
     const result = await registerApp({
       source: "codex",
+      domain: preview.bot.brand === "lark" ? "accounts.larksuite.com" : "accounts.feishu.cn",
       signal: abort.signal,
       appPreset: { name: preview.bot.label },
       onQRCodeReady: async (info) => {

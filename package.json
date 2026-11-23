@@ -9,7 +9,7 @@
     "url": "git+ssh://git@github.com/yuanzhejiang669-jpg/codex-feishu-bridge.git"
   },
   "scripts": {
-    "check": "node scripts/check-syntax.mjs && node scripts/check-control-panel-static.mjs && node scripts/check-model-reasoning-capabilities.mjs && node --test test/*.test.mjs test/*.test.cjs",
+    "check": "node scripts/check-syntax.mjs && node scripts/check-tools-python.mjs && node scripts/check-control-panel-static.mjs && node scripts/check-model-reasoning-capabilities.mjs && node --test test/*.test.mjs test/*.test.cjs",
     "smoke:app-server": "node scripts/smoke-app-server.mjs",
     "smoke:app-server-pool": "node scripts/smoke-app-server-pool.mjs",
     "smoke:formulas": "node scripts/smoke-formula-renderer.mjs",
@@ -19,7 +19,7 @@
     "panel": "node control-panel.mjs"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.5.0"
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.66.1",

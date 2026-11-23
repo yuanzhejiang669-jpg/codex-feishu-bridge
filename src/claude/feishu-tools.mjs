@@ -9,6 +9,7 @@ export function feishuMcpConfiguration(config, event) {
   return JSON.stringify({ mcpServers: { feishu_bridge: { command: process.execPath,
     args: [fileURLToPath(import.meta.url)], env: { CFB_FEISHU_TOOL_CONTEXT: JSON.stringify({
       chatId: event.chat_id, messageId: event.message_id || event.id || '', profile: config.larkProfile,
+      larkProfileHome: config.larkProfileHome || '',
       workspace: config.workspace, larkCli: config.larkCli, maxBytes: config.maxFileAttachmentBytes || 50 * 1024 * 1024,
     }) } } } });
 }
@@ -29,10 +30,15 @@ function safeError(error) {
     .replace(/Bearer\s+\S+/gi, 'Bearer [redacted]').slice(0, 1800);
 }
 
-function runCli(tool, args, cwd, spawnProcess = spawn) {
+function runCli(tool, args, cwd, options = {}) {
+  const spawnProcess = typeof options === 'function' ? options : (options.spawnProcess || spawn);
+  const larkProfileHome = typeof options === 'object' ? String(options.larkProfileHome || '').trim() : '';
+  const env = larkProfileHome
+    ? { ...process.env, USERPROFILE: larkProfileHome, HOME: larkProfileHome }
+    : process.env;
   return new Promise((resolve, reject) => {
     const child = spawnProcess(tool.command, [...(tool.argsPrefix || []), ...args], {
-      cwd, env: process.env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+      cwd, env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
     });
     let stdout = ''; let stderr = ''; let settled = false;
     const finish = (error, value) => { if (settled) return; settled = true; clearTimeout(timer); error ? reject(error) : resolve(value); };
@@ -74,7 +80,12 @@ export async function callFeishuTool(name, input, context, options = {}) {
     .update(file).update(fs.readFileSync(file)).digest('hex').slice(0, 36);
   const args = ['im', '+messages-send', '--as', 'bot', '--chat-id', context.chatId,
     '--file', path.basename(file), '--idempotency-key', `cfb-file-${digest}`, '--format', 'json'];
-  const reply = await (options.runCli || runCli)(context.larkCli, args, path.dirname(file));
+  const reply = await (options.runCli || runCli)(
+    context.larkCli,
+    args,
+    path.dirname(file),
+    { spawnProcess: options.spawnProcess, larkProfileHome: context.larkProfileHome || '' },
+  );
   const messageId = findValue(reply, 'message_id');
   if (reply.ok === false || (reply.code != null && Number(reply.code) !== 0) || !messageId) throw new Error(`飞书未确认文件投递：${safeError(JSON.stringify(reply))}`);
   return { delivered: true, chat_id: context.chatId, message_id: messageId, file_name: path.basename(file), bytes: stat.size };

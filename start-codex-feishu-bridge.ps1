@@ -8,7 +8,7 @@ param(
   [ValidateSet("app-server", "auto", "exec")]
   [string]$RunMode = "app-server",
   [string]$Reasoning = "",
-  [string]$EventKeys = "im.message.receive_v1",
+  [string]$EventKeys = "im.message.receive_v1,im.message.recalled_v1",
   [int]$CodexTimeoutSeconds = 0,
   [int]$CodexIdleTimeoutSeconds = 3600,
   [int]$ListLimit = 100,
@@ -24,7 +24,7 @@ param(
   [switch]$EnableMcp,
   [switch]$DisableMcp,
   [switch]$Foreground,
-  [ValidateSet('codex', 'claude')][string]$AgentEngine = 'codex'
+  [ValidateSet('codex', 'claude', 'antigravity')][string]$AgentEngine = 'codex'
 )
 
 $ErrorActionPreference = "Stop"
@@ -65,6 +65,12 @@ $stdoutLog = Join-Path $logDir "bridge.stdout.log"
 $stderrLog = Join-Path $logDir "bridge.stderr.log"
 
 New-Item -ItemType Directory -Force -Path $stateDir, $logDir | Out-Null
+if ([string]::IsNullOrWhiteSpace($env:PLAYWRIGHT_MCP_USER_DATA_DIR)) {
+  $env:PLAYWRIGHT_MCP_USER_DATA_DIR = Join-Path $stateDir "browser-profiles\cloakbrowser"
+}
+if ([string]::IsNullOrWhiteSpace($env:PLAYWRIGHT_MCP_OUTPUT_DIR)) {
+  $env:PLAYWRIGHT_MCP_OUTPUT_DIR = Join-Path $stateDir "browser-output\cloakbrowser"
+}
 
 function Read-JsonFile {
   param([string]$Path)

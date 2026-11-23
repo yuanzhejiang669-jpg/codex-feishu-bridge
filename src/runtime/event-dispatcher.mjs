@@ -9,6 +9,8 @@ export function createEventDispatcher({
   isMessageRecalled = () => false,
   parseCommand = () => null,
   isOutOfBandCommand = () => false,
+  onOutOfBandEnqueued = null,
+  onCommandEnqueued = null,
   handleRecallEvent = () => {},
   handleOutOfBandCommand = async () => {},
   handleEvent = async () => {},
@@ -41,7 +43,9 @@ export function createEventDispatcher({
     }
 
     const command = parseCommand(event);
-    if (isOutOfBandCommand(command)) {
+    if (isOutOfBandCommand(command, event)) {
+      const hook = onOutOfBandEnqueued || onCommandEnqueued;
+      if (typeof hook === "function") hook(event, command);
       void handleOutOfBandCommand(event, command)
         .catch((error) => log("ERROR", "out-of-band command handling failed", {
           error: String(error?.stack || error),
@@ -49,12 +53,14 @@ export function createEventDispatcher({
       return;
     }
 
-    const wasQueued = activeJobs >= concurrency || queue.length > 0;
+    const chatId = chatIdOf(event);
+    const chatBusy = Boolean(chatId) && [...inFlight].some((state) => chatIdOf(state.event) === chatId);
+    const wasQueued = activeJobs >= concurrency || chatBusy || queue.countForChat(chatId) > 0;
     if (wasQueued) {
       void acknowledgeQueued(event, queue.length + activeJobs)
         .catch((error) => log("WARN", "queue ack failed", {
           messageId,
-          chatId: chatIdOf(event),
+          chatId,
           error: String(error?.message || error).slice(0, 1000),
         }));
     }
@@ -119,13 +125,18 @@ export function createEventDispatcher({
   function clearForChat(chatId, { all = false } = {}) {
     const target = String(chatId || "").trim();
     const matches = (event) => all || (target && chatIdOf(event) === target);
-    return queue.clearForChat(target, { all })
-      + cancelInFlight(matches, { queuedOnly: true });
+    const removedQueued = queue.clearForChat(target, { all });
+    const cancelledPreflight = cancelInFlight(matches, { queuedOnly: false });
+    return { removedQueued, cancelledPreflight };
   }
 
   function cancelForChat(chatId, { all = false } = {}) {
     const target = String(chatId || "").trim();
     return cancelInFlight((event) => all || (target && chatIdOf(event) === target));
+  }
+
+  function isChatBusy(chatId, exceptMessageId = '') {
+    return [...inFlight].some((state) => chatIdOf(state.event) === chatId && (!exceptMessageId || messageIdOf(state.event) !== exceptMessageId));
   }
 
   return {
@@ -136,7 +147,8 @@ export function createEventDispatcher({
     cancelForChat,
     countForChat: (chatId) => queue.countForChat(chatId),
     summary: (chatId) => queue.summary(chatId),
-    isChatActive: (chatId, exceptMessageId = '') => [...inFlight].some(state => chatIdOf(state.event) === chatId && messageIdOf(state.event) !== exceptMessageId),
+    isChatBusy,
+    isChatActive: isChatBusy,
     get activeJobs() {
       return activeJobs;
     },

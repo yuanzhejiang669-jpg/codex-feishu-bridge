@@ -66,9 +66,15 @@ async function main() {
   });
   try {
     await service.start();
+    const unauthorized = await fetch(`http://127.0.0.1:${proxyPort}/v1/models`);
+    assert.equal(unauthorized.status, 401, "expected unauthenticated /v1/models request to be rejected with 401");
+    const crossOrigin = await fetch(`http://127.0.0.1:${proxyPort}/v1/models`, {
+      headers: { authorization: "Bearer smoke-secret", origin: "https://evil.example" },
+    });
+    assert.equal(crossOrigin.status, 403, "expected cross-origin request to be rejected with 403");
     const response = await fetch(`http://127.0.0.1:${proxyPort}/v1/responses`, {
       method: "POST",
-      headers: { authorization: "Bearer local", "content-type": "application/json" },
+      headers: { authorization: "Bearer smoke-secret", "content-type": "application/json" },
       body: JSON.stringify({ model: "cfb-smoke-model", input: "Reply with PROXY_OK only.", stream: false, store: false }),
     });
     const body = await response.json();

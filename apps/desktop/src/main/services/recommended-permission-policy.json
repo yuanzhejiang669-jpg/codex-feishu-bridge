@@ -48,6 +48,7 @@
     "wiki:wiki:readonly"
   ],
   "eventKeys": [
-    "im.message.receive_v1"
+    "im.message.receive_v1",
+    "im.message.recalled_v1"
   ]
 }

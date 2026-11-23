@@ -99,3 +99,22 @@ test("reports remote success separately from a local save failure", async () => 
   });
   await assert.rejects(() => registerBotWithQr({ name: "assistant-1" }, options), /飞书应用已创建.*disk full/);
 });
+
+test("FEISHU-001: registerBotWithQr passes accounts.larksuite.com for lark brand and accounts.feishu.cn for feishu brand", async () => {
+  const seenDomains = [];
+  const makeOptions = () => baseOptions({
+    registrationDependencies: {
+      registerApp: async ({ domain, onQRCodeReady }) => {
+        seenDomains.push(domain);
+        await onQRCodeReady({ url: "https://example.test/qr", expireIn: 60 });
+        return { client_id: "cli_lark123", client_secret: "secret" };
+      },
+      QRCode: { toDataURL: async () => "data:image/png;base64,test" },
+    },
+    createManagedBot: async (bot) => ({ name: bot.name, brand: bot.brand }),
+  });
+
+  await registerBotWithQr({ name: "lark-bot-1", brand: "lark" }, makeOptions());
+  await registerBotWithQr({ name: "feishu-bot-1", brand: "feishu" }, makeOptions());
+  assert.deepEqual(seenDomains, ["accounts.larksuite.com", "accounts.feishu.cn"]);
+});

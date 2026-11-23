@@ -245,11 +245,10 @@ test("formula service exposes shared warmup and display formulas reserve subscri
   assert.match(source, /\.katex-display\{margin:0;padding:\.15em \.2em \.45em\}/);
 });
 
-test("Bridge schedules formula warmup off the startup critical path", () => {
+test("Bridge uses lazy formula browser startup and registers shutdown close instead of startup warmup", () => {
   const source = fs.readFileSync(new URL("../codex-feishu-bridge.mjs", import.meta.url), "utf8");
-  assert.match(source, /formulaWarmupDelayMs = 5_000 \+ crypto\.randomInt\(0, 55_001\)/);
-  assert.match(source, /formulaWarmupTimer\.unref\?\.\(\)/);
-  assert.match(source, /shutdownCallbacks\.add\(\(\) => clearTimeout\(formulaWarmupTimer\)\)/);
+  assert.doesNotMatch(source, /formulaWarmupTimer/);
+  assert.match(source, /shutdownCallbacks\.add\(\(\) => void formulaImageService\.close\?\.\(\)\)/);
 });
 
 test("lark client uploads images with stdin JSON and a cwd-relative file argument", async (t) => {

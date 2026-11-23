@@ -10,17 +10,27 @@ import { createAntigravityBridge, nativeMcpServers } from '../src/antigravity/br
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cfb-agy-shared-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const ownerCtx = (chatId) => ({ chatId, chatType: 'p2p', senderId: 'ou_owner1' });
   const configs = [1, 2].map((i) => ({ engine: 'antigravity', larkProfile: `antigravity-${i}`,
     antigravityDataRoot: root, antigravityHome: path.join(root, 'home'), antigravityCli: { command: 'agy' },
     antigravitySharedSessionsRoot: path.join(root, 'shared'), workspace: path.join(root, `work-${i}`),
-    stateDir: path.join(root, 'instances', `antigravity-${i}`, 'state'), logDir: path.join(root, 'logs'), disableMcp: true }));
+    stateDir: path.join(root, 'instances', `antigravity-${i}`, 'state'), logDir: path.join(root, 'logs'),
+    ownerOpenId: 'ou_owner1', disableMcp: true }));
   for (const config of configs) { fs.mkdirSync(config.workspace, { recursive: true }); fs.mkdirSync(config.stateDir, { recursive: true }); }
   const sources = configs.map((c) => ({ bot: c.larkProfile, home: c.antigravityHome, workspace: c.workspace, stateFile: path.join(c.stateDir, 'sessions.json') }));
-  const make = (i) => createSharedClaudeSessionStore({ config: configs[i], sources, sessionsPath: sources[i].stateFile,
-    createSessionData: (title) => ({ id: crypto.randomUUID(), title, engine: 'antigravity', createdAt: Date.now(), messages: [], antigravitySessionId: '' }) });
+  const make = (i) => {
+    const raw = createSharedClaudeSessionStore({ config: configs[i], sources, sessionsPath: sources[i].stateFile,
+      createSessionData: (title) => ({ id: crypto.randomUUID(), title, engine: 'antigravity', createdAt: Date.now(), messages: [], antigravitySessionId: '' }) });
+    return {
+      ...raw,
+      getChatState: (chatId, ctx = ownerCtx(chatId)) => raw.getChatState(chatId, ctx),
+      getSession: (chatId, ctx = ownerCtx(chatId)) => raw.getSession(chatId, ctx),
+      resetSession: (chatId, title, ctx = ownerCtx(chatId)) => raw.resetSession(chatId, title, ctx),
+    };
+  };
   const bridge = (i, store, createClient) => createAntigravityBridge({ config: configs[i], ...store,
     sharedSessions: store.shared, activeJobs: new Map(), activeChildren: new Map(), userText: (v) => v, sendMarkdown: async () => {}, createClient });
-  return { root, configs, sources, make, bridge };
+  return { root, configs, sources, make, bridge, ownerCtx };
 }
 
 test('five-Bot session design shares bindings, preserves original workspace and locks concurrent execution', async (t) => {
@@ -49,7 +59,7 @@ test('constructor and startup failures release account and shared-session leases
 
 test('shared deletion tombstones prevent stale Bot caches from restoring removed bindings', (t) => {
   const f = fixture(t); const a = f.make(0); const session = a.getSession('chat'); const b = f.make(1); b.getSession('chat');
-  const release = a.shared.acquireMany([session]); a.shared.remove([session.id]); release();
+  const release = a.shared.acquireMany([session]); a.shared.remove([session.id], f.ownerCtx('chat')); release();
   b.saveSessions(); assert.equal(a.getChatState('chat').sessions.length, 0);
 });
 

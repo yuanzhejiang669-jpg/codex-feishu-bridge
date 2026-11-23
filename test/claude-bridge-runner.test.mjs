@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { createClaudeBridge } from '../src/claude/bridge-runner.mjs';
+import { createClaudeBridge, extractClaudeContextWindow } from '../src/claude/bridge-runner.mjs';
 import { normalizeContextUsage } from '../src/sessions/normalize.mjs';
 import { createSessionStore } from '../src/sessions/store.mjs';
 
@@ -104,4 +104,56 @@ test('Claude session identity survives concurrent status/permission reads so nat
   assert.equal(persisted.claudeSessionId, 'native-id');
   assert.equal(persisted.title, 'renamed during run');
   assert.equal(persisted.lastContextUsage.usedTokens, 15);
+});
+
+test('ENG-CLD-002: real modelUsage.contextWindow populates contextWindow and percent while missing keeps null', async (t) => {
+  assert.equal(extractClaudeContextWindow({ modelUsage: { 'claude-opus-5-5': { contextWindow: 200000 } } }, 'claude-opus-5-5'), 200000);
+  assert.equal(extractClaudeContextWindow({ modelUsage: { other: { contextWindow: 1000000 } } }, 'claude-opus-5-5'), 1000000);
+  assert.equal(extractClaudeContextWindow({}, 'claude-opus-5-5'), null);
+
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cfb-claude-ctxwin-'));
+  const envKey = `CFB_CTX_${crypto.randomBytes(8).toString('hex')}`;
+  process.env[envKey] = 'fixture-key';
+  t.after(() => { delete process.env[envKey]; fs.rmSync(root, { recursive: true, force: true }); });
+  const catalog = path.join(root, 'providers.json');
+  const botConfig = path.join(root, 'bot.json');
+  fs.writeFileSync(catalog, JSON.stringify({ providers: [{ id: 'p', envKey, model: 'claude-opus-5-5', effort: 'max', models: ['claude-opus-5-5'] }] }));
+  fs.writeFileSync(botConfig, JSON.stringify({ claude: { permissionMode: 'bypassPermissions' } }));
+
+  const session = { id: 's-ctx', engine: 'claude', title: 'ctx' };
+  const chat = { currentSessionId: 's-ctx', sessions: [session] };
+  const state = { meta: {}, blocks: [] };
+  const bridge = createClaudeBridge({
+    config: { claudeProviderCatalog: catalog, claudeProviderId: 'p', claudeBotConfig: botConfig,
+      claudeCli: { command: 'claude' }, claudeHome: root, workspace: root, stateDir: root, larkProfile: 'c1' },
+    getSession: () => session, getChatState: () => chat, resetSession: () => session,
+    saveSessions: () => {}, userText: (c) => c, activeJobs: new Map(), activeChildren: new Map(),
+    appendText: () => {}, reduceEvent: () => {}, markPhase: () => {}, ensureDone: () => {},
+    markInterrupted: () => {}, markError: () => {}, sendMarkdown: async () => {},
+    createClient: (options) => ({
+      child: { pid: 456 },
+      async run() {
+        options.onStarted({ pid: 456 });
+        try {
+          options.onEvent({ type: 'initialized', sessionId: 'n1', model: 'claude-opus-5-5', version: '2.1.327', permissionMode: 'bypassPermissions', tools: [], mcpServers: [], skills: [] });
+          options.onEvent({ type: 'context', usedTokens: 50000 });
+          const result = {
+            result: 'ok',
+            usage: { input_tokens: 10000, cache_read_input_tokens: 40000, output_tokens: 500 },
+            modelUsage: { 'claude-opus-5-5': { contextWindow: 200000 } },
+          };
+          options.onEvent({ type: 'result', result });
+          return result;
+        } finally {
+          options.onClosed({ pid: 456 });
+        }
+      },
+    }),
+  });
+  t.after(() => bridge.close());
+
+  await bridge.run({ chat_id: 'chat-a', sender_id: 'u1', message_id: 'm1', content: 'hi' }, session, state, async () => {});
+  assert.equal(session.lastContextUsage.contextWindow, 200000);
+  assert.equal(session.lastContextUsage.percent, 25);
+  assert.equal(session.lastTokenUsage.modelContextWindow, 200000);
 });

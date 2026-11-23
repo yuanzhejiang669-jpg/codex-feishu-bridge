@@ -72,3 +72,52 @@ test("rechecks active tasks when removal is applied", async () => {
     assert.equal(fs.existsSync(path.join(value.dataRoot, "managed-bots", "one", "bot.json")), true);
   } finally { fs.rmSync(value.root, { recursive: true, force: true }); }
 });
+
+test("T-015: protects shared antigravityHome and deletes it only when explicitly requested and unshared", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cfb-remove-agy-"));
+  const dataRoot = path.join(root, "data");
+  const localAppData = path.join(root, "local");
+  const workspaceRoot = path.join(root, "workspaces");
+  const codexHomeRoot = path.join(root, "homes");
+  const sharedAgyHome = path.join(dataRoot, "antigravity-homes", "shared");
+  fs.mkdirSync(sharedAgyHome, { recursive: true });
+  fs.writeFileSync(path.join(sharedAgyHome, "auth.json"), "{}");
+  for (const name of ["ag-1", "ag-2"]) {
+    const botRoot = path.join(dataRoot, "managed-bots", name);
+    const workspace = path.join(workspaceRoot, name);
+    fs.mkdirSync(botRoot, { recursive: true });
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(path.join(botRoot, "bot.json"), JSON.stringify({
+      name, label: name, profile: name, engine: "antigravity", workspace, antigravityHome: sharedAgyHome,
+    }));
+  }
+  const opts = {
+    dataRoot, localAppData, workspaceRoot, codexHomeRoot,
+    stopBot: async () => {}, startBot: async () => {}, removeProfile: async () => {},
+  };
+  try {
+    const p1 = previewManagedBotRemoval("ag-1", opts);
+    assert.equal(p1.sharedAntigravityHomeBotCount, 1);
+    assert.equal(p1.paths.antigravityHome, sharedAgyHome);
+
+    // Must refuse deleting shared antigravityHome while ag-2 still uses it
+    await assert.rejects(
+      applyManagedRemoval({ kind: "bot", id: "ag-1", deleteAntigravityHome: true }, opts),
+      /共用/,
+    );
+    assert.equal(fs.existsSync(sharedAgyHome), true);
+
+    // Removing ag-1 without deleteAntigravityHome succeeds and preserves shared home
+    await applyManagedRemoval({ kind: "bot", id: "ag-1", deleteAntigravityHome: false }, opts);
+    assert.equal(fs.existsSync(sharedAgyHome), true);
+
+    // Now ag-2 is sole owner -> sharedAntigravityHomeBotCount === 0, deleteAntigravityHome succeeds
+    const p2 = previewManagedBotRemoval("ag-2", opts);
+    assert.equal(p2.sharedAntigravityHomeBotCount, 0);
+    const r2 = await applyManagedRemoval({ kind: "bot", id: "ag-2", deleteAntigravityHome: true }, opts);
+    assert.equal(r2.antigravityHomeDeleted, true);
+    assert.equal(fs.existsSync(sharedAgyHome), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

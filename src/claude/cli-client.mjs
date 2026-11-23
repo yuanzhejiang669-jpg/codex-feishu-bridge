@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import readline from 'node:readline';
+import { terminateProcessTree } from '../runtime/process-runner.mjs';
 
 const EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
 
@@ -80,6 +81,12 @@ export class ClaudeCliClient {
     this.closed = false;
   }
 
+  killChildTree(force = true) {
+    if (!this.child) return;
+    if (this.child.pid && this.spawnProcess === spawn) terminateProcessTree(this.child.pid, force);
+    try { this.child.kill?.(); } catch {}
+  }
+
   waitForUpstream() {
     clearTimeout(this.upstreamTimer);
     if (!(this.upstreamTimeoutMs > 0) || this.pendingTools.size) return;
@@ -88,7 +95,7 @@ export class ClaudeCliClient {
       this.upstreamTimedOut = true;
       this.upstreamTimedOutMs = waitMs;
       this.interrupt();
-      this.child?.kill();
+      this.killChildTree(true);
     }, waitMs);
     this.upstreamTimer.unref?.();
   }
@@ -261,6 +268,7 @@ export class ClaudeCliClient {
     const secrets = [this.provider.apiKey].filter(Boolean);
     const redact = (text) => secrets.reduce((value, secret) => value.replaceAll(secret, '[redacted]'), String(text || ''));
     this.child = this.spawnProcess(this.command, args, { cwd: this.cwd, env,
+      ...(process.platform !== 'win32' ? { detached: true } : {}),
       windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
     this.onStarted(this.child);
     let stderr = '';
@@ -271,12 +279,12 @@ export class ClaudeCliClient {
       clearTimeout(timer);
       if (this.idleTimeoutMs > 0) timer = setTimeout(() => {
         timedOut = 'Claude Code idle timeout'; this.interrupt();
-        this.child.kill();
+        this.killChildTree(true);
       }, this.idleTimeoutMs);
       timer?.unref?.();
     };
     const total = this.totalTimeoutMs > 0 ? setTimeout(() => {
-      timedOut = 'Claude Code total timeout'; this.interrupt(); this.child.kill();
+      timedOut = 'Claude Code total timeout'; this.interrupt(); this.killChildTree(true);
     }, this.totalTimeoutMs) : null;
     total?.unref?.();
     touch();
@@ -292,7 +300,7 @@ export class ClaudeCliClient {
         try { message = JSON.parse(line); } catch { continue; }
         await this.handleEvent(message);
       }
-    })().catch((error) => { streamError = error; this.child.kill(); });
+    })().catch((error) => { streamError = error; this.killChildTree(true); });
     const closed = new Promise((resolve) => {
       this.child.once('error', (error) => resolve({ error }));
       this.child.once('close', (code, signal) => resolve({ code, signal }));
@@ -320,7 +328,7 @@ export class ClaudeCliClient {
       return this.result;
     } finally {
       this.closed = true;
-      if (!this.child.killed && this.child.exitCode === null) this.child.kill();
+      if (!this.child.killed && this.child.exitCode === null) this.killChildTree(true);
       clearTimeout(timer); clearTimeout(total);
       this.pauseUpstreamWait();
       lines.close();

@@ -62,6 +62,7 @@ test("formula layout adversarial browser regressions", { skip: !executablePath }
     assert.throws(() => html(String.raw`\invalidFormulaCommand`, "block"), /Undefined control sequence/);
     let uploads = 0;
     const service = createFormulaImageService({ uploadImage: async () => { uploads++; return "must-not-upload"; } });
+    t.after(() => service.close());
     const result = await service.enrichBlocks([{kind:"text",content:String.raw`\[\invalidFormulaCommand\]`}]);
     assert.equal(uploads, 0);
     assert.equal(result.stats.failed, 1);

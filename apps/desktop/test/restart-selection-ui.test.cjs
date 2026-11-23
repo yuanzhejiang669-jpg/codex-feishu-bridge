@@ -8,7 +8,8 @@ const read = (relative) => fs.readFileSync(path.join(desktopRoot, relative), "ut
 
 test("ships selected safe and forced Bot restart controls through every desktop layer", () => {
   const html = read("src/renderer/index.html");
-  const renderer = read("src/renderer/app.js");
+  const botsView = read("src/renderer/views/bots.js");
+  const confirmModal = read("src/renderer/components/confirm-modal.js");
   const preload = read("src/preload/index.cjs");
   const main = read("src/main/index.cjs");
 
@@ -19,13 +20,15 @@ test("ships selected safe and forced Bot restart controls through every desktop 
     "force-restart-bots-button",
     "force-restart-dialog",
     "force-restart-confirm",
-  ]) assert.match(html, new RegExp(`id=["']${id}["']`));
-  assert.match(renderer, /managed-bot-selection/);
-  assert.match(renderer, /selectedManagedBotNames/);
-  assert.match(renderer, /restartBots\(\{ names, force \}\)/);
+  ]) assert.match(botsView, new RegExp(id));
+  assert.match(confirmModal, /openConfirmModal/);
+  assert.match(botsView, /managed-bot-selection/);
+  assert.match(botsView, /selectedManagedBotNames/);
+  assert.match(botsView, /restartBots\(\{ names, force \}\)/);
   assert.match(preload, /desktop:restart-bots/);
   assert.match(main, /restartSelectedManagedBots/);
   assert.doesNotMatch(html, /restart-online-bots-button/);
+  assert.doesNotMatch(botsView, /restart-online-bots-button/);
 });
 
 test("installed-upgrade verification scales its recovery window with managed Bot count", () => {

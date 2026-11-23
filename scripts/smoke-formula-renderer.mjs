@@ -16,8 +16,10 @@ if (!browserExecutable) {
 
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-feishu-formula-smoke-"));
 const uploads = [];
+let service = null;
+let cappedService = null;
 try {
-  const service = createFormulaImageService({
+  service = createFormulaImageService({
     browserExecutable,
     tempDir,
     uploadImage: async (imagePath) => {
@@ -68,7 +70,7 @@ try {
   assert.doesNotMatch(result.blocks.find((block) => block.kind === "text")?.content || "", /\$1\$/);
   assert.equal(fs.readdirSync(tempDir).filter((name) => name.endsWith(".png")).length, 0);
 
-  const cappedService = createFormulaImageService({
+  cappedService = createFormulaImageService({
     browserExecutable,
     tempDir,
     maxImages: 1,
@@ -93,5 +95,7 @@ try {
     stats: result.stats,
   })}\n`);
 } finally {
+  await service?.close();
+  await cappedService?.close();
   fs.rmSync(tempDir, { recursive: true, force: true });
 }

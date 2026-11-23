@@ -179,6 +179,7 @@ function runPowerShell(script, env = process.env) {
 }
 
 async function readUserEnvironmentVariable(name) {
+  if (process.platform !== "win32") throw new Error("非 Windows 平台必须通过安全凭据存储读取/写入 Provider 密钥");
   const output = await runPowerShell("[Console]::Out.Write([Environment]::GetEnvironmentVariable($env:CFB_ENV_NAME, 'User'))", {
     ...process.env,
     CFB_ENV_NAME: name,
@@ -187,6 +188,7 @@ async function readUserEnvironmentVariable(name) {
 }
 
 async function setUserEnvironmentVariable(name, value) {
+  if (process.platform !== "win32") throw new Error("非 Windows 平台必须通过安全凭据存储读取/写入 Provider 密钥");
   await writeWindowsUserEnvironment(name, value);
 }
 

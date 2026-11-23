@@ -10,7 +10,7 @@ param(
   [ValidateSet("app-server", "auto", "exec")]
   [string]$RunMode = "app-server",
   [string]$Reasoning = "",
-  [string]$EventKeys = "im.message.receive_v1",
+  [string]$EventKeys = "im.message.receive_v1,im.message.recalled_v1",
   [int]$CodexTimeoutSeconds = 0,
   [int]$CodexIdleTimeoutSeconds = 3600,
   [int]$ListLimit = 100,
@@ -133,8 +133,8 @@ function Stop-StaleWatchdogProcesses {
     if ($ageSeconds -lt $WatchdogTimeoutSeconds) { continue }
 
     try {
-      Stop-Process -Id $processId -Force -ErrorAction Stop
-      Write-WatchdogLog "stopped stale watchdog pid=$processId age=$([int]$ageSeconds)s"
+      & taskkill.exe /PID $processId /T /F | Out-Null
+      Write-WatchdogLog "stopped stale watchdog tree pid=$processId age=$([int]$ageSeconds)s"
     } catch {
       Write-WatchdogLog "failed to stop stale watchdog pid=${processId}: $($_.Exception.Message)"
     }

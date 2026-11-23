@@ -9,6 +9,7 @@ export function createProcessRunner({
     const child = spawn(tool.command, finalArgs, {
       cwd: options.cwd || workspace,
       env: { ...process.env, ...(options.env || {}) },
+      ...(process.platform !== "win32" ? { detached: true } : {}),
       windowsHide: true,
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -84,7 +85,44 @@ export function terminateProcessTree(pid, force) {
     killer.on("error", () => {});
     return;
   }
+  const signal = force ? "SIGKILL" : "SIGTERM";
   try {
-    process.kill(pid, force ? "SIGKILL" : "SIGTERM");
-  } catch {}
+    process.kill(-pid, signal);
+  } catch {
+    try {
+      process.kill(pid, signal);
+    } catch {}
+  }
+}
+
+export async function waitForActiveChildrenShutdown({
+  activeChildren,
+  terminate = terminateProcessTree,
+  totalTimeoutMs = 5000,
+  escalateMs = 2500,
+  pollMs = 100,
+  log = () => {},
+} = {}) {
+  if (!activeChildren || activeChildren.size === 0) return { remaining: 0, escalated: false };
+  for (const [pid, info] of activeChildren) {
+    log("INFO", "terminating child process", { pid, label: String(info?.label || "").slice(0, 300) });
+    terminate(pid, false);
+  }
+  const startedAt = Date.now();
+  let escalated = false;
+  while (activeChildren.size > 0 && Date.now() - startedAt < totalTimeoutMs) {
+    if (!escalated && Date.now() - startedAt >= escalateMs) {
+      escalated = true;
+      for (const [pid, info] of activeChildren) {
+        log("WARN", "force terminating remaining child process tree", { pid, label: String(info?.label || "").slice(0, 300) });
+        terminate(pid, true);
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+  }
+  if (activeChildren.size > 0 && !escalated) {
+    escalated = true;
+    for (const [pid] of activeChildren) terminate(pid, true);
+  }
+  return { remaining: activeChildren.size, escalated };
 }

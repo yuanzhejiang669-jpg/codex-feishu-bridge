@@ -91,9 +91,15 @@ for ($i = 0; $i -lt 10; $i++) {
   }
 }
 
-Write-Warning "Bridge did not stop gracefully in 10 seconds; terminating process $pidText."
+Write-Warning "Bridge did not stop gracefully in 10 seconds; terminating process tree $pidText."
 if (-not (Test-OriginalBridgeAlive)) { exit 0 }
-Stop-Process -Id ([int]$pidText) -ErrorAction Stop
+$taskkillArgs = @('/PID', $pidText, '/T', '/F')
+& taskkill.exe @taskkillArgs | Out-Null
+$taskkillExitCode = $LASTEXITCODE
+Start-Sleep -Milliseconds 500
+if (Test-OriginalBridgeAlive) {
+  throw "Bridge process tree did not stop after taskkill. PID: $pidText; exit code: $taskkillExitCode"
+}
 Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $stopFile -Force -ErrorAction SilentlyContinue
-Write-Host "Codex Feishu Bridge force-stopped. Instance: $(if ($safeName) { $safeName } else { 'default' }); PID: $pidText"
+Write-Host "Codex Feishu Bridge force-stopped with its process tree. Instance: $(if ($safeName) { $safeName } else { 'default' }); PID: $pidText"

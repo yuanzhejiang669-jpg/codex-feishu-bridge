@@ -88,7 +88,9 @@ test('factory creates exactly five native-engine entries and registration persis
   const created = await createManagedBot(preview.bots[0], { appId: 'cli_fixture123', appSecret: 'fixture-app-secret' }, f.options);
   const config = JSON.parse(fs.readFileSync(created.configPath));
   assert.equal(config.engine, 'antigravity'); assert.equal(config.provider.id, 'official');
-  assert.equal(config.antigravity.permissionMode, 'default'); assert.equal(config.codexHome, '');
+  assert.equal(config.antigravity.permissionMode, 'always-proceed'); assert.equal(config.codexHome, '');
+  const explicitDefault = await createManagedBot({ ...preview.bots[1], permissionMode: 'default' }, { appId: 'cli_fixture456', appSecret: 'fixture-app-secret-2' }, f.options);
+  assert.equal(JSON.parse(fs.readFileSync(explicitDefault.configPath)).antigravity.permissionMode, 'default');
   assert.equal(fs.realpathSync(path.join(config.antigravityHome, 'config', 'skills')), fs.realpathSync(path.join(f.root, 'antigravity-tools', '.agents', 'skills')));
   assert.ok(!JSON.stringify(config).includes('fixture-app-secret'));
 });

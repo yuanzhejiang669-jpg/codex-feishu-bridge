@@ -129,12 +129,18 @@ if (-not (Test-Path -LiteralPath $startScript)) {
 }
 $originalLocalAppData = $env:LOCALAPPDATA
 $originalPath = $env:Path
+$originalLarkProfileHome = $env:CODEX_FEISHU_LARK_PROFILE_HOME
 try {
     $env:LOCALAPPDATA = Join-Path $DataRoot 'runtime-localappdata'
     $env:Path = "$toolsRoot;$env:APPDATA\npm;$originalPath"
+    $env:CODEX_FEISHU_LARK_PROFILE_HOME = Join-Path $DataRoot 'profile-home'
     foreach ($name in $before.Keys | Sort-Object) {
         $configPath = Join-Path (Join-Path $managedRoot $name) 'bot.json'
         $bot = ([Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($configPath))) | ConvertFrom-Json
+        if ($bot.engine -and $bot.engine -ne 'codex') {
+            # Claude and Antigravity bots are recovered directly by the upgraded desktop client supervisor
+            continue
+        }
         $arguments = @{
             Name = [string]$bot.name
             LarkProfile = [string]$bot.profile
@@ -147,6 +153,7 @@ try {
 } finally {
     $env:LOCALAPPDATA = $originalLocalAppData
     $env:Path = $originalPath
+    $env:CODEX_FEISHU_LARK_PROFILE_HOME = $originalLarkProfileHome
 }
 
 $recoveryTimeoutSeconds = [Math]::Max(300, ($before.Count * 120) + 90)

@@ -714,11 +714,28 @@ function factoryFormData() {
   };
 }
 
+const PANEL_TOKEN = document.querySelector('meta[name="cfb-panel-token"]')?.getAttribute("content") || "";
+const PANEL_READ_ONLY = document.querySelector('meta[name="cfb-panel-readonly"]')?.getAttribute("content") !== "0";
+
+function applyReadOnlyGuardUi() {
+  const notice = document.getElementById("readOnlyNotice");
+  if (notice) notice.hidden = !PANEL_READ_ONLY;
+  if (!PANEL_READ_ONLY) return;
+  for (const selector of ["#management button", "#workspace-factory button", "#bot-cleanup button.danger-button"]) {
+    for (const button of document.querySelectorAll(selector)) {
+      if (button.id === "cleanupRefreshButton" || button.id === "loadFactorySourcesButton" || button.id === "refreshFactoryJobsButton") continue;
+      button.disabled = true;
+      button.title = "当前为只读诊断模式（请使用桌面端或传 --allow-writes）";
+    }
+  }
+}
+
 async function postJson(url, payload) {
   const response = await fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
+      ...(PANEL_TOKEN ? { "X-CFB-Panel-Token": PANEL_TOKEN } : {}),
     },
     body: JSON.stringify(payload),
   });
@@ -734,6 +751,7 @@ async function postJsonAllowFalse(url, payload) {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
+      ...(PANEL_TOKEN ? { "X-CFB-Panel-Token": PANEL_TOKEN } : {}),
     },
     body: JSON.stringify(payload),
   });
@@ -2582,6 +2600,7 @@ $("botCards").addEventListener("toggle", (event) => {
   updateBotDetailState(detail);
 }, true);
 
+applyReadOnlyGuardUi();
 applySidebarCollapsed();
 setAutoRefresh($("autoRefresh").checked);
 initPanelNavigation();

@@ -168,3 +168,21 @@ test('help lists shared operations and Codex-only commands never fall through to
     assert.equal(await f.send(name), false, `${name} must use the shared queue controller`);
   }
 });
+
+test('ENG-CLD-002: another busy chat does not block /model test or /compact in an idle chat', async (t) => {
+  const f = fixture(t, {
+    createClient: (options) => ({
+      run: async () => {
+        options.onEvent?.({ type: 'compacted', at: 1234567890000 });
+        return { result: 'OK' };
+      },
+    }),
+  });
+  f.sessions[0].claudeSessionId = '7507f65c-a17f-4c14-b2d8-5badb5a0aa80';
+  // Chat B is busy; our chat ('chat') is idle
+  f.activeJobs.set('other-busy-chat', { mode: 'claude', sessionId: 'other-s' });
+  await f.send('/model', 'test claude-opus-5-5');
+  assert.match(f.replies.at(-1), /测试成功/);
+  await f.send('/compact');
+  assert.match(f.replies.at(-1), /上下文已压缩/);
+});

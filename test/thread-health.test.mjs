@@ -10,7 +10,12 @@ import {
 } from "../src/sessions/thread-health.mjs";
 
 const MB = 1_000_000;
-const bridgeSource = fs.readFileSync(new URL("../codex-feishu-bridge.mjs", import.meta.url), "utf8");
+const bridgeSource = [
+  fs.readFileSync(new URL("../codex-feishu-bridge.mjs", import.meta.url), "utf8"),
+  fs.readFileSync(new URL("../src/codex/runner.mjs", import.meta.url), "utf8"),
+  fs.readFileSync(new URL("../src/sessions/inventory.mjs", import.meta.url), "utf8"),
+  fs.readFileSync(new URL("../src/commands/router.mjs", import.meta.url), "utf8"),
+].join("\n");
 
 function sample(previous, threadId, rolloutMb, resumeMs) {
   return recordThreadHealthSample(previous, {

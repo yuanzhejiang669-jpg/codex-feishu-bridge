@@ -1,9 +1,10 @@
-import { spawn, execFile } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import configuration from './configuration.cjs';
+import { terminateProcessTree } from '../runtime/process-runner.mjs';
 
 export function antigravityArguments({ geminiDir, appDataDir = 'antigravity-cli', logFile, additionalDirectories = [], permissionMode = 'default' } = {}) {
   const args = ['acp', '--process-per-session'];
@@ -101,6 +102,7 @@ export class AntigravityAcpClient {
     this.appDataDir = configuration.prepareNativeProfile(this.geminiDir, this.provider);
     this.child = this.spawnProcess(this.command, antigravityArguments(this), {
       cwd: this.cwd, env: antigravityEnvironment(this.environment, this.provider),
+      ...(process.platform !== 'win32' ? { detached: true } : {}),
       windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
     });
     this.onStarted(this.child);
@@ -237,7 +239,7 @@ export class AntigravityAcpClient {
       const child = this.child;
       this.closeTimer = setTimeout(() => {
         if (this.closed) return;
-        if (process.platform === 'win32' && child.pid) execFile('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true }, () => {});
+        if (child.pid && this.spawnProcess === spawn) terminateProcessTree(child.pid, true);
         else child.kill('SIGKILL');
       }, 2000);
       this.closeTimer.unref?.();

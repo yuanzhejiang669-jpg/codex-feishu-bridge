@@ -170,14 +170,15 @@ test("sidebar record comparison detects only material column changes", () => {
 });
 
 test("app-server starts the model turn before deferred sidebar maintenance", () => {
-  const script = fs.readFileSync(new URL("../codex-feishu-bridge.mjs", import.meta.url), "utf8");
-  const threadFunction = script.slice(
-    script.indexOf("async function startOrResumeAppServerThread"),
-    script.indexOf("async function runCodexAppServer"),
+  const runnerScript = fs.readFileSync(new URL("../src/codex/runner.mjs", import.meta.url), "utf8");
+  const sidebarScript = fs.readFileSync(new URL("../src/codex/sidebar-sync.mjs", import.meta.url), "utf8");
+  const threadFunction = runnerScript.slice(
+    runnerScript.indexOf("async function startOrResumeAppServerThread"),
+    runnerScript.indexOf("async function runCodexAppServer"),
   );
-  const runFunction = script.slice(
-    script.indexOf("async function runCodexAppServer"),
-    script.indexOf("async function runCodexExec"),
+  const runFunction = runnerScript.slice(
+    runnerScript.indexOf("async function runCodexAppServer"),
+    runnerScript.indexOf("async function runCodex("),
   );
 
   assert.doesNotMatch(threadFunction, /await ensureAppServerThreadVisible/);
@@ -185,7 +186,7 @@ test("app-server starts the model turn before deferred sidebar maintenance", () 
   assert.match(runFunction, /client\.request\("turn\/start"/);
   assert.match(runFunction, /scheduleAppServerThreadMaintenance\(threadId, "turn\/completed"\)/);
   assert.doesNotMatch(runFunction, /await ensureAppServerThreadVisible\(threadId, "turn\/completed"\)/);
-  assert.match(script, /activeCodexJobs\.size > 0[\s\S]*active-deferred/);
+  assert.match(sidebarScript, /activeCodexJobs\.size > 0[\s\S]*active-deferred/);
 });
 
 test("control panel trusts a live owned Bridge PID after the start wrapper times out", () => {

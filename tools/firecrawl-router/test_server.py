@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -77,6 +78,83 @@ class FirecrawlRouterTests(unittest.TestCase):
         serialized = json.dumps(result) + router.STATE_PATH.read_text()
         self.assertNotIn("fc-secret-value", serialized)
         self.assertNotIn("token-value", serialized)
+
+    def test_command_resolution_prefers_script_and_explicit_node(self):
+        script = Path(self.temp.name) / "firecrawl.mjs"
+        script.write_text("", encoding="utf-8")
+        with patch.dict(os.environ, {"FIRECRAWL_CLI_SCRIPT": str(script), "FIRECRAWL_NODE_PATH": "explicit-node"}):
+            with patch.object(router.shutil, "which") as which:
+                self.assertEqual(["explicit-node", str(script)], router.firecrawl_command())
+                which.assert_not_called()
+            with patch.dict(os.environ, {"FIRECRAWL_NODE_PATH": ""}), patch.object(router.shutil, "which", return_value="path-node"):
+                self.assertEqual(["path-node", str(script)], router.firecrawl_command())
+            with patch.dict(os.environ, {"FIRECRAWL_NODE_PATH": ""}), patch.object(router.shutil, "which", return_value=None):
+                self.assertIsNone(router.firecrawl_command())
+        with patch.dict(os.environ, {"FIRECRAWL_CLI_SCRIPT": str(script) + ".missing"}):
+            self.assertIsNone(router.firecrawl_command())
+        with patch.dict(os.environ, {"FIRECRAWL_CLI_SCRIPT": "", "FIRECRAWL_NODE_PATH": ""}), patch.object(router.shutil, "which", return_value="firecrawl-bin"):
+            self.assertEqual(["firecrawl-bin"], router.firecrawl_command())
+
+    def test_api_keys_are_only_in_child_environment(self):
+        record = router.key_records()[0]
+        with patch.object(router, "firecrawl_command", return_value=["node", "fixture.mjs"]):
+            with patch.object(router.subprocess, "run", return_value=SimpleNamespace(returncode=0, stdout='{"remainingCredits":10}', stderr="")) as run:
+                self.assertTrue(router.query_credit_usage(record)["ok"])
+                self.assertTrue(router.run_firecrawl(["search", "fixture"])["ok"])
+        for call in run.call_args_list:
+            self.assertEqual(record["api_key"], call.kwargs["env"]["FIRECRAWL_API_KEY"])
+            self.assertNotIn(record["api_key"], call.args[0])
+            self.assertNotIn("--api-key", call.args[0])
+            self.assertEqual(["node", "fixture.mjs"], call.args[0][:2])
+
+    def test_success_output_is_sanitized_before_returning_data(self):
+        record = router.key_records()[0]
+        completed = SimpleNamespace(returncode=0, stdout=json.dumps({"token": record["api_key"]}), stderr="")
+        with patch.object(router, "firecrawl_command", return_value=["fixture"]), patch.object(router.subprocess, "run", return_value=completed):
+            result = router.run_firecrawl(["search", "fixture"])
+        self.assertNotIn(record["api_key"], result["stdout"])
+        self.assertIn("[REDACTED]", result["stdout"])
+
+    def test_large_success_json_is_sanitized_without_truncation(self):
+        record = router.key_records()[0]
+        payload = {"success": True, "data": {"markdown": "A" * 3200, "leaked": record["api_key"]}}
+        big_json = json.dumps(payload)
+        self.assertGreater(len(big_json), 3000)
+        completed = SimpleNamespace(returncode=0, stdout=big_json, stderr="")
+        with patch.object(router, "firecrawl_command", return_value=["fixture"]), patch.object(router.subprocess, "run", return_value=completed):
+            result = router.tool_result(router.run_firecrawl(["scrape", "https://example.invalid"]))
+        self.assertTrue(result["ok"])
+        self.assertIsInstance(result["data"], dict)
+        self.assertEqual(len(result["data"]["data"]["markdown"]), 3200)
+        self.assertEqual(result["data"]["data"]["leaked"], "[REDACTED]")
+        self.assertNotIn(record["api_key"], json.dumps(result))
+
+    def test_all_error_paths_redact_disabled_environment_and_token_patterns(self):
+        pool = json.loads(router.POOL_PATH.read_text())
+        pool["keys"].append({"alias": "disabled", "api_key": "disabled-pool-secret", "enabled": False})
+        router.POOL_PATH.write_text(json.dumps(pool), encoding="utf-8")
+        secrets = ["fc-secret-value", "fc-other-secret", "disabled-pool-secret", "environment-secret",
+                   "fc-leak123456", "tvly-leak123456", "tok1", "tok2", "tok3", "tok4", "caller-secret"]
+        detail = " ".join(secrets[:6]) + " Authorization: Bearer tok1 Bearer tok2 FIRECRAWL_API_KEY=tok3 --api-key tok4 caller-secret"
+        for kind in ["stderr", "oserror", "timeout", "invalid-json"]:
+            with self.subTest(kind=kind):
+                router.STATE_PATH.unlink(missing_ok=True)
+                value = SimpleNamespace(returncode=0 if kind == "invalid-json" else 1, stdout=detail, stderr="" if kind == "invalid-json" else detail)
+                failure = OSError(detail) if kind == "oserror" else subprocess.TimeoutExpired("fixture", 1, output=detail, stderr=detail) if kind == "timeout" else None
+                with patch.dict(os.environ, {"FIRECRAWL_API_KEY": "environment-secret"}), patch.object(router, "firecrawl_command", return_value=["fixture"]):
+                    with patch.object(router.subprocess, "run", return_value=value, side_effect=failure):
+                        usage = router.query_credit_usage({"api_key": "caller-secret"})
+                        output = json.dumps(usage)
+                        if kind != "invalid-json":
+                            # The caller secret is outside the active pool; each record must explicitly redact its own credential.
+                            output += router.sanitize(detail, extra_secrets=("caller-secret",))
+                            result = router.run_firecrawl(["search", "fixture"])
+                            output += json.dumps(result) + router.STATE_PATH.read_text(encoding="utf-8")
+                for secret in secrets:
+                    if secret != "caller-secret" or kind == "invalid-json":
+                        self.assertNotIn(secret, output)
+                self.assertNotIn("caller-secret", json.dumps(usage))
+                self.assertIn("[REDACTED]", output)
 
 
 if __name__ == "__main__":

@@ -118,6 +118,28 @@ async function firstAvailablePort(host, start, used = new Set()) {
   throw new Error(`No local port is available in ${start}-${start + PORT_RANGE - 1}`);
 }
 
+async function randomAvailablePort(host, used = new Set()) {
+  for (let attempt = 0; attempt < 64; attempt += 1) {
+    const candidate = crypto.randomInt(32768, 61000);
+    if (!used.has(candidate) && await canListen(host, candidate)) return candidate;
+  }
+  throw new Error("No random high loopback port is available in 32768-60999");
+}
+
+function verifyGatewayRequest(req, expectedSecret) {
+  if (req.headers?.origin) {
+    return { ok: false, status: 403, message: "Cross-origin requests are forbidden" };
+  }
+  const auth = String(req.headers?.authorization || "");
+  const expected = `Bearer ${String(expectedSecret || "")}`;
+  const a = Buffer.from(auth, "utf8");
+  const b = Buffer.from(expected, "utf8");
+  if (!expectedSecret || a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+    return { ok: false, status: 401, message: "Unauthorized" };
+  }
+  return { ok: true };
+}
+
 async function waitForHealth(baseUrl, fetchImpl = fetch, timeoutMs = 20_000, cancelled = () => false) {
   const deadline = Date.now() + timeoutMs;
   let lastError = "";
@@ -265,7 +287,7 @@ function createProtocolProxyService(options) {
 
   async function spawnInner(provider, models, generation) {
     const used = new Set([...runtimes.values()].map((runtime) => runtime.inner?.port).filter(Boolean));
-    const innerPort = await firstAvailablePort(host, innerPortStart, used);
+    const innerPort = await randomAvailablePort(host, used);
     const runtimePaths = providerPaths(provider.id);
     const value = providersFileValue({ providers: [{ ...provider, models }] }, options.resolveModelCapabilities);
     atomicWriteJson(runtimePaths.providers, value);
@@ -369,16 +391,27 @@ function createProtocolProxyService(options) {
       sendJson(res, 503, { error: { message: `Provider ${providerId} converter is not ready`, type: "proxy_unavailable" } });
       return;
     }
+    let released = false;
+    const releaseRequest = () => {
+      if (released) return;
+      released = true;
+      inner.activeRequests = Math.max(0, inner.activeRequests - 1);
+    };
     inner.activeRequests += 1;
     const headers = { ...req.headers, host: `${host}:${inner.port}` };
     const outgoing = http.request({ host, port: inner.port, method: req.method, path: req.url, headers }, (incoming) => {
       res.writeHead(incoming.statusCode || 502, incoming.headers);
       incoming.pipe(res);
-      incoming.once("end", () => { inner.activeRequests = Math.max(0, inner.activeRequests - 1); });
-      incoming.once("error", () => { inner.activeRequests = Math.max(0, inner.activeRequests - 1); });
+      incoming.once("end", releaseRequest);
+      incoming.once("error", releaseRequest);
     });
+    req.once("aborted", () => {
+      outgoing.destroy();
+      releaseRequest();
+    });
+    res.once("close", releaseRequest);
     outgoing.once("error", (error) => {
-      inner.activeRequests = Math.max(0, inner.activeRequests - 1);
+      releaseRequest();
       if (!res.headersSent) sendJson(res, 502, { error: { message: error.message, type: "proxy_error" } });
       else res.destroy(error);
     });
@@ -389,7 +422,25 @@ function createProtocolProxyService(options) {
     const runtime = runtimes.get(providerId);
     const url = new URL(req.url || "/", `http://${host}`);
     if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/healthz")) {
-      sendJson(res, 200, { ok: true, provider: providerId, converterReady: Boolean(runtime?.inner) });
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+    if (!runtime?.provider) {
+      sendJson(res, 503, { error: { message: "Protocol proxy provider is unavailable", type: "proxy_unavailable" } });
+      return;
+    }
+    let expectedSecret;
+    try {
+      expectedSecret = await readSecret(runtime.provider);
+    } catch (error) {
+      sendJson(res, 503, { error: { message: error.message, type: "credential_unavailable" } });
+      return;
+    }
+    const auth = verifyGatewayRequest(req, expectedSecret);
+    if (!auth.ok) {
+      sendJson(res, auth.status, {
+        error: { message: auth.message, type: auth.status === 403 ? "forbidden" : "unauthorized" },
+      });
       return;
     }
     if (req.method === "GET" && url.pathname === "/v1/models") {
@@ -603,6 +654,7 @@ function createProtocolProxyService(options) {
     snapshot,
     start,
     stop,
+    activeRequestCount: (providerId) => runtimes.get(providerId)?.inner?.activeRequests ?? 0,
   };
 }
 
@@ -613,5 +665,7 @@ module.exports = {
   normalizeModels,
   parseUpstreamModels,
   providersFileValue,
+  randomAvailablePort,
   readRegistry,
+  verifyGatewayRequest,
 };

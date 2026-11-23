@@ -19,4 +19,11 @@ function defaultClaudeCli(home, platform = process.platform) {
   return path.join(home, '.local', 'bin', platform === 'win32' ? 'claude.exe' : 'claude');
 }
 
-module.exports = { ENGINES, agentHome, defaultClaudeCli, normalizeEngine };
+function engineDisplayName(value) {
+  const engine = normalizeEngine(value);
+  if (engine === 'antigravity') return 'Antigravity';
+  if (engine === 'claude') return 'Claude Code';
+  return 'Codex';
+}
+
+module.exports = { ENGINES, agentHome, defaultClaudeCli, engineDisplayName, normalizeEngine };

@@ -55,4 +55,14 @@ async function processCodexCredentialReload(options) {
   }
   return result;
 }
-module.exports = { queueCodexCredentialReload, processCodexCredentialReload, readPendingCodexReload: read };
+function queueCodexBotReload(dataRoot, names) {
+  const state = read(dataRoot);
+  const queued = [];
+  for (const name of [...new Set((names || []).map((item) => String(item || '').trim()).filter(Boolean))]) {
+    state.bots[name] = { revision: crypto.randomUUID(), requestedAt: Date.now(), stoppedByUpdate: false };
+    queued.push(name);
+  }
+  write(dataRoot, state);
+  return queued;
+}
+module.exports = { queueCodexBotReload, queueCodexCredentialReload, processCodexCredentialReload, readPendingCodexReload: read };

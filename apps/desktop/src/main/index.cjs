@@ -28,7 +28,10 @@ const {
 const { checkBotReadiness } = require("./services/bot-readiness.cjs");
 const { permissionImportJson, publicPermissionPolicy } = require("./services/permission-policy.cjs");
 const { createRecoverySupervisor } = require("./services/recovery-supervisor.cjs");
-const { readDesktopSettings, writeDesktopSettings } = require("./services/desktop-settings.cjs");
+const { readDesktopSettings, setOwnerOpenId, writeDesktopSettings } = require("./services/desktop-settings.cjs");
+const { updateManagedBotConfig } = require("./services/bot-config-editor.cjs");
+const { readBotLogs } = require("./services/bot-logs.cjs");
+const { probeMcpHealth } = require("./services/mcp-health.cjs");
 const { createDesktopStartup } = require("./services/windows-startup.cjs");
 const { createCredentialStore, waitForCredentialStoreHydration } = require("./services/credential-store.cjs");
 const { assertSecureStorage, inspectSecureStorage } = require("./services/secure-storage.cjs");
@@ -74,10 +77,13 @@ const {
 } = require("./services/update-recovery.cjs");
 const {
   createWorkspaceFactoryQueue,
+  discardFactoryQueue,
   previewWorkspaceFactory,
   readWorkspaceFactoryQueue,
   registerFactoryBot,
+  retryFactoryBot,
 } = require("./services/workspace-factory.cjs");
+const { createOperationCoordinator } = require("./services/operation-coordinator.cjs");
 const { readTrustedCodexHomes } = require("./services/trusted-codex-homes.cjs");
 const { startAccountLogin, setBotAccount, forgetAccount } = require("./services/openai-accounts.cjs");
 const { createWindowReadiness } = require("./services/window-readiness.cjs");
@@ -90,7 +96,7 @@ const { inspectClaudeProviders, listClaudeModels, probeClaudeProvider, saveClaud
 const { assignClaudeProvider } = require('./services/claude-bots.cjs');
 const { inspectClaudeCapabilities, migrateClaudeCapabilities, saveClaudeMcp } = require('./services/claude-capabilities.cjs');
 const { queueClaudeReconfiguration, processClaudeReconfiguration, readPending: readClaudePending } = require('./services/claude-reconfiguration.cjs');
-const { queueCodexCredentialReload, processCodexCredentialReload, readPendingCodexReload } = require('./services/codex-reconfiguration.cjs');
+const { queueCodexBotReload, queueCodexCredentialReload, processCodexCredentialReload, readPendingCodexReload } = require('./services/codex-reconfiguration.cjs');
 
 const smokeTest = process.argv.includes("--smoke-test");
 const capturePath = process.env.CFB_DESKTOP_CAPTURE_PATH || "";
@@ -360,17 +366,23 @@ function antigravityOptions() {
     inspectExternalClients: inspectAntigravityClients };
 }
 
-let antigravityReconfigurationRunning = false;
+const operationCoordinator = createOperationCoordinator({
+  pauseRecovery: () => recoverySupervisor?.stop(),
+  resumeRecovery: () => { if (!isQuitting) recoverySupervisor?.start(); },
+});
+
 async function applyPendingAntigravityConfiguration() {
-  if (antigravityReconfigurationRunning || runtimeInitializing || isQuitting
-      || !Object.keys(readClaudePending(managedDataRoot(), 'antigravity').bots).length) return;
-  antigravityReconfigurationRunning = true; recoverySupervisor?.stop();
-  try {
-    await processClaudeReconfiguration({ dataRoot: managedDataRoot(), engine: 'antigravity',
+  if (runtimeInitializing || isQuitting || !Object.keys(readClaudePending(managedDataRoot(), 'antigravity').bots).length) return;
+  return operationCoordinator.runExclusive('apply-antigravity-reconfiguration', async () => {
+    if (runtimeInitializing || isQuitting || !Object.keys(readClaudePending(managedDataRoot(), 'antigravity').bots).length) return;
+    await processClaudeReconfiguration({
+      dataRoot: managedDataRoot(),
+      engine: 'antigravity',
       inspectBots: () => inspectManagedBots(managedDataRoot(), runtimeLocalAppData()),
       stopBot: (name) => stopManagedBot(name, supervisorOptions()),
-      startBot: (name) => startManagedBot(name, supervisorOptions()) });
-  } finally { antigravityReconfigurationRunning = false; if (!isQuitting) recoverySupervisor?.start(); }
+      startBot: (name) => startManagedBot(name, supervisorOptions()),
+    });
+  });
 }
 
 function queueClaudeProviderUsers(providerId) {
@@ -378,36 +390,35 @@ function queueClaudeProviderUsers(providerId) {
   return queueClaudeReconfiguration(managedDataRoot(), names);
 }
 
-let claudeReconfigurationRunning = false;
 async function applyPendingClaudeConfiguration() {
-  if (claudeReconfigurationRunning || runtimeInitializing || !Object.keys(readClaudePending(managedDataRoot()).bots).length) return;
-  claudeReconfigurationRunning = true;
-  recoverySupervisor?.stop();
-  try {
-    await processClaudeReconfiguration({ dataRoot: managedDataRoot(),
+  if (runtimeInitializing || isQuitting || !Object.keys(readClaudePending(managedDataRoot()).bots).length) return;
+  return operationCoordinator.runExclusive('apply-claude-reconfiguration', async () => {
+    if (runtimeInitializing || isQuitting || !Object.keys(readClaudePending(managedDataRoot()).bots).length) return;
+    await processClaudeReconfiguration({
+      dataRoot: managedDataRoot(),
       inspectBots: () => inspectManagedBots(managedDataRoot(), runtimeLocalAppData()),
       stopBot: (name) => stopManagedBot(name, supervisorOptions()),
-      startBot: (name) => startManagedBot(name, supervisorOptions()) });
-  } finally { claudeReconfigurationRunning = false; if (!isQuitting) recoverySupervisor?.start(); }
+      startBot: (name) => startManagedBot(name, supervisorOptions()),
+    });
+  });
 }
 
-let codexReconfigurationRunning = false;
 async function applyPendingCodexConfiguration() {
-  if (codexReconfigurationRunning || claudeReconfigurationRunning || batchRestartInFlight || runtimeInitializing || isQuitting
-      || !Object.keys(readPendingCodexReload(managedDataRoot()).bots).length) return;
-  codexReconfigurationRunning = true;
-  recoverySupervisor?.stop();
-  try {
-    await processCodexCredentialReload({ dataRoot: managedDataRoot(),
+  if (runtimeInitializing || isQuitting || !Object.keys(readPendingCodexReload(managedDataRoot()).bots).length) return;
+  return operationCoordinator.runExclusive('apply-codex-reconfiguration', async () => {
+    if (runtimeInitializing || isQuitting || !Object.keys(readPendingCodexReload(managedDataRoot()).bots).length) return;
+    await processCodexCredentialReload({
+      dataRoot: managedDataRoot(),
       inspectBots: () => inspectManagedBots(managedDataRoot(), runtimeLocalAppData()),
-      stopBot: name => stopManagedBot(name, supervisorOptions()),
-      startBot: name => startManagedBot(name, supervisorOptions()) });
-  } finally { codexReconfigurationRunning = false; if (!isQuitting) recoverySupervisor?.start(); }
+      stopBot: (name) => stopManagedBot(name, supervisorOptions()),
+      startBot: (name) => startManagedBot(name, supervisorOptions()),
+    });
+  });
 }
 function queueCodexProviderReload(result) {
   if (result.managedProxy || result.provider?.managedProxy) return result;
   try { result.queuedManagedBots = queueCodexCredentialReload(managedDataRoot(), readManagedBots(managedDataRoot()), result.provider.envKey); }
-  catch { result.reloadError = '??????????????????????????? Bot?'; }
+  catch { result.reloadError = '已保存新密钥，但写入 Bot 空闲重载队列失败；请手动安全重启受影响的 Codex Bot。'; }
   return result;
 }
 async function applyPendingProviderConfiguration() {
@@ -474,18 +485,15 @@ function legacyAdoptionOptions() {
 }
 
 async function processPendingLegacyAdoptionQueue() {
-  if (legacyAdoptionInFlight || !currentState?.engine?.available) return;
-  legacyAdoptionInFlight = true;
-  recoverySupervisor?.stop();
-  try {
-    const result = await processPendingLegacyAdoptions(legacyAdoptionOptions());
-    if (result.adopted.length || result.failed.length) await loadState();
-  } catch (error) {
-    console.warn("Pending legacy Bot adoption failed", error);
-  } finally {
-    recoverySupervisor?.start();
-    legacyAdoptionInFlight = false;
-  }
+  if (!currentState?.engine?.available) return;
+  return operationCoordinator.runExclusive("pending-legacy-adoption", async () => {
+    try {
+      const result = await processPendingLegacyAdoptions(legacyAdoptionOptions());
+      if (result.adopted.length || result.failed.length) await loadState({ force: true });
+    } catch (error) {
+      console.warn("Pending legacy Bot adoption failed", error);
+    }
+  });
 }
 
 function readinessOptions() {
@@ -511,34 +519,33 @@ function sendUpdateState(value) {
 }
 
 async function prepareUpdateInstall(restartNames, targetVersion) {
-  writeRecoveryMarker(managedDataRoot(), restartNames, targetVersion);
-  recoverySupervisor?.stop();
-  const stoppedNames = [];
-  try {
-    for (const name of restartNames) {
-      await stopManagedBot(name, supervisorOptions());
-      stoppedNames.push(name);
-    }
-    await protocolProxyService?.stop();
-  } catch (error) {
-    for (const name of stoppedNames) {
-      try { await startManagedBot(name, supervisorOptions()); } catch {}
-    }
-    clearRecoveryMarker(managedDataRoot());
-    recoverySupervisor?.start();
-    await protocolProxyService?.start().catch(() => {});
-    throw error;
-  }
-  return {
-    rollback: async () => {
+  return operationCoordinator.runExclusive("prepare-update-install", async () => {
+    writeRecoveryMarker(managedDataRoot(), restartNames, targetVersion);
+    const stoppedNames = [];
+    try {
+      for (const name of restartNames) {
+        await stopManagedBot(name, supervisorOptions());
+        stoppedNames.push(name);
+      }
+      await protocolProxyService?.stop();
+    } catch (error) {
       for (const name of stoppedNames) {
         try { await startManagedBot(name, supervisorOptions()); } catch {}
       }
       clearRecoveryMarker(managedDataRoot());
-      recoverySupervisor?.start();
       await protocolProxyService?.start().catch(() => {});
-    },
-  };
+      throw error;
+    }
+    return {
+      rollback: async () => {
+        for (const name of stoppedNames) {
+          try { await startManagedBot(name, supervisorOptions()); } catch {}
+        }
+        clearRecoveryMarker(managedDataRoot());
+        await protocolProxyService?.start().catch(() => {});
+      },
+    };
+  });
 }
 
 function createDesktopUpdater() {
@@ -611,10 +618,11 @@ function managedBotForAction(name) {
   return bot;
 }
 
-function feishuConsoleUrl(appId, section) {
+function feishuConsoleUrl(appId, section, brand = "feishu") {
   if (!/^cli_[A-Za-z0-9]+$/.test(String(appId || ""))) throw new Error("飞书 App ID 无效");
   const suffix = section === "event" ? "event" : "permission";
-  return `https://open.feishu.cn/app/${encodeURIComponent(appId)}/${suffix}`;
+  const host = String(brand || "").toLowerCase() === "lark" ? "open.larksuite.com" : "open.feishu.cn";
+  return `https://${host}/app/${encodeURIComponent(appId)}/${suffix}`;
 }
 
 function detectorScriptPath() {
@@ -623,30 +631,62 @@ function detectorScriptPath() {
     : path.join(__dirname, "..", "..", "resources", "scripts", "detect-codex.ps1");
 }
 
-async function loadState() {
+const COLD_CACHE_TTL_MS = 30_000;
+let coldStateCache = null;
+
+async function loadState({ force = false } = {}) {
   const desktopRoot = path.join(__dirname, "..", "..");
-  const [codex, bridge, engine, capabilities] = await Promise.all([
-    inspectCodex(detectorScriptPath()),
-    Promise.resolve(discoverBridge(process.platform === "win32" ? undefined : path.join(runtimeLocalAppData(), "CodexFeishuBridge"))),
-    inspectEngine({ packaged: app.isPackaged, resourcesPath: process.resourcesPath, desktopRoot }),
-    Promise.resolve(inspectCapabilities()),
-  ]);
+  const userHome = app.getPath("home");
+  const defaultCodexHome = path.join(userHome, ".codex");
+  const useColdCache = !force && coldStateCache && (Date.now() - coldStateCache.at < COLD_CACHE_TTL_MS);
+
+  let cold = coldStateCache;
+  if (!useColdCache) {
+    const [codex, bridge, engine, capabilities, claude, antigravity] = await Promise.all([
+      inspectCodex(detectorScriptPath()),
+      Promise.resolve(discoverBridge(process.platform === "win32" ? undefined : path.join(runtimeLocalAppData(), "CodexFeishuBridge"))),
+      inspectEngine({ packaged: app.isPackaged, resourcesPath: process.resourcesPath, desktopRoot }),
+      Promise.resolve(inspectCapabilities()),
+      inspectClaudeRuntime({ userHome }),
+      inspectAntigravityRuntime({ userHome }),
+    ]);
+    const providerCatalog = inspectProviderCatalog(defaultCodexHome);
+    const provider = inspectProvider(defaultCodexHome);
+    const claudeCapabilities = inspectClaudeCapabilities(claudeOptions());
+    const antigravityCapabilities = inspectClaudeCapabilities(antigravityOptions());
+    cold = {
+      at: Date.now(),
+      codex,
+      bridge,
+      engine,
+      capabilities,
+      claude,
+      antigravity,
+      providerCatalog,
+      provider,
+      claudeCapabilities,
+      antigravityCapabilities,
+      modelSources: null,
+    };
+    coldStateCache = cold;
+  }
+
   const managedBots = inspectManagedBots(managedDataRoot(), runtimeLocalAppData());
   const capabilityHomes = inspectCapabilityHomes([
-    capabilities.codexHome,
+    cold.capabilities.codexHome,
     ...managedBots.filter((bot) => !['claude', 'antigravity'].includes(bot.engine)).map((bot) => bot.codexHome),
   ]);
-  const providerCatalog = inspectProviderCatalog(path.join(app.getPath("home"), ".codex"));
   const secureStorage = inspectSecureStorage(safeStorage, process.platform);
   currentState = {
-    claude: await inspectClaudeRuntime({ userHome: app.getPath('home') }),
+    claude: cold.claude,
     claudeProviders: inspectClaudeProviders(managedDataRoot()),
-    claudeCapabilities: inspectClaudeCapabilities(claudeOptions()),
+    claudeCapabilities: cold.claudeCapabilities,
     claudePendingConfiguration: readClaudePending(managedDataRoot()),
-    antigravity: await inspectAntigravityRuntime({ userHome: app.getPath('home') }),
+    antigravity: cold.antigravity,
     antigravityConfiguration: inspectAntigravity(antigravityOptions()),
-    antigravityCapabilities: inspectClaudeCapabilities(antigravityOptions()),
+    antigravityCapabilities: cold.antigravityCapabilities,
     antigravityPendingConfiguration: readClaudePending(managedDataRoot(), 'antigravity'),
+    codexPendingConfiguration: readPendingCodexReload(managedDataRoot()),
     generatedAt: new Date().toISOString(),
     app: {
       version: app.getVersion(),
@@ -657,12 +697,12 @@ async function loadState() {
       credentialStorageAvailable: secureStorage.available,
       credentialStorageError: secureStorage.error,
     },
-    codex,
-    bridge,
-    engine,
-    capabilities,
-    provider: inspectProvider(path.join(app.getPath("home"), ".codex")),
-    providerCatalog: protocolProxyService?.decorateCatalog(providerCatalog) || providerCatalog,
+    codex: cold.codex,
+    bridge: cold.bridge,
+    engine: cold.engine,
+    capabilities: cold.capabilities,
+    provider: cold.provider,
+    providerCatalog: protocolProxyService?.decorateCatalog(cold.providerCatalog) || cold.providerCatalog,
     settings: inspectDesktopSettings(),
     setup: {
       mode: app.isPackaged ? "production" : "development-sandbox",
@@ -677,6 +717,7 @@ async function loadState() {
       dataSchema: inspectDataSchema(managedDataRoot()),
       startupError,
       recovery: recoverySupervisor?.snapshot() || {},
+      coordinator: operationCoordinator.snapshot(),
       workspaceFactory: readWorkspaceFactoryQueue(managedDataRoot()),
       reasoningCapabilities: reasoningRegistry(),
       protocolProxy: protocolProxyService?.snapshot() || { supported: false, status: "unavailable", providerCount: 0 },
@@ -687,7 +728,10 @@ async function loadState() {
       currentVersion: app.getVersion(),
     },
   };
-  currentState.modelSources = await listDesktopModelSources(modelSourceOptions());
+  if (!useColdCache || !cold.modelSources) {
+    cold.modelSources = await listDesktopModelSources(modelSourceOptions());
+  }
+  currentState.modelSources = cold.modelSources;
   currentState.compatibility = assessCompatibility(currentState);
   return currentState;
 }
@@ -727,7 +771,7 @@ function createTray() {
 }
 
 function createManagedRecoverySupervisor() {
-  return createRecoverySupervisor({
+  const supervisor = createRecoverySupervisor({
     inspectBots: async () => inspectManagedBots(managedDataRoot(), runtimeLocalAppData()),
     startBot: async (name) => {
       await loadState();
@@ -736,16 +780,21 @@ function createManagedRecoverySupervisor() {
       return result;
     },
   });
+  const rawTick = supervisor.tick.bind(supervisor);
+  supervisor.tick = () => operationCoordinator.runExclusive("recovery-tick", rawTick, { pause: false });
+  return supervisor;
 }
 
 function createWindow() {
+  const captureWidth = capturePath ? Number(process.env.CFB_DESKTOP_CAPTURE_WIDTH || 0) : 0;
+  const captureHeight = capturePath ? Number(process.env.CFB_DESKTOP_CAPTURE_HEIGHT || 0) : 0;
   mainWindow = new BrowserWindow({
-    width: 1180,
-    height: 760,
+    width: captureWidth >= 920 ? captureWidth : 1180,
+    height: captureHeight >= 620 ? captureHeight : 760,
     minWidth: 920,
     minHeight: 620,
     show: false,
-    backgroundColor: "#f4f6f8",
+    backgroundColor: "#f4f6f9",
     title: "Codex Feishu Bridge",
     webPreferences: {
       preload: path.join(__dirname, "..", "preload", "index.cjs"),
@@ -764,21 +813,21 @@ function createWindow() {
       setTimeout(async () => {
         try {
           const deadline = Date.now() + 30_000;
-          while (Date.now() < deadline && !await mainWindow.webContents.executeJavaScript('document.querySelector("#app-version").textContent !== "v..."')) {
+          while (Date.now() < deadline && !await mainWindow.webContents.executeJavaScript('document.querySelector("#app-version")?.textContent !== "v..." && document.querySelector("#loading-band")?.classList.contains("hidden")')) {
             await new Promise((resolve) => setTimeout(resolve, 250));
           }
           if (captureSetup) {
-            await mainWindow.webContents.executeJavaScript('document.querySelector("[data-view=bots]").click(); document.querySelector("#create-bot-button").click();');
-            await new Promise((resolve) => setTimeout(resolve, 300));
+            await mainWindow.webContents.executeJavaScript('document.querySelector("#btn-open-wizard")?.click();');
+            await new Promise((resolve) => setTimeout(resolve, 350));
           } else if (captureView === "factory") {
-            await mainWindow.webContents.executeJavaScript('document.querySelectorAll(".view").forEach((view) => view.classList.add("hidden")); document.querySelectorAll(".nav-item").forEach((item) => item.classList.remove("active")); document.querySelector(\'[data-view="workspaces"]\').classList.add("active"); document.querySelector("#workspaces-view").classList.remove("hidden"); document.querySelector("#workspace-factory-editor").classList.remove("hidden"); document.querySelector("#view-title").textContent = "工作空间工厂";');
-            await new Promise((resolve) => setTimeout(resolve, 300));
-          } else if (["overview", "bots", "workspaces", "providers", "capabilities", "system"].includes(captureView)) {
-            await mainWindow.webContents.executeJavaScript(`document.querySelector('[data-view="${captureView}"]').click();`);
-            await new Promise((resolve) => setTimeout(resolve, 300));
+            await mainWindow.webContents.executeJavaScript(`document.querySelector('#btn-open-wizard')?.click(); setTimeout(() => document.querySelector('[data-wizard-mode="batch"]')?.click(), 100);`);
+            await new Promise((resolve) => setTimeout(resolve, 450));
+          } else if (["overview", "bots", "providers", "capabilities", "system"].includes(captureView)) {
+            await mainWindow.webContents.executeJavaScript(`document.querySelector('.nav-item[data-view="${captureView}"]')?.click();`);
+            await new Promise((resolve) => setTimeout(resolve, 350));
           }
           if (captureReadiness) {
-            await mainWindow.webContents.executeJavaScript('document.querySelector(".managed-bot-readiness")?.click();');
+            await mainWindow.webContents.executeJavaScript(`document.querySelector('[data-bot-detail]')?.click(); setTimeout(() => document.querySelector('[data-dtab="readiness"]')?.click(), 150);`);
             await new Promise((resolve) => setTimeout(resolve, 1500));
           }
           if (captureProviderRemoval) {
@@ -789,25 +838,68 @@ function createWindow() {
           fs.mkdirSync(path.dirname(capturePath), { recursive: true });
           fs.writeFileSync(capturePath, image.toPNG());
           if (process.env.CFB_DESKTOP_CAPTURE_REPORT) {
-            const report = await mainWindow.webContents.executeJavaScript(`({
-              version: document.querySelector('#app-version').textContent,
-              error: document.querySelector('#error-band').textContent,
-              antigravitySections: ['agy-providers', 'agy-factory', 'agy-tools', 'agy-runtime'].every((id) => Boolean(document.getElementById(id))),
-              antigravityCount: document.querySelector('#agy-factory-form').elements.count.value,
-              antigravityCredentialInputType: document.querySelector('#agy-provider-form').elements.apiKey.type,
-              claudeSections: ['claude-provider-section', 'claude-factory-section', 'claude-tools-section', 'claude-runtime-section'].every((id) => Boolean(document.getElementById(id))),
-              runtime: document.querySelector('#claude-runtime-details').textContent,
-              factoryCount: document.querySelector('#claude-factory-form').elements.count.value,
-              effort: document.querySelector('#claude-factory-form').elements.reasoning.value,
-              credentialInputType: document.querySelector('#claude-provider-form').elements.apiKey.type,
-              activeView: document.querySelector('.nav-item.active')?.dataset.view
-            })`);
-            fs.writeFileSync(process.env.CFB_DESKTOP_CAPTURE_REPORT, JSON.stringify(report, null, 2)+'\n', 'utf8');
-            if (!report.claudeSections || !report.antigravitySections || report.antigravityCount !== '5' || report.antigravityCredentialInputType !== 'password' || report.version !== `v${app.getVersion()}` || report.error.trim()
-                || (captureView && captureView !== 'factory' && report.activeView !== captureView)) throw new Error('Desktop capture validation failed');
+            const report = await mainWindow.webContents.executeJavaScript(`(() => {
+              const errorBand = document.querySelector('#error-band');
+              const errorBandVisible = Boolean(errorBand && !errorBand.classList.contains('hidden'));
+              const navViews = [...document.querySelectorAll('.nav-item[data-view]')].map((el) => el.dataset.view);
+              const horizontalOverflow = document.documentElement.scrollWidth > document.documentElement.clientWidth;
+              let sub12pxTextCount = 0;
+              const sub12pxSamples = [];
+              for (const el of document.querySelectorAll('body *')) {
+                const style = getComputedStyle(el);
+                if (style.display === 'none' || style.visibility === 'hidden') continue;
+                const rect = el.getBoundingClientRect();
+                if (rect.width <= 0 || rect.height <= 0) continue;
+                const hasDirectText = [...el.childNodes].some((node) => node.nodeType === 3 && node.textContent.trim().length > 0);
+                if (!hasDirectText) continue;
+                const fontSize = parseFloat(style.fontSize);
+                if (Number.isFinite(fontSize) && fontSize < 12) {
+                  sub12pxTextCount += 1;
+                  if (sub12pxSamples.length < 5) sub12pxSamples.push({ tag: el.tagName, text: el.textContent.trim().slice(0, 40), fontSize });
+                }
+              }
+              const botsTable = document.querySelector('#bots-table');
+              const botsViewBotListTopY = botsTable ? Math.round(botsTable.getBoundingClientRect().top) : null;
+              const wizardSupportsAllThreeEngines = ['codex', 'claude', 'antigravity'].every(
+                (engine) => Boolean(document.querySelector('[data-wizard-engine="' + engine + '"]')),
+              );
+              return {
+                version: document.querySelector('#app-version')?.textContent || '',
+                errorBandVisible,
+                error: document.querySelector('#error-band-message')?.textContent || '',
+                navViews,
+                activeView: document.querySelector('.nav-item.active')?.dataset.view || '',
+                horizontalOverflow,
+                sub12pxTextCount,
+                sub12pxSamples,
+                botsViewBotListTopY,
+                wizardSupportsAllThreeEngines,
+                viewport: { width: window.innerWidth, height: window.innerHeight },
+              };
+            })()`);
+            fs.writeFileSync(process.env.CFB_DESKTOP_CAPTURE_REPORT, JSON.stringify(report, null, 2) + '\n', 'utf8');
+            const expectedNav = ['overview', 'bots', 'providers', 'capabilities', 'system'];
+            const navMatches = Array.isArray(report.navViews)
+              && report.navViews.length === expectedNav.length
+              && expectedNav.every((item, idx) => report.navViews[idx] === item);
+            const invalid = (
+              report.version !== `v${app.getVersion()}`
+              || report.errorBandVisible !== false
+              || !navMatches
+              || report.horizontalOverflow !== false
+              || report.sub12pxTextCount !== 0
+              || (captureView === 'bots' && (typeof report.botsViewBotListTopY !== 'number' || report.botsViewBotListTopY > 220))
+              || ((captureSetup || captureView === 'factory') && report.wizardSupportsAllThreeEngines !== true)
+              || (captureView && !['factory'].includes(captureView) && !captureSetup && report.activeView !== captureView)
+            );
+            if (invalid) {
+              console.error('Desktop capture validation failed:', JSON.stringify(report));
+              throw new Error('Desktop capture validation failed');
+            }
           }
           app.exit(0);
-        } catch {
+        } catch (captureError) {
+          console.error('Desktop capture error:', captureError?.message || captureError);
           app.exit(1);
         }
       }, 2500);
@@ -861,7 +953,9 @@ if (!singleInstance) {
       return startupStatePromise;
     };
     ipcMain.handle("desktop:get-version", () => app.getVersion());
-    ipcMain.handle("desktop:get-state", () => (runtimeInitializing ? startupState() : loadState()));
+    ipcMain.handle("desktop:get-state", (_event, options) => (
+      runtimeInitializing ? startupState() : loadState({ force: Boolean(options?.force) })
+    ));
     ipcMain.handle("desktop:check-update", () => updaterService?.check());
     ipcMain.handle("desktop:install-update", () => updaterService?.install());
     ipcMain.handle("desktop:open-path", async (_event, requestedPath) => {
@@ -887,7 +981,7 @@ if (!singleInstance) {
       const result = await saveAntigravityProvider(input, antigravityOptions());
       const names = readManagedBots(managedDataRoot()).filter((bot) => bot.engine === 'antigravity').map((bot) => bot.name);
       result.queuedBots = queueClaudeReconfiguration(managedDataRoot(), names, 'antigravity');
-      await loadState(); return result;
+      await loadState({ force: true }); return result;
     });
     ipcMain.handle('desktop:antigravity-capture-account', async (_event, input) => {
       assertStartupReady(); const result = captureAntigravityAccount(input, antigravityOptions()); await loadState(); return result;
@@ -897,10 +991,10 @@ if (!singleInstance) {
     });
     ipcMain.handle('desktop:antigravity-open-login', () => { assertStartupReady(); return openAntigravityLogin(antigravityOptions()); });
     ipcMain.handle('desktop:antigravity-save-mcp', async (_event, input) => {
-      assertStartupReady(); const result = saveClaudeMcp(input, antigravityOptions()); await loadState(); return result;
+      assertStartupReady(); const result = saveClaudeMcp(input, antigravityOptions()); await loadState({ force: true }); return result;
     });
     ipcMain.handle('desktop:antigravity-migrate-capabilities', async (_event, input) => {
-      assertStartupReady(); const result = migrateClaudeCapabilities(input, antigravityOptions()); await loadState(); return result;
+      assertStartupReady(); const result = migrateClaudeCapabilities(input, antigravityOptions()); await loadState({ force: true }); return result;
     });
     ipcMain.handle('desktop:antigravity-assign-provider', async (_event, input) => {
       assertStartupReady(); const result = assignAntigravityProvider(input, antigravityOptions(), readManagedBots(managedDataRoot()));
@@ -911,7 +1005,7 @@ if (!singleInstance) {
       assertStartupReady();
       const result = await saveClaudeProvider(input, claudeOptions());
       result.pendingBots = queueClaudeProviderUsers(result.provider.id);
-      await loadState(); return result;
+      await loadState({ force: true }); return result;
     });
     ipcMain.handle('desktop:claude-replace-key', async (_event, input) => {
       assertStartupReady();
@@ -926,10 +1020,10 @@ if (!singleInstance) {
       await loadState(); return result;
     });
     ipcMain.handle('desktop:claude-save-mcp', async (_event, input) => {
-      assertStartupReady(); const result = saveClaudeMcp(input, claudeOptions()); await loadState(); return result;
+      assertStartupReady(); const result = saveClaudeMcp(input, claudeOptions()); await loadState({ force: true }); return result;
     });
     ipcMain.handle('desktop:claude-migrate-capabilities', async (_event, input) => {
-      assertStartupReady(); const result = migrateClaudeCapabilities(input, claudeOptions()); await loadState(); return result;
+      assertStartupReady(); const result = migrateClaudeCapabilities(input, claudeOptions()); await loadState({ force: true }); return result;
     });
     ipcMain.handle("desktop:create-bot", async (_event, input) => {
       assertStartupReady();
@@ -942,20 +1036,14 @@ if (!singleInstance) {
     ));
     ipcMain.handle("desktop:apply-legacy-adoption", async (_event, input) => {
       assertStartupReady();
-      if (legacyAdoptionInFlight) throw new Error("现有 Bot 接管正在进行，请等待当前操作完成");
-      legacyAdoptionInFlight = true;
-      recoverySupervisor?.stop();
-      try {
+      return operationCoordinator.runExclusive("apply-legacy-adoption", async () => {
         const result = await applyLegacyAdoption(
           Array.isArray(input?.names) ? input.names : [],
           legacyAdoptionOptions(),
         );
-        await loadState();
+        await loadState({ force: true });
         return result;
-      } finally {
-        recoverySupervisor?.start();
-        legacyAdoptionInFlight = false;
-      }
+      });
     });
     ipcMain.handle("desktop:register-bot-qr", async (event, input) => {
       assertStartupReady();
@@ -1021,7 +1109,7 @@ if (!singleInstance) {
     ipcMain.handle("desktop:add-global-provider", async (_event, input) => {
       assertStartupReady();
       const result = queueCodexProviderReload(await addGlobalProvider(input, providerManagerOptions()));
-      await loadState();
+      await loadState({ force: true });
       return result;
     });
     ipcMain.handle("desktop:replace-global-provider-key", async (_event, input) => {
@@ -1042,7 +1130,7 @@ if (!singleInstance) {
     ipcMain.handle("desktop:apply-global-provider-removal", async (_event, input) => {
       assertStartupReady();
       const result = await applyGlobalProviderRemoval(input, providerManagerOptions());
-      await loadState();
+      await loadState({ force: true });
       return result;
     });
     ipcMain.handle("desktop:preview-provider-sync", () => (
@@ -1051,7 +1139,7 @@ if (!singleInstance) {
     ipcMain.handle("desktop:apply-provider-sync", async () => {
       assertStartupReady();
       const result = providerSyncPlan(providerManagerOptions(), true);
-      await loadState();
+      await loadState({ force: true });
       return result;
     });
     ipcMain.handle("desktop:start-openai-login", async (_event, codexHome) => {
@@ -1086,7 +1174,7 @@ if (!singleInstance) {
     ipcMain.handle("desktop:apply-model-source-switch", async (_event, input) => {
       assertStartupReady();
       const result = await applyDesktopModelSourceSwitch(input, modelSourceOptions());
-      await loadState();
+      await loadState({ force: true });
       return result;
     });
     ipcMain.handle("desktop:start-bot", async (_event, name) => {
@@ -1103,10 +1191,7 @@ if (!singleInstance) {
     });
     ipcMain.handle("desktop:restart-bots", async (event, input) => {
       assertStartupReady();
-      if (batchRestartInFlight) throw new Error("批量重启正在进行，请等待当前操作完成");
-      batchRestartInFlight = true;
-      recoverySupervisor?.stop();
-      try {
+      return operationCoordinator.runExclusive("restart-bots", async () => {
         const result = await restartSelectedManagedBots({
           ...supervisorOptions(),
           names: Array.isArray(input?.names) ? input.names : [],
@@ -1115,12 +1200,9 @@ if (!singleInstance) {
             if (!event.sender.isDestroyed()) event.sender.send("desktop:bot-restart-progress", progress);
           },
         });
-        await loadState();
+        await loadState({ force: false });
         return result;
-      } finally {
-        batchRestartInFlight = false;
-        recoverySupervisor?.start();
-      }
+      });
     });
     ipcMain.handle("desktop:set-bot-autostart", async (_event, input) => {
       assertStartupReady();
@@ -1157,14 +1239,11 @@ if (!singleInstance) {
     ));
     ipcMain.handle("desktop:apply-managed-removal", async (_event, input) => {
       assertStartupReady();
-      recoverySupervisor?.stop();
-      try {
+      return operationCoordinator.runExclusive("apply-managed-removal", async () => {
         const result = await applyManagedRemoval(input, removalOptions());
-        await loadState();
+        await loadState({ force: true });
         return result;
-      } finally {
-        recoverySupervisor?.start();
-      }
+      });
     });
     ipcMain.handle("desktop:set-settings", async (_event, patch) => {
       assertStartupReady();
@@ -1199,7 +1278,7 @@ if (!singleInstance) {
     ipcMain.handle("desktop:open-feishu-console", async (_event, input) => {
       const bot = managedBotForAction(input?.name);
       const section = input?.section === "event" ? "event" : "permission";
-      await shell.openExternal(feishuConsoleUrl(bot.appId, section));
+      await shell.openExternal(feishuConsoleUrl(bot.appId, section, bot.brand));
       return { ok: true, section };
     });
     ipcMain.handle("desktop:authorize-lark-user", async (_event, name) => {
@@ -1226,8 +1305,66 @@ if (!singleInstance) {
     ipcMain.handle("desktop:apply-capability-migration", async (_event, input) => {
       assertStartupReady();
       const result = applyCapabilityMigration(String(input?.name || ""), input?.selection, migrationOptions());
-      await loadState();
+      await loadState({ force: true });
       return result;
+    });
+    ipcMain.handle("desktop:update-bot-config", async (_event, input) => {
+      assertStartupReady();
+      return operationCoordinator.runExclusive("update-bot-config", async () => {
+        const result = await updateManagedBotConfig(input || {}, {
+          dataRoot: managedDataRoot(),
+          localAppData: runtimeLocalAppData(),
+          env: process.env,
+          inspectBots: () => inspectManagedBots(managedDataRoot(), runtimeLocalAppData()),
+          stopBot: (name) => stopManagedBot(name, supervisorOptions()),
+          startBot: (name) => startManagedBot(name, supervisorOptions()),
+          queueClaude: queueClaudeReconfiguration,
+          queueCodexBotReload,
+        });
+        await loadState({ force: true });
+        return result;
+      });
+    });
+    ipcMain.handle("desktop:read-bot-logs", (_event, input) => readBotLogs(input || {}, {
+      dataRoot: managedDataRoot(),
+      localAppData: runtimeLocalAppData(),
+    }));
+    ipcMain.handle("desktop:retry-workspace-factory-bot", async (_event, input) => {
+      assertStartupReady();
+      const result = retryFactoryBot(String(input?.name || ""), managedDataRoot());
+      await loadState({ force: false });
+      return result;
+    });
+    ipcMain.handle("desktop:discard-workspace-factory-queue", async () => {
+      assertStartupReady();
+      const current = readWorkspaceFactoryQueue(managedDataRoot());
+      const discardedCount = Array.isArray(current?.bots) ? current.bots.length : 0;
+      if (cancelRegistration) {
+        try { cancelRegistration(); } catch {}
+      }
+      discardFactoryQueue(managedDataRoot());
+      await loadState({ force: false });
+      return { ok: true, discardedCount };
+    });
+    ipcMain.handle("desktop:probe-mcp-health", async () => probeMcpHealth({
+      dataRoot: managedDataRoot(),
+      userHome: app.getPath("home"),
+      codexHome: path.join(app.getPath("home"), ".codex"),
+      engineRoot: currentState?.engine?.engineRoot || "",
+      env: process.env,
+      platform: process.platform,
+    }));
+    ipcMain.handle("desktop:set-owner-open-id", async (_event, input) => {
+      assertStartupReady();
+      const result = setOwnerOpenId(input || {}, {
+        dataRoot: managedDataRoot(),
+        readManagedBots,
+        queueClaude: queueClaudeReconfiguration,
+        queueCodexBotReload,
+      });
+      desktopSettings = result.settings;
+      await loadState({ force: true });
+      return { ok: true, ownerOpenId: result.ownerOpenId, queuedBots: result.queuedBots };
     });
     createWindow();
     windowReadiness.markReady();

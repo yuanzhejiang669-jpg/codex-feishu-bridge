@@ -267,9 +267,30 @@ async function registerFactoryBot(name, options, onProgress = () => {}) {
   }
 }
 
+function retryFactoryBot(name, dataRoot) {
+  const targetName = String(name || "").trim();
+  const state = readQueue(dataRoot);
+  const bot = (state.bots || []).find((item) => item.name === targetName);
+  if (!bot) throw new Error(`创建队列中找不到 Bot：${targetName}`);
+  if (bot.status !== "failed") throw new Error(`仅失败状态的 Bot 允许重试，当前状态：${bot.status}`);
+  bot.status = "pending";
+  bot.error = "";
+  state.status = "pending";
+  state.updatedAt = new Date().toISOString();
+  atomicWrite(queuePath(dataRoot), `${JSON.stringify(state, null, 2)}\n`);
+  return state;
+}
+
+function discardFactoryQueue(dataRoot) {
+  fs.rmSync(queuePath(dataRoot), { force: true });
+  return { schemaVersion: 1, status: "empty", bots: [] };
+}
+
 module.exports = {
   createWorkspaceFactoryQueue,
+  discardFactoryQueue,
   previewWorkspaceFactory,
   readWorkspaceFactoryQueue: readQueue,
   registerFactoryBot,
+  retryFactoryBot,
 };

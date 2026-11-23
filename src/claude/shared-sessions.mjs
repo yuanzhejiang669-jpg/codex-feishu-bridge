@@ -3,7 +3,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { writeJsonFileAtomicSync } from '../utils/json.mjs';
 import nativeLock from '../sessions/native-lock.cjs';
-const { lockDirectory } = nativeLock;
+import {
+  buildAccessContext,
+  canAccessSession,
+  readOrBindPrimaryOwner,
+} from '../sessions/access-control.mjs';
+const { lockDirectory, lockDirectoryAsync } = nativeLock;
 
 const clone = (value) => JSON.parse(JSON.stringify(value));
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
@@ -33,12 +38,51 @@ export function createSharedClaudeSessionStore({ config, sessionsPath, createSes
   const root = path.resolve(isAntigravity ? config.antigravitySharedSessionsRoot : config.claudeSharedSessionsRoot);
   if (root === path.parse(root).root) throw new Error('Claude 共享会话库不能是磁盘根目录');
   const catalogFile = path.join(root, 'sessions.json');
+  const ownerFile = path.join(root, 'owner.json');
   const instancesRoot = path.dirname(path.dirname(config.stateDir));
   const local = read(sessionsPath, { chats: {} });
   local.chats ||= {};
   const baselines = new WeakMap();
+  const chatContexts = new Map();
   const source = { bot: config.larkProfile, home: path.resolve(configuredHome),
     workspace: path.resolve(config.workspace), stateFile: sessionsPath };
+
+  function resolveAccessContext(chatId, accessCtx = null) {
+    const id = String(chatId || accessCtx?.chatId || '').trim();
+    if (accessCtx && typeof accessCtx === 'object') {
+      const eventLike = {
+        chat_id: accessCtx.chatId || accessCtx.chat_id || id,
+        chat_type: accessCtx.chatType ?? accessCtx.chat_type ?? '',
+        sender_id: accessCtx.senderId ?? accessCtx.sender_id ?? '',
+      };
+      const primaryOwnerOpenId = accessCtx.primaryOwnerOpenId || readOrBindPrimaryOwner({
+        ownerFile,
+        configuredOwnerOpenId: config.ownerOpenId ?? process.env.CODEX_FEISHU_OWNER_OPEN_ID ?? '',
+        event: eventLike,
+      });
+      const resolved = {
+        chatId: eventLike.chat_id,
+        chatType: String(eventLike.chat_type || '').trim().toLowerCase(),
+        senderId: String(eventLike.sender_id || '').trim(),
+        scopeType: String(eventLike.chat_type || '').trim().toLowerCase() === 'p2p' ? 'dm' : eventLike.chat_type ? 'group' : '',
+        primaryOwnerOpenId,
+      };
+      if (id) chatContexts.set(id, resolved);
+      return resolved;
+    }
+    const primaryOwnerOpenId = readOrBindPrimaryOwner({
+      ownerFile,
+      configuredOwnerOpenId: config.ownerOpenId ?? process.env.CODEX_FEISHU_OWNER_OPEN_ID ?? '',
+    });
+    return { chatId: id, chatType: '', senderId: '', scopeType: '', primaryOwnerOpenId };
+  }
+
+  function accessContextForEvent(event) {
+    return buildAccessContext(event, {
+      ownerFile,
+      configuredOwnerOpenId: config.ownerOpenId ?? process.env.CODEX_FEISHU_OWNER_OPEN_ID ?? '',
+    });
+  }
 
   function sources() {
     if (configuredSources) return [source, ...configuredSources];
@@ -57,21 +101,42 @@ export function createSharedClaudeSessionStore({ config, sessionsPath, createSes
   const knownSources = sources();
   const allowedHomes = new Set(knownSources.map((s) => homeKey(s.home)));
   function readCatalog() {
-    const pool = read(catalogFile, { schemaVersion: 1, sessions: {}, deleted: {} });
-    if (pool.schemaVersion !== 1 || !pool.sessions || Array.isArray(pool.sessions) || !pool.deleted) throw new Error('Claude 共享会话库格式无效，已停止写入');
+    const pool = read(catalogFile, { schemaVersion: 2, sessions: {}, deleted: {} });
+    if (![1, 2].includes(pool.schemaVersion) || !pool.sessions || Array.isArray(pool.sessions) || !pool.deleted) {
+      throw new Error('Claude 共享会话库格式无效，已停止写入');
+    }
+    pool.schemaVersion = 2;
     return pool;
   }
   function withCatalog(work) {
     const release = lockDirectory(path.join(root, '.catalog.lock'), { bot: config.larkProfile, purpose: 'catalog' }, 2_000);
     try {
       const pool = readCatalog();
+      pool.schemaVersion = 2;
       const result = work(pool);
       writeJsonFileAtomicSync(catalogFile, pool);
       return result;
     } finally { release(); }
   }
-  function normalized(session, origin = source) {
-    return { ...normalizeSessionData(session), engine,
+  async function withCatalogAsync(work) {
+    const release = await lockDirectoryAsync(path.join(root, '.catalog.lock'), { bot: config.larkProfile, purpose: 'catalog' }, 2_000);
+    try {
+      const pool = readCatalog();
+      pool.schemaVersion = 2;
+      const result = await work(pool);
+      writeJsonFileAtomicSync(catalogFile, pool);
+      return result;
+    } finally { release(); }
+  }
+  function normalized(session, origin = source, scope = null) {
+    const base = { ...normalizeSessionData(session) };
+    const scopeType = base.scopeType || (scope?.chatType ? (scope.chatType === 'p2p' ? 'dm' : 'group') : 'dm');
+    const ownerOpenId = String(base.ownerOpenId ?? (scope?.senderId || ''));
+    const originChatId = String(base.originChatId ?? (scope?.chatId || ''));
+    return { ...base, engine,
+      scopeType,
+      ownerOpenId,
+      originChatId,
       [homeField]: session[homeField] || origin.home,
       [workspaceField]: session[workspaceField] || origin.workspace,
       [originField]: session[originField] || origin.bot };
@@ -87,9 +152,12 @@ export function createSharedClaudeSessionStore({ config, sessionsPath, createSes
     for (const [key, value] of Object.entries(after)) if (!same(before?.[key], value)) delta[key] = value;
     return delta;
   }
-  function refresh(chat, pool) {
+  function refresh(chat, pool, accessCtx = null) {
     const existing = new Map((chat.sessions || []).map((s) => [s.id, s]));
-    chat.sessions = Object.values(pool.sessions).sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0) || a.id.localeCompare(b.id)).map((remote) => {
+    const visible = Object.values(pool.sessions)
+      .filter((remote) => (accessCtx ? canAccessSession(remote, accessCtx) : true))
+      .sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0) || a.id.localeCompare(b.id));
+    chat.sessions = visible.map((remote) => {
       const item = existing.get(remote.id) || {};
       const baseline = baselines.get(item);
       const dirty = baseline ? changes(baseline, item) : {};
@@ -118,43 +186,58 @@ export function createSharedClaudeSessionStore({ config, sessionsPath, createSes
       }
     }
   });
-  for (const chat of Object.values(local.chats)) refresh(chat, readCatalog());
+  for (const [chatId, chat] of Object.entries(local.chats)) {
+    refresh(chat, readCatalog(), resolveAccessContext(chatId));
+  }
 
-  function saveSessions() {
-    const pool = withCatalog((current) => {
-      for (const chat of Object.values(local.chats)) for (const item of chat.sessions || []) {
-        if (current.deleted[item.id]) continue;
-        const baseline = baselines.get(item);
-        const value = normalized(item);
-        if (!current.sessions[item.id]) current.sessions[item.id] = value;
-        else if (baseline) {
-          const delta = changes(baseline, value);
-          // Ownership is fixed at creation; selecting a session never migrates it.
-          for (const key of ['id', homeField, workspaceField, originField]) delete delta[key];
-          Object.assign(current.sessions[item.id], delta);
-        }
+  function applyLocalSessionsToCatalog(current) {
+    for (const chat of Object.values(local.chats)) for (const item of chat.sessions || []) {
+      if (current.deleted[item.id]) continue;
+      const baseline = baselines.get(item);
+      const value = normalized(item);
+      if (!current.sessions[item.id]) current.sessions[item.id] = value;
+      else if (baseline) {
+        const delta = changes(baseline, value);
+        // Ownership and access-control scope are fixed at creation; selecting a session never migrates them.
+        for (const key of ['id', 'scopeType', 'ownerOpenId', 'originChatId', homeField, workspaceField, originField]) delete delta[key];
+        Object.assign(current.sessions[item.id], delta);
       }
-      return current;
-    });
-    for (const chat of Object.values(local.chats)) refresh(chat, pool);
+    }
+    return current;
+  }
+  function saveSessions() {
+    const pool = withCatalog(applyLocalSessionsToCatalog);
+    for (const [chatId, chat] of Object.entries(local.chats)) {
+      refresh(chat, pool, chatContexts.get(chatId) || resolveAccessContext(chatId));
+    }
     writeJsonFileAtomicSync(sessionsPath, local);
   }
-  function getChatState(chatId) {
-    const chat = local.chats[chatId] ||= { currentSessionId: '', sessions: [] };
-    return refresh(chat, readCatalog());
+  async function saveSessionsAsync() {
+    const pool = await withCatalogAsync(applyLocalSessionsToCatalog);
+    for (const [chatId, chat] of Object.entries(local.chats)) {
+      refresh(chat, pool, chatContexts.get(chatId) || resolveAccessContext(chatId));
+    }
+    writeJsonFileAtomicSync(sessionsPath, local);
   }
-  function getSession(chatId) {
-    const chat = getChatState(chatId);
+  function getChatState(chatId, accessCtx = null) {
+    const chat = local.chats[chatId] ||= { currentSessionId: '', sessions: [] };
+    const ctx = resolveAccessContext(chatId, accessCtx);
+    return refresh(chat, readCatalog(), ctx);
+  }
+  function getSession(chatId, accessCtx = null) {
+    const ctx = resolveAccessContext(chatId, accessCtx);
+    const chat = getChatState(chatId, ctx);
     let current = chat.sessions.find((s) => s.id === chat.currentSessionId);
     if (!current) {
-      current = normalized(createSessionData('默认会话'));
+      current = normalized(createSessionData('默认会话'), source, ctx);
       chat.sessions.unshift(current); chat.currentSessionId = current.id; saveSessions();
     }
     return current;
   }
-  function resetSession(chatId, title = '新会话') {
-    const chat = getChatState(chatId);
-    const current = normalized(createSessionData(title || '新会话'));
+  function resetSession(chatId, title = '新会话', accessCtx = null) {
+    const ctx = resolveAccessContext(chatId, accessCtx);
+    const chat = getChatState(chatId, ctx);
+    const current = normalized(createSessionData(title || '新会话'), source, ctx);
     chat.sessions.unshift(current); chat.currentSessionId = current.id; saveSessions();
     return current;
   }
@@ -205,11 +288,58 @@ export function createSharedClaudeSessionStore({ config, sessionsPath, createSes
       return () => { for (const release of releases.reverse()) release(); };
     } catch (error) { for (const release of releases.reverse()) release(); throw error; }
   }
-  function remove(ids) {
+  async function acquireAsync(session, purpose = 'run') {
+    if (!/^[a-zA-Z0-9_-]{1,100}$/.test(session.id)) throw new Error('共享会话 ID 无效');
+    assertIdle(session);
+    const release = await lockDirectoryAsync(path.join(root, 'leases', session.id), { bot: config.larkProfile, purpose }, 0);
+    try {
+      const current = readCatalog().sessions[session.id];
+      if (!current || current[nativeField] !== session[nativeField]) throw new Error('共享会话已变化，请重新 /list 并选择会话');
+      return release;
+    } catch (error) { release(); throw error; }
+  }
+  async function acquireManyAsync(items) {
+    const releases = [];
+    try {
+      for (const item of [...items].sort((a, b) => a.id.localeCompare(b.id))) {
+        const current = readCatalog().sessions[item.id];
+        if (!current) throw new Error('共享会话已删除，请重新 /list');
+        releases.push(await acquireAsync(current, 'delete'));
+      }
+      return () => { for (const release of releases.reverse()) release(); };
+    } catch (error) { for (const release of releases.reverse()) release(); throw error; }
+  }
+  function remove(ids, accessCtx = null) {
+    const ctx = resolveAccessContext(accessCtx?.chatId || accessCtx?.chat_id || '', accessCtx);
     withCatalog((pool) => {
+      for (const id of ids) {
+        const existing = pool.sessions[id];
+        if (existing && !canAccessSession(existing, ctx)) {
+          throw new Error('无权删除不属于当前作用域的会话');
+        }
+      }
       for (const id of ids) { delete pool.sessions[id]; pool.deleted[id] = Date.now(); }
     });
   }
-  return { sessions: local, getChatState, getSession, resetSession, saveSessions,
-    shared: { catalogFile, sessionHome, acquire, acquireMany, assertIdle, busy, remove } };
+  async function removeAsync(ids, accessCtx = null) {
+    const ctx = resolveAccessContext(accessCtx?.chatId || accessCtx?.chat_id || '', accessCtx);
+    await withCatalogAsync((pool) => {
+      for (const id of ids) {
+        const existing = pool.sessions[id];
+        if (existing && !canAccessSession(existing, ctx)) {
+          throw new Error('无权删除不属于当前作用域的会话');
+        }
+      }
+      for (const id of ids) { delete pool.sessions[id]; pool.deleted[id] = Date.now(); }
+    });
+  }
+  return {
+    sessions: local, getChatState, getSession, resetSession, saveSessions, saveSessionsAsync,
+    shared: {
+      catalogFile, ownerFile, accessContextForEvent, sessionHome,
+      withCatalog, withCatalogAsync, saveSessionsAsync,
+      acquire, acquireAsync, acquireMany, acquireManyAsync,
+      assertIdle, busy, remove, removeAsync,
+    },
+  };
 }

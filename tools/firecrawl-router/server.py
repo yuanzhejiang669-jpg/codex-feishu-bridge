@@ -11,7 +11,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from mcp.server.fastmcp import FastMCP
 
@@ -108,14 +108,24 @@ def key_records() -> list[dict[str, Any]]:
     return result
 
 
-def sanitize(text: str) -> str:
+def all_pool_secrets() -> list[str]:
+    secrets = [str(item.get("api_key") or "").strip() for item in load_pool().get("keys", []) if isinstance(item, dict)]
+    secrets.append(os.environ.get("FIRECRAWL_API_KEY", "").strip())
+    return [secret for secret in secrets if secret]
+
+
+def sanitize(text: str, extra_secrets: Iterable[str] = (), *, max_chars: int = 1200) -> str:
     clean = str(text or "")
-    for record in key_records():
-        clean = clean.replace(record["api_key"], "[REDACTED]")
+    secrets = sorted({str(s).strip() for s in [*all_pool_secrets(), *extra_secrets] if s and len(str(s).strip()) >= 4}, key=len, reverse=True)
+    for secret in secrets:
+        clean = clean.replace(secret, "[REDACTED]")
     clean = re.sub(r"(?i)(authorization\s*[:=]\s*bearer\s+)\S+", r"\1[REDACTED]", clean)
-    clean = re.sub(r"(?i)(api[_-]?key\s*[:=]\s*)\S+", r"\1[REDACTED]", clean)
+    clean = re.sub(r"(?i)(\bbearer\s+)\S+", r"\1[REDACTED]", clean)
+    clean = re.sub(r"(?i)((?:tavily_|firecrawl_)?api[_-]?key\s*[:=]\s*)\S+", r"\1[REDACTED]", clean)
+    clean = re.sub(r"(?i)(--api-key\s+)\S+", r"\1[REDACTED]", clean)
+    clean = re.sub(r"\btvly-[A-Za-z0-9_-]{8,}\b", "[REDACTED]", clean)
     clean = re.sub(r"\bfc-[A-Za-z0-9_-]{8,}\b", "[REDACTED]", clean)
-    return clean[-1200:]
+    return clean[-max_chars:] if max_chars > 0 else clean
 
 
 def classify_error(output: str, exit_code: int) -> str:
@@ -178,25 +188,40 @@ def find_value(data: Any, names: set[str]) -> Any:
     return None
 
 
-def query_credit_usage(record: dict[str, Any], timeout: int = 20) -> dict[str, Any]:
+def firecrawl_command() -> list[str] | None:
+    script = os.environ.get("FIRECRAWL_CLI_SCRIPT", "").strip()
+    if script:
+        script_path = Path(script)
+        if not script_path.is_file():
+            return None
+        node = os.environ.get("FIRECRAWL_NODE_PATH", "").strip() or shutil.which("node")
+        if not node:
+            return None
+        return [node, str(script_path)]
     executable = shutil.which("firecrawl")
-    if not executable:
+    return [executable] if executable else None
+
+
+def query_credit_usage(record: dict[str, Any], timeout: int = 20) -> dict[str, Any]:
+    cmd = firecrawl_command()
+    if not cmd:
         return {"ok": False, "error": "firecrawl CLI not found"}
+    run_env = {**os.environ, "FIRECRAWL_API_KEY": record["api_key"]}
     try:
         completed = subprocess.run(
-            [executable, "credit-usage", "--json", "--api-key", record["api_key"]],
-            text=True, encoding="utf-8", errors="replace", stdout=subprocess.PIPE,
+            [*cmd, "credit-usage", "--json"],
+            env=run_env, text=True, encoding="utf-8", errors="replace", stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, timeout=timeout, check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        return {"ok": False, "error": sanitize(str(exc))}
+        return {"ok": False, "error": sanitize(str(exc), extra_secrets=(record["api_key"],))}
     combined = (completed.stdout or "") + "\n" + (completed.stderr or "")
     if completed.returncode != 0:
-        return {"ok": False, "exitCode": completed.returncode, "error": sanitize(completed.stderr or completed.stdout)}
+        return {"ok": False, "exitCode": completed.returncode, "error": sanitize(completed.stderr or completed.stdout, extra_secrets=(record["api_key"],))}
     try:
         data = json.loads((completed.stdout or "").strip())
     except (TypeError, json.JSONDecodeError):
-        return {"ok": False, "exitCode": completed.returncode, "error": sanitize(combined or "invalid credit-usage response")}
+        return {"ok": False, "exitCode": completed.returncode, "error": sanitize(combined or "invalid credit-usage response", extra_secrets=(record["api_key"],))}
     return {
         "ok": True,
         "remainingCredits": find_value(data, {"remainingcredits", "remaining_credits"}),
@@ -246,8 +271,8 @@ def run_firecrawl(args: list[str], timeout: int = 120) -> dict[str, Any]:
 
 
 def _run_firecrawl_locked(args: list[str], timeout: int = 120) -> dict[str, Any]:
-    executable = shutil.which("firecrawl")
-    if not executable:
+    cmd = firecrawl_command()
+    if not cmd:
         raise RuntimeError("firecrawl CLI not found. Install with: npm install -g firecrawl-cli")
     records = key_records()
     def reserve_order(state: dict[str, Any]) -> tuple[list[dict[str, Any]], float | None]:
@@ -266,25 +291,32 @@ def _run_firecrawl_locked(args: list[str], timeout: int = 120) -> dict[str, Any]
         return {"ok": False, "used_key_alias": "", "attempts": [], "stdout": "", "stderr": "All keys are cooling down", "next_retry_at": next_retry_at}
     attempts: list[dict[str, Any]] = []
     for offset, record in enumerate(ordered):
+        run_env = {**os.environ, "FIRECRAWL_API_KEY": record["api_key"]}
         try:
             completed = subprocess.run(
-                [executable, *args, "--api-key", record["api_key"]], text=True, encoding="utf-8",
+                [*cmd, *args], env=run_env, text=True, encoding="utf-8",
                 errors="replace", stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, check=False,
             )
-            stdout, stderr, exit_code = completed.stdout or "", completed.stderr or "", completed.returncode
+            stdout = sanitize(
+                completed.stdout or "",
+                extra_secrets=(record["api_key"],),
+                max_chars=0 if completed.returncode == 0 else 1200,
+            )
+            stderr = sanitize(completed.stderr or "", extra_secrets=(record["api_key"],))
+            exit_code = completed.returncode
             category = classify_error(stderr + "\n" + stdout, exit_code)
         except subprocess.TimeoutExpired as exc:
-            stdout = exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
-            stderr = exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+            stdout = sanitize(exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or ""), extra_secrets=(record["api_key"],))
+            stderr = sanitize(exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or ""), extra_secrets=(record["api_key"],))
             stderr = f"{stderr}\nfirecrawl CLI timed out after {timeout} seconds".strip()
             exit_code, category = -1, "transient"
         except OSError as exc:
-            stdout, stderr, exit_code, category = "", str(exc), -1, "transient"
-        attempt = {"alias": record["alias"], "exitCode": exit_code, "reason": category, "stderrTail": sanitize(stderr)}
+            stdout, stderr, exit_code, category = "", sanitize(str(exc), extra_secrets=(record["api_key"],)), -1, "transient"
+        attempt = {"alias": record["alias"], "exitCode": exit_code, "reason": category, "stderrTail": sanitize(stderr, extra_secrets=(record["api_key"],))}
         attempts.append(attempt)
         def record_attempt(state: dict[str, Any]) -> None:
             key_state = state.setdefault("keys", {}).setdefault(record["alias"], {})
-            key_state.update({"last_used_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "last_exit_code": exit_code, "last_reason": category, "last_error_tail": sanitize(stderr)})
+            key_state.update({"last_used_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "last_exit_code": exit_code, "last_reason": category, "last_error_tail": sanitize(stderr, extra_secrets=(record["api_key"],))})
             if exit_code == 0:
                 key_state["cooldown_until"] = 0
                 key_state.pop("credit_status", None)
@@ -295,7 +327,7 @@ def _run_firecrawl_locked(args: list[str], timeout: int = 120) -> dict[str, Any]
                 key_state["credit_status"] = usage
         mutate_state(record_attempt)
         if exit_code == 0:
-            return {"ok": True, "used_key_alias": record["alias"], "attempts": attempts, "stdout": stdout, "stderr": sanitize(stderr), "next_retry_at": None}
+            return {"ok": True, "used_key_alias": record["alias"], "attempts": attempts, "stdout": stdout, "stderr": sanitize(stderr, extra_secrets=(record["api_key"],)), "next_retry_at": None}
     final_state = state_snapshot()
     next_retry = min(float(final_state.get("keys", {}).get(r["alias"], {}).get("cooldown_until", 0) or 0) for r in ordered)
     return {"ok": False, "used_key_alias": "", "attempts": attempts, "stdout": "", "stderr": attempts[-1]["stderrTail"] if attempts else "", "next_retry_at": next_retry}

@@ -5,6 +5,8 @@ import { AntigravityAcpClient, antigravityContent } from './acp-client.mjs';
 import configuration from './configuration.cjs';
 import accountLock from './account-lock.cjs';
 import { feishuMcpConfiguration } from '../claude/feishu-tools.mjs';
+import { applyCloakBrowserIsolationToServer, resolveCloakBrowserDirs } from '../config/cloakbrowser.mjs';
+import { buildAccessContext } from '../sessions/access-control.mjs';
 
 const { readCatalog, readJson, atomicJson, selectProvider, assertOfficialAccount, EFFORTS, NATIVE_MODES } = configuration;
 
@@ -19,6 +21,9 @@ export function nativeMcpServers(config, event, environment = process.env) {
     if (text) Object.assign(definitions, JSON.parse(text).mcpServers || {});
   }
   if (config.larkCli && event) Object.assign(definitions, JSON.parse(feishuMcpConfiguration(config, event)).mcpServers);
+  if (definitions.cloakbrowser) {
+    definitions.cloakbrowser = applyCloakBrowserIsolationToServer(definitions.cloakbrowser, resolveCloakBrowserDirs(config, environment));
+  }
   const expand = (value) => String(value).replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}/g, (_, key, fallback) => {
     if (environment[key] != null) return environment[key];
     if (fallback != null) return fallback;
@@ -38,20 +43,42 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
   ensureDone, markInterrupted, markError, queueSummary, sharedSessions,
   createClient = (options) => new AntigravityAcpClient(options) }) {
   const clients = new Set(); const permissions = new Map(); const listViews = new Map(); const deleteViews = new Map();
+  const modelCatalogCache = new Map();
+  const MODEL_CATALOG_TTL_MS = 5 * 60_000;
   const runtimePath = path.join(config.stateDir, 'antigravity-runtime.json');
   const catalogRoot = config.antigravityDataRoot;
   const botConfiguration = () => config.antigravityBotConfig ? readJson(config.antigravityBotConfig, {}) : {};
+  function extractThoughtLevelOptions(configOptions) {
+    if (!Array.isArray(configOptions)) return null;
+    const opt = configOptions.find((item) => {
+      const id = String(item?.id || item?.name || item?.category || '').toLowerCase();
+      return id === 'thought_level' || id === 'reasoning_effort' || id === 'effort';
+    });
+    if (!opt || !Array.isArray(opt.options) || !opt.options.length) return null;
+    const values = opt.options
+      .map((item) => (typeof item === 'string' ? item : String(item?.value || item?.id || '').trim()))
+      .filter(Boolean);
+    return values.length ? values : null;
+  }
+  function catalogCacheKey(provider) {
+    return `${provider?.id || 'official'}\0${provider?.accountId || ''}`;
+  }
   function settings(session) {
     const bot = botConfiguration();
     const provider = selectProvider(catalogRoot, session?.providerOverride || bot.provider?.id || 'official');
     return { model: session?.modelOverride || bot.provider?.model || provider.model || '', provider: provider.id,
       accountAlias: provider.accountId || '', reasoning: session?.reasoningOverride || bot.provider?.reasoning || provider.effort || '',
       requestedReasoning: session?.reasoningOverride || bot.provider?.reasoning || provider.effort || '',
-      permissionMode: bot.antigravity?.permissionMode || 'default', reasoningMapping: { supported: true, mapped: false }, serviceTier: '' };
+      permissionMode: bot.antigravity?.permissionMode || 'always-proceed', reasoningMapping: { supported: true, mapped: false }, serviceTier: '' };
   }
   const viewKey = (event) => `${event.chat_id}\0${event.sender_id || ''}`;
+  const accessContextFor = (event) => (
+    sharedSessions?.accessContextForEvent
+      ? sharedSessions.accessContextForEvent(event)
+      : buildAccessContext(event, { config })
+  );
   function resolveSession(event, target) {
-    const chat = getChatState(event.chat_id);
+    const chat = getChatState(event.chat_id, accessContextFor(event));
     if (/^[1-9]\d*$/.test(target)) {
       const view = listViews.get(viewKey(event));
       if (!view || Date.now() - view.at > 5 * 60_000) throw new Error('请先 /list 获取最新会话序号');
@@ -91,7 +118,9 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
   async function run(event, session, state, onState, contentOverride) {
     if (session.engine && session.engine !== 'antigravity') throw new Error('此会话属于其他内核，请 /new 创建 Antigravity 会话');
     const selected = settings(session); const startedAt = Date.now();
-    const releaseSession = sharedSessions?.acquire(session);
+    const releaseSession = sharedSessions
+      ? (sharedSessions.acquireAsync ? await sharedSessions.acquireAsync(session) : sharedSessions.acquire(session))
+      : null;
     let releaseAccount;
     try { releaseAccount = accountLock.acquireOfficialLease(catalogRoot, selectProvider(catalogRoot, selected.provider)); }
     catch (error) { releaseSession?.(); throw error; }
@@ -118,7 +147,10 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
       schedule();
     }); } catch (error) { releaseAccount(); releaseSession?.(); throw error; }
     clients.add(client);
-    const job = { client, mode: 'antigravity', sessionId: session.id, messageId: event.message_id || event.id, startedAt };
+    const job = {
+      client, mode: 'antigravity', sessionId: session.id, messageId: event.message_id || event.id, startedAt,
+      clearGeneration: 0, pendingSteerEntries: [], steerInFlight: null,
+    };
     activeJobs.set(event.chat_id, job);
     try {
       if (state) { state.meta.engine = 'antigravity'; markPhase(state, 'initializing', { connection: 'starting' }); await flush(); }
@@ -158,23 +190,59 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
       if (activeJobs.get(event.chat_id)?.client === client) activeJobs.delete(event.chat_id);
     }
   }
-  async function discoverModels(session, event) {
-    const releaseSession = sharedSessions?.acquire(session);
-    let releaseAccount; let client;
+  async function probeModelsReadOnly(session, event, { forceRefresh = false } = {}) {
+    const selected = settings(session);
+    const provider = selectProvider(catalogRoot, selected.provider);
+    const cacheKey = catalogCacheKey(provider);
+    const cached = modelCatalogCache.get(cacheKey);
+    if (!forceRefresh && cached && Date.now() - cached.fetchedAt < MODEL_CATALOG_TTL_MS) {
+      return { ...cached, fromCache: true };
+    }
+    let releaseAccount;
+    let client;
     try {
-      releaseAccount = accountLock.acquireOfficialLease(catalogRoot, selectProvider(catalogRoot, settings(session).provider));
-      client = newClient(session, event); clients.add(client);
-      const result = await client.openSession({ sessionId: session.antigravitySessionId || '', mcpServers: nativeMcpServers(config, event) });
-      if (!session.antigravitySessionId) { session.antigravitySessionId = result.sessionId; session.antigravitySourceId = settings(session).provider; saveSessions(); }
-      atomicJson(runtimePath, { models: result.models, configOptions: result.configOptions, modes: result.modes,
-        version: client.runtime.agentInfo?.version, observedAt: new Date().toISOString(), provider: settings(session).provider });
-      return result;
-    } finally { clients.delete(client); await client?.close(); releaseAccount?.(); releaseSession?.(); }
+      releaseAccount = accountLock.acquireOfficialLease(catalogRoot, provider);
+      client = newClient(session, event);
+      clients.add(client);
+      // Read-only probe: zero MCP servers, fresh ephemeral ACP session, never mutates session or antigravity-runtime.json
+      const result = await client.openSession({ sessionId: '', mcpServers: [] });
+      const entry = {
+        models: result.models || { availableModels: [] },
+        configOptions: result.configOptions || [],
+        modes: result.modes || null,
+        thoughtLevels: extractThoughtLevelOptions(result.configOptions),
+        fetchedAt: Date.now(),
+      };
+      modelCatalogCache.set(cacheKey, entry);
+      return { ...entry, fromCache: false };
+    } finally {
+      clients.delete(client);
+      await client?.close();
+      releaseAccount?.();
+    }
   }
   async function handleCommand(event, command) {
-    const chat = getChatState(event.chat_id); const session = getSession(event.chat_id);
+    const accessCtx = accessContextFor(event);
+    const chat = getChatState(event.chat_id, accessCtx);
+    const currentSession = () => getSession(event.chat_id, accessCtx);
     const reply = (text) => sendMarkdown(event.chat_id, text, `antigravity-${command.name.slice(1)}`, event.message_id || event.id);
     if (['/stop', '/stopall', '/queue', '/clearqueue', '/clearqueueall'].includes(command.name)) return false;
+    if (command.name === '/steer') {
+      await reply('[原生限制] Antigravity 原生 ACP 协议不支持回合内 /steer，请等待本轮结束或发送 /stop 后重新提问。');
+      return true;
+    }
+    if (command.name === '/goal') {
+      await reply('[原生限制] Antigravity 原生 ACP 协议不支持 Codex /goal 模式，请直接发送任务目标。');
+      return true;
+    }
+    if (command.name === '/fast') {
+      await reply('[原生限制] Antigravity 原生 ACP 协议不支持 Codex /fast 服务档位，当前模型与思考强度保持原设置。');
+      return true;
+    }
+    if (command.name === '/compact') {
+      await reply('[原生限制] Antigravity 原生 ACP 协议暂不支持 Bridge /compact 指令，请使用 /new 开启新会话。');
+      return true;
+    }
     if (['/approve', '/deny'].includes(command.name)) {
       const pending = permissions.get(command.rest.trim());
       if (!pending || pending.chatId !== event.chat_id || (pending.senderId && pending.senderId !== event.sender_id)) await reply('工具请求已过期或不属于当前用户。');
@@ -185,60 +253,73 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
       await reply(['**Antigravity Bot · 官方 CLI / ACP**',
         '/new [标题] · /list · /switch 序号 · /rename 标题 · /reset',
         '/delete 序号 · /confirm delete 序号（删除共享 Bridge 绑定，保留原生历史）',
-        '/provider list · /provider 渠道ID · /model list · /model 模型ID',
-        '/effort low|medium|high|xhigh|max（以原生模型实际支持为准）',
-        '/mode default|accept-edits|auto|plan · /context · /status',
-        '/stop · /stopall · /queue · /clearqueue',
-        '原生技能与 /compact、/plan、/goal 等命令通过正常任务队列交给 Antigravity。',
+        '/provider [list|渠道ID|save|clear] · /model [status|list|refresh|模型ID|save|clear]',
+        '/effort [low|medium|high|xhigh|max|clear]（以原生模型实际支持为准）',
+        '/mode [default|accept-edits|auto|plan] · /context · /status',
+        '/stop · /stopall · /queue · /clearqueue [all] · /approve · /deny',
+        '原生技能与 /plan 等斜杠指令通过正常任务队列交给 Antigravity。',
+        '不支持的指令（[原生限制]）：/steer、/goal、/fast、/compact、/model test。',
         '官方账号登录与手动切换请在客户端的 Antigravity 区域操作；不会自动轮换账号。'].join('\n')); return true;
     }
     if (command.name === '/new' || command.name === '/reset') {
       if (activeJobs.has(event.chat_id)) { await reply('当前任务仍在运行，请先 /stop 或等待完成。'); return true; }
-      const next = resetSession(event.chat_id, command.rest || '新 Antigravity 会话');
-      if (command.name === '/reset') for (const key of ['providerOverride', 'modelOverride', 'reasoningOverride']) next[key] = session[key];
+      const previous = command.name === '/reset' ? currentSession() : null;
+      const next = resetSession(event.chat_id, command.rest || '新 Antigravity 会话', accessCtx);
+      if (previous) for (const key of ['providerOverride', 'modelOverride', 'reasoningOverride']) next[key] = previous[key];
       saveSessions(); await reply(`已创建 Antigravity 会话：${next.title} (${next.id})`); return true;
     }
     if (['/list', '/sessions'].includes(command.name)) {
       listViews.set(viewKey(event), { at: Date.now(), ids: chat.sessions.map((item) => item.id) });
-      await reply('**Antigravity 共享会话库**\n' + chat.sessions.map((item, index) => `${index + 1}. ${item.id === chat.currentSessionId ? '● ' : ''}${item.title} · ${item.id}${item.antigravityOriginBot ? ` · ${item.antigravityOriginBot}` : ''}`).join('\n')); return true;
+      await reply('**Antigravity 共享会话库**\n' + (chat.sessions.length
+        ? chat.sessions.map((item, index) => `${index + 1}. ${item.id === chat.currentSessionId ? '● ' : ''}${item.title} · ${item.id}${item.antigravityOriginBot ? ` · ${item.antigravityOriginBot}` : ''}`).join('\n')
+        : '当前作用域下暂无会话，可直接发送消息或使用 `/new` 创建。')); return true;
     }
     if (command.name === '/switch') {
       if (activeJobs.has(event.chat_id)) { await reply('当前任务仍在运行，请先 /stop 或等待完成。'); return true; }
       const target = resolveSession(event, command.rest.trim());
-      if (!target) { await reply('未找到会话，请先 /list。'); return true; }
+      if (!target) { await reply(`未找到可访问的会话：${command.rest.trim()}，请先发送 /list 查看可用序号。`); return true; }
       sharedSessions?.assertIdle(target);
       chat.currentSessionId = target.id; saveSessions(); await reply(`已切换：${target.title} (${target.id})`); return true;
     }
     if (command.name === '/rename') {
+      if (activeJobs.has(event.chat_id)) { await reply('当前会话正在运行，请等待本轮结束后再重命名。'); return true; }
       if (!command.rest.trim()) { await reply('用法：/rename 新标题'); return true; }
       const match = command.rest.trim().match(/^(\d+|[a-f0-9-]{12,})\s+(.+)$/i);
-      const target = match ? resolveSession(event, match[1]) : session;
-      if (!target) throw new Error('未找到会话，请先 /list');
+      const target = match ? resolveSession(event, match[1]) : currentSession();
+      if (!target) throw new Error(`未找到可访问的会话：${match ? match[1] : ''}，请先发送 /list 查看可用序号。`);
       sharedSessions?.assertIdle(target);
       target.title = (match ? match[2] : command.rest.trim()).slice(0, 160); target.userRenamed = true; saveSessions(); await reply(`已重命名：${target.title}`); return true;
     }
     if (['/delete', '/del', '/rm'].includes(command.name)) {
+      if (activeJobs.has(event.chat_id)) { await reply('当前聊天有任务正在运行，请先 /stop 或等待结束后再执行 /delete。'); return true; }
       const target = resolveSession(event, command.rest.trim());
-      if (!target) { await reply('未找到会话，请先 /list，再 /delete 序号。'); return true; }
+      if (!target) { await reply(`未找到可访问的会话：${command.rest.trim()}，请先发送 /list 查看可用序号。`); return true; }
       deleteViews.set(viewKey(event), { id: target.id, nativeId: target.antigravitySessionId || '', selector: command.rest.trim(), at: Date.now() });
       sharedSessions?.assertIdle(target);
       await reply(`删除预览：${target.title} (${target.id})\n确认：/confirm delete ${command.rest.trim()}\n删除所有 Antigravity Bot 中的此共享 Bridge 绑定；原生历史和工作区文件保留。`); return true;
     }
     if (command.name === '/confirm') {
+      if (activeJobs.has(event.chat_id)) { await reply('当前聊天有任务正在运行，请先 /stop 或等待结束后再执行 /delete。'); return true; }
       const pending = deleteViews.get(viewKey(event));
       if (!pending || Date.now() - pending.at > 5 * 60_000 || command.rest.trim() !== `delete ${pending.selector}`) { await reply('删除确认无效或过期，请重新 /delete 预览。'); return true; }
       const target = chat.sessions.find((item) => item.id === pending.id);
       if (!target || (target.antigravitySessionId || '') !== pending.nativeId) throw new Error('会话绑定已变化，请重新预览');
       if ([...activeJobs.values()].some((job) => job.sessionId === target.id)) throw new Error('会话正在运行，不能删除');
-      const release = sharedSessions?.acquireMany([target]);
+      const release = sharedSessions
+        ? (sharedSessions.acquireManyAsync ? await sharedSessions.acquireManyAsync([target]) : sharedSessions.acquireMany([target]))
+        : null;
       try {
-        sharedSessions?.remove([target.id]);
+        if (sharedSessions?.removeAsync) await sharedSessions.removeAsync([target.id], accessCtx);
+        else sharedSessions?.remove([target.id], accessCtx);
         chat.sessions = chat.sessions.filter((item) => item.id !== target.id);
         if (chat.currentSessionId === target.id) chat.currentSessionId = chat.sessions[0]?.id || '';
-        deleteViews.delete(viewKey(event)); saveSessions();
+        deleteViews.delete(viewKey(event));
+        if (sharedSessions?.saveSessionsAsync) await sharedSessions.saveSessionsAsync();
+        else saveSessions();
       } finally { release?.(); }
       await reply('已删除所选共享 Bridge 会话绑定，原生历史与文件保留。'); return true;
     }
+    const session = currentSession();
     if (['/status', '/now', '/how', '/context'].includes(command.name)) {
       const selected = settings(session); const usage = session.lastContextUsage;
       await reply(`内核：Antigravity CLI / ACP\n渠道：${selected.provider}\n模型：${selected.model || '官方默认'}\n思考强度：${selected.reasoning || '官方默认'}\n权限：${selected.permissionMode}\n工作区：${config.workspace}\n会话：${session.title} (${session.id})\n原生会话：${session.antigravitySessionId || '尚未创建'}\n上下文：${usage ? `${usage.usedTokens} / ${usage.contextWindow || '未知'} tokens` : '等待原生使用量事件'}\n${queueSummary?.(event.chat_id) || ''}`); return true;
@@ -257,26 +338,89 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
     }
     if (command.name === '/model') {
       const parts = command.rest.trim().split(/\s+/).filter(Boolean);
-      if (!parts.length || ['list', 'refresh'].includes(parts[0])) {
-        if (activeJobs.has(event.chat_id)) throw new Error('当前任务仍在运行，请结束后查询原生模型目录');
-        const result = await discoverModels(session, event);
-        await reply(`原生 CLI 实时模型目录：\n${(result.models?.availableModels || []).map((item) => `${item.modelId} · ${item.name}`).join('\n')}`); return true;
+      const sub = String(parts[0] || '').toLowerCase();
+      if (!parts.length || ['status', 'view'].includes(sub)) {
+        const selected = settings(session);
+        const bot = botConfiguration();
+        const modelSource = session.modelOverride ? '会话覆盖' : bot.provider?.model ? 'Bot 默认' : '渠道默认';
+        const effortSource = session.reasoningOverride ? '会话覆盖' : bot.provider?.reasoning ? 'Bot 默认' : '渠道默认';
+        await reply([
+          '**Antigravity 模型状态**',
+          `渠道：${selected.provider}`,
+          `模型：${selected.model || '官方默认'}（${modelSource}）`,
+          `思考强度：${selected.reasoning || '官方默认'}（${effortSource}）`,
+          `权限模式：${selected.permissionMode}`,
+          '',
+          '用法：`/model list`、`/model refresh`、`/model <模型ID> [强度]`、`/model save`、`/model clear`',
+        ].join('\n'));
+        return true;
       }
-      if (activeJobs.has(event.chat_id)) throw new Error('当前任务仍在运行，不能切换模型');
+      if (sub === 'test' || sub === 'check') {
+        await reply('[原生限制] Antigravity 暂不支持在飞书内直接测活模型，请在桌面端“模型渠道”页面测试。');
+        return true;
+      }
+      if (['list', 'refresh'].includes(sub)) {
+        const result = await probeModelsReadOnly(session, event, { forceRefresh: sub === 'refresh' });
+        const cacheNote = result.fromCache
+          ? `（来自 5 分钟内缓存，发送 \`/model refresh\` 强刷）`
+          : '（实时只读探针，已缓存 5 分钟）';
+        const lines = (result.models?.availableModels || []).map((item) => `${item.modelId} · ${item.name || item.modelId}`);
+        await reply(`**Antigravity 原生模型目录** ${cacheNote}\n${lines.join('\n') || '未返回可用模型'}`);
+        return true;
+      }
+      if (activeJobs.has(event.chat_id)) throw new Error('当前任务运行中不能切换模型，请等待完成或 /stop 后再执行 /model。');
       sharedSessions?.assertIdle(session);
-      if (parts[0] === 'clear') { delete session.modelOverride; delete session.reasoningOverride; saveSessions(); await reply('已清除会话模型和强度覆盖。'); return true; }
-      if (parts[0] === 'save') { const bot = botConfiguration(); bot.provider = { ...bot.provider, model: settings(session).model, reasoning: settings(session).reasoning }; atomicJson(config.antigravityBotConfig, bot); await reply('已保存为本 Bot 默认模型和强度。'); return true; }
-      const result = await discoverModels(session, event);
-      if (!(result.models?.availableModels || []).some((item) => item.modelId === parts[0])) throw new Error('模型不在当前 CLI 原生目录中，请 /model list 查看');
-      session.modelOverride = parts[0]; if (parts[1]) { if (!EFFORTS.has(parts[1])) throw new Error('思考强度无效'); session.reasoningOverride = parts[1]; }
-      saveSessions(); await reply(`已选择模型：${session.modelOverride}`); return true;
+      if (['clear', 'default', 'reset'].includes(sub)) {
+        delete session.modelOverride; delete session.reasoningOverride; saveSessions();
+        await reply('已清除会话模型和强度覆盖。'); return true;
+      }
+      if (sub === 'save') {
+        const bot = botConfiguration();
+        bot.provider = { ...bot.provider, model: settings(session).model, reasoning: settings(session).reasoning };
+        atomicJson(config.antigravityBotConfig, bot);
+        await reply('已保存为本 Bot 默认模型和强度。'); return true;
+      }
+      const result = await probeModelsReadOnly(session, event, { forceRefresh: false });
+      if (!(result.models?.availableModels || []).some((item) => item.modelId === parts[0])) {
+        throw new Error('模型不在当前 CLI 原生目录中，请 /model list 查看');
+      }
+      if (parts[1]) {
+        const effortVal = parts[1].trim().toLowerCase();
+        const allowed = result.thoughtLevels || [...EFFORTS];
+        if (!allowed.includes(effortVal)) throw new Error(`思考强度无效，可选：${allowed.join('、')}`);
+        session.reasoningOverride = effortVal;
+      }
+      session.modelOverride = parts[0];
+      saveSessions();
+      await reply(`已选择模型：${session.modelOverride}${parts[1] ? `（思考强度：${session.reasoningOverride}）` : ''}`);
+      return true;
     }
     if (command.name === '/effort') {
-      if (!command.rest) { await reply(`当前：${settings(session).reasoning || '官方默认'}。用法：/effort low|medium|high|xhigh|max`); return true; }
+      const value = command.rest.trim().toLowerCase();
+      if (!value) {
+        const selected = settings(session);
+        await reply(`当前思考强度：${selected.reasoning || '官方默认'}${session.reasoningOverride ? '（会话覆盖）' : '（默认）'}。用法：/effort low|medium|high|xhigh|max|clear`);
+        return true;
+      }
       if (activeJobs.has(event.chat_id)) throw new Error('当前任务仍在运行，不能修改思考强度');
       sharedSessions?.assertIdle(session);
-      if (!EFFORTS.has(command.rest.trim())) throw new Error('思考强度无效');
-      session.reasoningOverride = command.rest.trim(); saveSessions(); await reply('已保存强度；下一轮交给原生模型校验，不会静默降档。'); return true;
+      if (['clear', 'default', 'reset'].includes(value)) {
+        delete session.reasoningOverride;
+        saveSessions();
+        const fallback = settings(session).reasoning || '官方默认';
+        await reply(`已清除会话思考强度覆盖，恢复默认：${fallback}。`);
+        return true;
+      }
+      const provider = selectProvider(catalogRoot, settings(session).provider);
+      const cached = modelCatalogCache.get(catalogCacheKey(provider));
+      const allowed = cached?.thoughtLevels?.length ? cached.thoughtLevels : [...EFFORTS];
+      if (!allowed.includes(value)) {
+        throw new Error(`思考强度无效，当前可用选项：${allowed.join('、')}`);
+      }
+      session.reasoningOverride = value;
+      saveSessions();
+      await reply(`已保存思考强度：${value}；下一轮交给原生模型生效，不会静默降档。`);
+      return true;
     }
     if (command.name === '/mode') {
       const value = command.rest.trim();

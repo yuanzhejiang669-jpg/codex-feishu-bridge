@@ -16,10 +16,12 @@ function fixture(t) {
   process.env[envKey] = 'fixture-credential';
   t.after(() => { delete process.env[envKey]; fs.rmSync(root, { recursive: true, force: true }); });
   let clock = 1000;
+  const ownerCtx = { chatId: 'chat', chatType: 'p2p', senderId: 'ou_owner1' };
   const configs = [1, 2].map((i) => ({ larkProfile: `claude-${i}`, claudeHome: path.join(root, 'homes', `claude-${i}`),
     workspace: path.join(root, 'workspaces', `claude-${i}`), stateDir: path.join(root, 'instances', `claude-${i}`, 'state'),
     claudeSharedSessionsRoot: path.join(root, 'shared'), claudeBotConfig: path.join(root, `bot-${i}.json`),
-    claudeProviderCatalog: path.join(root, 'providers.json'), claudeProviderId: 'fixture', claudeCli: { command: 'claude' }, disableMcp: true }));
+    claudeProviderCatalog: path.join(root, 'providers.json'), claudeProviderId: 'fixture', claudeCli: { command: 'claude' },
+    ownerOpenId: 'ou_owner1', disableMcp: true }));
   for (const c of configs) {
     fs.mkdirSync(c.claudeHome, { recursive: true }); fs.mkdirSync(c.workspace, { recursive: true }); fs.mkdirSync(c.stateDir, { recursive: true });
     fs.writeFileSync(c.claudeBotConfig, JSON.stringify({ provider: { id: 'fixture', model: 'claude-opus-5-5', reasoning: 'high' }, claude: { permissionMode: 'bypassPermissions' } }));
@@ -28,9 +30,15 @@ function fixture(t) {
     model: 'claude-opus-5-5', effort: 'high', models: ['claude-opus-5-5'], baseUrl: 'https://example.invalid' }] }));
   const sources = configs.map((c) => ({ bot: c.larkProfile, home: c.claudeHome, workspace: c.workspace, stateFile: path.join(c.stateDir, 'sessions.json') }));
   function make(index) {
-    return createSharedClaudeSessionStore({ config: configs[index], sessionsPath: sources[index].stateFile, sources,
+    const raw = createSharedClaudeSessionStore({ config: configs[index], sessionsPath: sources[index].stateFile, sources,
       createSessionData: (title) => ({ id: crypto.randomBytes(4).toString('hex'), title, engine: 'claude', createdAt: ++clock, updatedAt: clock, messages: [], claudeSessionId: '' }),
       normalizeSessionData: (s) => ({ ...s }) });
+    return {
+      ...raw,
+      getChatState: (chatId, ctx = { ...ownerCtx, chatId }) => raw.getChatState(chatId, ctx),
+      getSession: (chatId, ctx = { ...ownerCtx, chatId }) => raw.getSession(chatId, ctx),
+      resetSession: (chatId, title, ctx = { ...ownerCtx, chatId }) => raw.resetSession(chatId, title, ctx),
+    };
   }
   function bridge(index, store, extra = {}) {
     const replies = []; const jobs = new Map();
@@ -38,7 +46,7 @@ function fixture(t) {
       sharedSessions: store.shared, userText: (v) => v, activeJobs: jobs, activeChildren: new Map(),
       sendMarkdown: async (_chat, text) => replies.push(text), ...extra });
     t.after(() => b.close());
-    return { b, jobs, replies, send: (name, rest = '') => b.handleCommand({ chat_id: 'chat', sender_id: 'user', message_id: 'test' }, { name, rest }) };
+    return { b, jobs, replies, send: (name, rest = '') => b.handleCommand({ chat_id: 'chat', chat_type: 'p2p', sender_id: 'ou_owner1', message_id: 'test' }, { name, rest }) };
   }
   return { root, configs, sources, make, bridge, readPool: () => JSON.parse(fs.readFileSync(path.join(root, 'shared', 'sessions.json'))) };
 }
@@ -107,7 +115,8 @@ test('cross-Bot resume uses the original Home and workspace but current Bot tool
   assert.equal(launched.sessionId, first.claudeSessionId);
   assert.equal(launched.resume, true);
   const mcp = JSON.parse(launched.mcpConfigs[0]);
-  assert.equal(mcp.mcpServers.cloakbrowser.env.PLAYWRIGHT_MCP_USER_DATA_DIR, path.join(f.configs[1].claudeHome, 'browser-profiles', 'cloakbrowser'));
+  assert.equal(mcp.mcpServers.cloakbrowser.env.PLAYWRIGHT_MCP_USER_DATA_DIR, path.join(f.configs[1].stateDir, 'browser-profiles', 'cloakbrowser'));
+  assert.equal(mcp.mcpServers.cloakbrowser.env.PLAYWRIGHT_MCP_OUTPUT_DIR, path.join(f.configs[1].stateDir, 'browser-output', 'cloakbrowser'));
   assert.equal(mcp.mcpServers.other.command, 'other-fixture');
   const env = claudeEnvironment({}, { home: launched.home, toolHome: launched.toolHome, provider: { baseUrl: 'https://example.invalid', apiKey: 'fixture', model: 'claude-opus-5-5' } });
   assert.equal(env.CFB_CLAUDE_BOT_HOME, f.configs[1].claudeHome);
@@ -177,7 +186,7 @@ test('two independent processes create shared sessions without losing concurrent
     const c=JSON.parse(process.env.CFB_TEST_CONFIG); const sources=JSON.parse(process.env.CFB_TEST_SOURCES);
     const s=createSharedClaudeSessionStore({config:c,sessionsPath:path.join(c.stateDir,'sessions.json'),sources,
       createSessionData:title=>({id:crypto.randomBytes(8).toString('hex'),title,engine:'claude',createdAt:Date.now(),messages:[]}),normalizeSessionData:v=>({...v})});
-    for(let i=0;i<20;i++)s.resetSession('chat',c.larkProfile+'-'+i);`;
+    for(let i=0;i<20;i++)s.resetSession('chat',c.larkProfile+'-'+i,{chatId:'chat',chatType:'p2p',senderId:'ou_owner1'});`;
   await Promise.all(f.configs.map((c) => new Promise((resolve, reject) => {
     const child = spawn(process.execPath, ['--input-type=module', '-e', code], { windowsHide: true,
       env: { ...process.env, CFB_TEST_CONFIG: JSON.stringify(c), CFB_TEST_SOURCES: JSON.stringify(f.sources) }, stdio: ['ignore', 'ignore', 'pipe'] });

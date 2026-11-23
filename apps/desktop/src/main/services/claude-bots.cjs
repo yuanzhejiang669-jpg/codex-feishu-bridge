@@ -60,7 +60,7 @@ async function createClaudeBot(raw, credentials, options, helpers) {
     fs.mkdirSync(preview.bot.claudeHome, { recursive: true });
     fs.mkdirSync(profileHome, { recursive: true });
     fs.writeFileSync(settingsFile, JSON.stringify({ model: provider.model,
-      modelSettings: { [provider.model]: { effortLevel: provider.reasoning === 'max' ? 'high' : provider.reasoning } } }, null, 2)+'\n', { encoding: 'utf8', flag: 'wx' });
+      modelSettings: { [provider.model]: { effortLevel: provider.reasoning || 'high' } } }, null, 2)+'\n', { encoding: 'utf8', flag: 'wx' });
     settingsCreated = true;
     await (options.runLarkCli || helpers.runLarkCli)(options.larkCliPath,
       ['profile', 'add', '--name', preview.bot.profile, '--app-id', appId, '--brand', preview.bot.brand, '--app-secret-stdin'],

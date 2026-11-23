@@ -5,9 +5,11 @@ const path = require("node:path");
 const test = require("node:test");
 const {
   createWorkspaceFactoryQueue,
+  discardFactoryQueue,
   previewWorkspaceFactory,
   readWorkspaceFactoryQueue,
   registerFactoryBot,
+  retryFactoryBot,
 } = require("../src/main/services/workspace-factory.cjs");
 
 function fixture() {
@@ -203,5 +205,25 @@ test("does not leave an interrupted registration looking active forever", () => 
     const recovered = readWorkspaceFactoryQueue(value.dataRoot);
     assert.equal(recovered.bots[0].status, "failed");
     assert.match(recovered.bots[0].error, /客户端退出中断/);
+  } finally { fs.rmSync(value.root, { recursive: true, force: true }); }
+});
+
+test("T-015: retryFactoryBot resets failed bot to pending and discardFactoryQueue clears queue file cleanly", () => {
+  const value = fixture();
+  try {
+    const state = createWorkspaceFactoryQueue(input(2), value);
+    state.bots[0].status = "failed";
+    state.bots[0].error = "network timeout";
+    fs.writeFileSync(path.join(value.dataRoot, "workspace-factory.json"), JSON.stringify(state));
+
+    const retried = retryFactoryBot("codex-assistant-1-writing", value.dataRoot);
+    assert.equal(retried.bots[0].status, "pending");
+    assert.equal(retried.bots[0].error, "");
+    assert.throws(() => retryFactoryBot("codex-assistant-2-writing", value.dataRoot), /仅失败状态/);
+
+    const discarded = discardFactoryQueue(value.dataRoot);
+    assert.equal(discarded.status, "empty");
+    assert.equal(fs.existsSync(path.join(value.dataRoot, "workspace-factory.json")), false);
+    assert.equal(readWorkspaceFactoryQueue(value.dataRoot).status, "empty");
   } finally { fs.rmSync(value.root, { recursive: true, force: true }); }
 });

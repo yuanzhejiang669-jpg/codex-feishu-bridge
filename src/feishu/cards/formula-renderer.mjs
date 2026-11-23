@@ -209,38 +209,96 @@ export function createFormulaImageService({
   maxGroupChars = 4000,
   maxGroupFormulas = 20,
   renderTimeoutMs = 20_000,
+  idleCloseMs = 5 * 60_000,
+  loadDeps = loadFormulaDependencies,
   log = () => {},
 } = {}) {
   const resolvedBrowser = resolveFormulaBrowserExecutable(browserExecutable);
-  let warmupPromise;
+  let activeBrowser = null;
+  let browserLaunchPromise = null;
+  let idleTimer = null;
+  let inUseCount = 0;
 
-  function warmup() {
-    if (!enabled || !resolvedBrowser) {
-      return Promise.resolve({ enabled, browser: Boolean(resolvedBrowser), warmed: false });
+  function clearIdleTimer() {
+    if (idleTimer) {
+      clearTimeout(idleTimer);
+      idleTimer = null;
     }
-    if (!warmupPromise) {
-      warmupPromise = (async () => {
-        const startedAt = Date.now();
-        const { chromium } = await loadFormulaDependencies();
-        const browser = await chromium.launch({
-          executablePath: resolvedBrowser,
-          headless: true,
-          args: ["--disable-gpu", "--hide-scrollbars"],
-          timeout: Math.max(30_000, Number(renderTimeoutMs || 20_000) * 6),
+  }
+
+  async function close() {
+    clearIdleTimer();
+    const pending = browserLaunchPromise;
+    browserLaunchPromise = null;
+    const browser = activeBrowser;
+    activeBrowser = null;
+    if (browser) {
+      await browser.close().catch(() => {});
+    }
+    if (pending) {
+      const launched = await pending.catch(() => null);
+      if (launched && launched !== browser) {
+        await launched.close().catch(() => {});
+      }
+    }
+  }
+
+  function scheduleIdleClose() {
+    clearIdleTimer();
+    if (!activeBrowser || inUseCount > 0) return;
+    const delayMs = Math.max(10, Number(idleCloseMs) || 5 * 60_000);
+    idleTimer = setTimeout(() => {
+      idleTimer = null;
+      if (inUseCount === 0) void close();
+    }, delayMs);
+    idleTimer.unref?.();
+  }
+
+  async function ensureBrowser(chromium) {
+    clearIdleTimer();
+    if (activeBrowser && (typeof activeBrowser.isConnected !== "function" || activeBrowser.isConnected())) {
+      return activeBrowser;
+    }
+    activeBrowser = null;
+    if (!browserLaunchPromise) {
+      browserLaunchPromise = chromium.launch({
+        executablePath: resolvedBrowser,
+        headless: true,
+        args: ["--disable-gpu", "--hide-scrollbars"],
+        timeout: Math.max(30_000, Number(renderTimeoutMs || 20_000) * 2),
+      }).then((browser) => {
+        activeBrowser = browser;
+        browser.on?.("disconnected", () => {
+          if (activeBrowser === browser) activeBrowser = null;
         });
-        try {
-          const page = await browser.newPage({ viewport: { width: 1200, height: 900 }, deviceScaleFactor: 1 });
-          await page.setContent("<!doctype html><meta charset=\"utf-8\"><div>ready</div>", { waitUntil: "load" });
-        } finally {
-          await browser.close().catch(() => {});
-        }
-        return { enabled: true, browser: true, warmed: true, durationMs: Date.now() - startedAt };
-      })().catch((error) => {
-        warmupPromise = undefined;
-        throw error;
+        return browser;
+      }).finally(() => {
+        browserLaunchPromise = null;
       });
     }
-    return warmupPromise;
+    return browserLaunchPromise;
+  }
+
+  async function warmup() {
+    if (!enabled || !resolvedBrowser) {
+      return { enabled, browser: Boolean(resolvedBrowser), warmed: false };
+    }
+    const startedAt = Date.now();
+    const { chromium } = await loadDeps();
+    inUseCount += 1;
+    try {
+      const browser = await ensureBrowser(chromium);
+      const page = await browser.newPage({ viewport: { width: 1200, height: 900 }, deviceScaleFactor: 1 });
+      try {
+        await page.setContent("<!doctype html><meta charset=\"utf-8\"><div>ready</div>", { waitUntil: "load" });
+      } finally {
+        await page.close().catch(() => {});
+      }
+      return { enabled: true, browser: true, warmed: true, durationMs: Date.now() - startedAt };
+    } finally {
+      inUseCount = Math.max(0, inUseCount - 1);
+      scheduleIdleClose();
+    }
   }
 
   async function enrichBlocks(blocks) {
@@ -268,7 +326,7 @@ export function createFormulaImageService({
       blockPlans.push(plans);
     }
     if (plannedCount === 0) {
-      return { blocks, sources: [], stats: { enabled: true, browser: true, planned: 0, rendered: 0, failed: 0 } };
+      return { blocks, sources: [], stats: { enabled: true, browser: Boolean(resolvedBrowser), planned: 0, rendered: 0, failed: 0 } };
     }
     if (!resolvedBrowser || typeof uploadImage !== "function") {
       const fallback = fallbackFormulaPlans(blockPlans);
@@ -286,23 +344,18 @@ export function createFormulaImageService({
     }
 
     await fs.promises.mkdir(tempDir, { recursive: true });
-    let browser;
+    let page = null;
     const output = [];
     const sources = [];
     let rendered = 0;
     let failed = 0;
+    inUseCount += 1;
     try {
-      await warmup();
-      const { katex, chromium, markdown } = await loadFormulaDependencies();
+      const { katex, chromium, markdown } = await loadDeps();
       const deadline = Date.now() + Math.max(2_000, Number(renderTimeoutMs || 20_000));
-      browser = await chromium.launch({
-        executablePath: resolvedBrowser,
-        headless: true,
-        args: ["--disable-gpu", "--hide-scrollbars"],
-        timeout: renderTimeoutMs,
-      });
-      const page = await browser.newPage({ viewport: { width: 1200, height: 900 }, deviceScaleFactor: 2 });
-      page.setDefaultTimeout(renderTimeoutMs);
+      const browser = await ensureBrowser(chromium);
+      page = await browser.newPage({ viewport: { width: 1200, height: 900 }, deviceScaleFactor: 2 });
+      page.setDefaultTimeout?.(renderTimeoutMs);
 
       for (const plans of blockPlans) {
         for (const plan of plans) {
@@ -378,7 +431,9 @@ export function createFormulaImageService({
         stats: { enabled: true, browser: true, planned: plannedCount, rendered: 0, failed: plannedCount },
       };
     } finally {
-      await browser?.close().catch(() => {});
+      await page?.close?.().catch(() => {});
+      inUseCount = Math.max(0, inUseCount - 1);
+      scheduleIdleClose();
     }
 
     return {
@@ -390,8 +445,10 @@ export function createFormulaImageService({
 
   return {
     browserExecutable: resolvedBrowser,
+    close,
     enrichBlocks,
     warmup,
+    isBrowserActive: () => Boolean(activeBrowser),
   };
 }
 

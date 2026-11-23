@@ -1,13 +1,12 @@
-import fs from "node:fs";
-
-import { writeJsonFileAtomicSync } from "../utils/json.mjs";
+import { loadJsonWithCorruptBackup, writeJsonFileAtomicSync } from "../utils/json.mjs";
 
 export function createActiveRunStore({
   activeRunsPath,
   bridgePid = process.pid,
   workspace = "",
+  log = () => {},
 } = {}) {
-  const activeRuns = loadActiveRuns(activeRunsPath);
+  const activeRuns = loadActiveRuns(activeRunsPath, log);
 
   function saveActiveRuns() {
     writeJsonFileAtomicSync(activeRunsPath, activeRuns);
@@ -77,10 +76,11 @@ function activeRunKey(messageId) {
   return String(messageId || "").trim();
 }
 
-function loadActiveRuns(activeRunsPath) {
-  try {
-    const parsed = JSON.parse(fs.readFileSync(activeRunsPath, "utf8"));
-    if (parsed && typeof parsed === "object" && parsed.runs && typeof parsed.runs === "object") return parsed;
-  } catch {}
-  return { runs: {} };
+function loadActiveRuns(activeRunsPath, log = () => {}) {
+  return loadJsonWithCorruptBackup(
+    activeRunsPath,
+    (parsed) => Boolean(parsed && typeof parsed === "object" && parsed.runs && typeof parsed.runs === "object" && !Array.isArray(parsed.runs)),
+    () => ({ runs: {} }),
+    log,
+  );
 }

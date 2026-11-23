@@ -355,8 +355,11 @@ test("builds a child environment with exact bundled tools and isolated profile h
     platform: "win32",
   });
   assert.equal(env.LOCALAPPDATA, runtimeRoot);
-  assert.equal(env.USERPROFILE, path.join(dataRoot, "profile-home"));
-  assert.equal(env.HOME, path.join(dataRoot, "profile-home"));
+  assert.equal(env.CODEX_FEISHU_LARK_PROFILE_HOME, path.join(dataRoot, "profile-home"));
+  assert.equal(env.USERPROFILE, process.env.USERPROFILE);
+  assert.equal(env.HOME, process.env.HOME);
+  assert.notEqual(env.USERPROFILE, path.join(dataRoot, "profile-home"));
+  assert.notEqual(env.HOME, path.join(dataRoot, "profile-home"));
   assert.equal(env.LARK_CLI_BIN, larkCliPath);
   assert.equal(env.PATH.split(path.delimiter)[0], clientRoot);
 });
@@ -383,8 +386,11 @@ test("uses a short symlinked Lark Profile home on macOS for Unix socket compatib
       platform: "darwin",
       larkProfileHome: alias,
     });
-    assert.equal(env.HOME, alias);
-    assert.equal(env.USERPROFILE, alias);
+    assert.equal(env.CODEX_FEISHU_LARK_PROFILE_HOME, alias);
+    assert.equal(env.HOME, process.env.HOME);
+    assert.equal(env.USERPROFILE, process.env.USERPROFILE);
+    assert.notEqual(env.HOME, alias);
+    assert.notEqual(env.USERPROFILE, alias);
   } finally {
     fs.rmSync(value.root, { recursive: true, force: true });
   }

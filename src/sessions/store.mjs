@@ -1,6 +1,4 @@
-import fs from "node:fs";
-
-import { writeJsonFileAtomicSync } from "../utils/json.mjs";
+import { loadJsonWithCorruptBackup, writeJsonFileAtomicSync } from "../utils/json.mjs";
 
 export function createSessionStore({
   sessionsPath,
@@ -9,8 +7,9 @@ export function createSessionStore({
   dedupeSessions,
   sessionListLimit,
   preserveSessionIdentity = false,
+  log = () => {},
 } = {}) {
-  const sessions = loadSessions(sessionsPath);
+  const sessions = loadSessions(sessionsPath, log);
 
   function saveSessions() {
     writeJsonFileAtomicSync(sessionsPath, sessions);
@@ -90,10 +89,11 @@ export function createSessionStore({
   };
 }
 
-function loadSessions(sessionsPath) {
-  try {
-    const parsed = JSON.parse(fs.readFileSync(sessionsPath, "utf8"));
-    if (parsed && typeof parsed === "object" && parsed.chats) return parsed;
-  } catch {}
-  return { chats: {} };
+function loadSessions(sessionsPath, log = () => {}) {
+  return loadJsonWithCorruptBackup(
+    sessionsPath,
+    (parsed) => Boolean(parsed && typeof parsed === "object" && parsed.chats && typeof parsed.chats === "object" && !Array.isArray(parsed.chats)),
+    () => ({ chats: {} }),
+    log,
+  );
 }

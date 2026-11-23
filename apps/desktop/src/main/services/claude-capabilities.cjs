@@ -66,11 +66,12 @@ function inspectClaudeCapabilities(options) {
   const sourceSkills = [...source.skills, ...extraSkills].filter((item, index, all) => all.findIndex((other) => other.name === item.name) === index)
     .map((item) => { let content = ''; try { content = fs.readFileSync(item.skillFile, 'utf8'); } catch {}
       return { ...item, needsReview: /functions\.(exec|wait)|mcp__cua_repl|CODEX_HOME|codex app-server/.test(content) }; });
+  const mcpServers = Object.entries(config.mcpServers).map(([name, raw]) => ({ name, type: raw.type || 'stdio',
+    command: raw.command || '', url: raw.url || '', disabled: raw.disabled === true, configured: raw.disabled !== true,
+    commandAvailable: raw.command ? Boolean(resolveCommandPath(raw.command)) : null }));
   return { engine: options.toolEngine || 'claude', root: toolRoot(options.dataRoot, options.toolEngine), configPath: mcpPath(options.dataRoot, options.toolEngine),
     skillsRoot: skillsRoot(options.dataRoot, options.toolEngine), skills: listSkills(skillsRoot(options.dataRoot, options.toolEngine)),
-    mcpServers: Object.entries(config.mcpServers).map(([name, raw]) => ({ name, type: raw.type || 'stdio',
-      command: raw.command || '', url: raw.url || '', configured: true,
-      commandAvailable: raw.command ? Boolean(resolveCommandPath(raw.command)) : null })),
+    mcpServers, activeMcpCount: mcpServers.filter((item) => !item.disabled).length,
     mcpJson: JSON.stringify(config, null, 2), sourceSkills, sourceMcpServers: source.mcpServers, error };
 }
 

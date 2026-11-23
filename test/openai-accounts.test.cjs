@@ -96,10 +96,22 @@ test("account refresh callback replies asynchronously and never includes underly
   assert.equal(JSON.stringify(replies[1]).includes("fixture-refresh"), false); assert.ok(replies[1].error);
 });
 function sourceFunction(name) {
-  const source = fs.readFileSync(path.join(__dirname, "..", "codex-feishu-bridge.mjs"), "utf8");
-  const begin = source.search(new RegExp(`(?:async )?function ${name}\\(`));
-  const end = source.slice(begin + 1).search(/\n(?:async )?function \w+\(/);
-  return source.slice(begin, end < 0 ? undefined : begin + 1 + end);
+  const files = [
+    "codex-feishu-bridge.mjs",
+    "src/commands/router.mjs",
+    "src/codex/runner.mjs",
+    "src/sessions/inventory.mjs",
+  ];
+  for (const rel of files) {
+    const source = fs.readFileSync(path.join(__dirname, "..", rel), "utf8");
+    const begin = source.search(new RegExp(`^[ \\t]*(?:async )?function ${name}\\(`, "m"));
+    if (begin < 0) continue;
+    const indent = source.slice(begin).match(/^[ \t]*/)[0];
+    const nextRe = new RegExp(`\\n${indent}(?:(?:async )?function \\w+\\(|return \\{)`);
+    const end = source.slice(begin + 1).search(nextRe);
+    return source.slice(begin, end < 0 ? undefined : begin + 1 + end).trim();
+  }
+  throw new Error(`Function ${name} not found in bridge modules`);
 }
 test("real /provider handler persists account selection independently in two conversations", async (t) => {
   const { root, home } = fixture(t);
