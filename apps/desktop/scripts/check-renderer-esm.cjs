@@ -23,6 +23,8 @@ if (!files.length) {
   process.exit(1);
 }
 
+const FORBIDDEN_DIALOG_PATTERN = /\b(?:window\.)?(?:prompt|alert|confirm)\s*\(/;
+
 for (const file of files) {
   const source = fs.readFileSync(file, "utf8");
   const result = spawnSync(process.execPath, ["--input-type=module", "--check"], {
@@ -34,6 +36,10 @@ for (const file of files) {
     console.error(`Renderer ESM syntax check failed: ${path.relative(rendererRoot, file)}`);
     if (result.stderr) console.error(result.stderr.trim());
     process.exit(result.status || 1);
+  }
+  if (FORBIDDEN_DIALOG_PATTERN.test(source)) {
+    console.error(`Renderer file uses unsupported Electron dialog (prompt/alert/confirm): ${path.relative(rendererRoot, file)}`);
+    process.exit(1);
   }
 }
 

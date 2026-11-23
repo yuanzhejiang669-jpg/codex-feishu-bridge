@@ -9,6 +9,8 @@ let selectedEngine = "codex"; // codex | claude | antigravity
 let credentialMode = "qr"; // qr | manual
 let batchPreview = null;
 let singlePreview = null;
+let singleDraft = null;
+let batchDraft = null;
 let qrProgress = null;
 let registering = false;
 let previousFocus = null;
@@ -24,7 +26,19 @@ export function isCreateWizardOpen() {
 
 export function handleWizardRegistrationProgress(progress) {
   qrProgress = progress || null;
-  if (wizardOpen) renderCreateWizard();
+  if (wizardOpen) {
+    captureActiveWizardDraft();
+    renderCreateWizard();
+  }
+}
+
+function captureActiveWizardDraft() {
+  const backdrop = document.getElementById("wizard-modal");
+  if (!backdrop) return;
+  const singleForm = backdrop.querySelector("#wizard-single-form");
+  if (singleForm) singleDraft = Object.fromEntries(new FormData(singleForm));
+  const batchForm = backdrop.querySelector("#wizard-batch-form");
+  if (batchForm) batchDraft = Object.fromEntries(new FormData(batchForm));
 }
 
 export function openCreateWizard(mode = "single") {
@@ -33,6 +47,8 @@ export function openCreateWizard(mode = "single") {
   wizardMode = ["single", "batch", "queue"].includes(mode) ? mode : "single";
   batchPreview = null;
   singlePreview = null;
+  singleDraft = null;
+  batchDraft = null;
   qrProgress = null;
   renderCreateWizard();
   document.getElementById("btn-wizard-close")?.focus();
@@ -44,6 +60,8 @@ export function closeCreateWizard() {
     registering = false;
   }
   wizardOpen = false;
+  singleDraft = null;
+  batchDraft = null;
   qrProgress = null;
   const backdrop = document.getElementById("wizard-modal");
   if (backdrop) {
@@ -233,33 +251,35 @@ function renderProviderFieldsForEngine(engine, state, defaults = {}) {
 }
 
 function renderSingleBody(state) {
+  const d = singleDraft || {};
+  const brand = d.brand || "feishu";
   return `
     ${renderEnginePicker()}
     <form id="wizard-single-form" class="form-grid-2">
       <div class="field">
         <label for="wiz-name">Bot 标识 <span class="req-mark">*</span></label>
-        <input class="input" id="wiz-name" name="name" required placeholder="例如 my-assistant-1" pattern="[A-Za-z0-9][A-Za-z0-9_.-]{0,63}" />
+        <input class="input" id="wiz-name" name="name" value="${escapeHtml(d.name || "")}" required placeholder="例如 my-assistant-1" pattern="[A-Za-z0-9][A-Za-z0-9_.-]{0,63}" />
       </div>
       <div class="field">
         <label for="wiz-label">显示名称 <span class="req-mark">*</span></label>
-        <input class="input" id="wiz-label" name="label" required placeholder="例如 助手 1 号" maxlength="100" />
+        <input class="input" id="wiz-label" name="label" value="${escapeHtml(d.label || "")}" required placeholder="例如 助手 1 号" maxlength="100" />
       </div>
       <div class="field">
         <label for="wiz-brand">飞书平台 <span class="req-mark">*</span></label>
         <select class="select" id="wiz-brand" name="brand">
-          <option value="feishu" selected>飞书（中国大陆 feishu.cn）</option>
-          <option value="lark">Lark（国际版 larksuite.com）</option>
+          <option value="feishu" ${brand === "feishu" ? "selected" : ""}>飞书（中国大陆 feishu.cn）</option>
+          <option value="lark" ${brand === "lark" ? "selected" : ""}>Lark（国际版 larksuite.com）</option>
         </select>
       </div>
       <div class="field">
         <label for="wiz-profile">飞书 Profile 名（可选，默认同 Bot 标识）</label>
-        <input class="input" id="wiz-profile" name="profile" placeholder="留空自动与 Bot 标识一致" />
+        <input class="input" id="wiz-profile" name="profile" value="${escapeHtml(d.profile || "")}" placeholder="留空自动与 Bot 标识一致" />
       </div>
       <div class="field form-span-2">
         <label for="wiz-workspace">工作空间路径（可选，留空自动创建）</label>
-        <input class="input" id="wiz-workspace" name="workspace" placeholder="留空则在默认工作空间根目录下自动创建" />
+        <input class="input" id="wiz-workspace" name="workspace" value="${escapeHtml(d.workspace || "")}" placeholder="留空则在默认工作空间根目录下自动创建" />
       </div>
-      ${renderProviderFieldsForEngine(selectedEngine, state)}
+      ${renderProviderFieldsForEngine(selectedEngine, state, d)}
 
       <div class="field form-span-2">
         <label>飞书应用凭据方式</label>
@@ -272,11 +292,11 @@ function renderSingleBody(state) {
       ${credentialMode === "manual" ? `
         <div class="field">
           <label for="wiz-app-id">飞书 App ID <span class="req-mark">*</span></label>
-          <input class="input" id="wiz-app-id" name="appId" required placeholder="cli_xxxxxxxx" />
+          <input class="input" id="wiz-app-id" name="appId" value="${escapeHtml(d.appId || "")}" required placeholder="cli_xxxxxxxx" />
         </div>
         <div class="field">
           <label for="wiz-app-secret">飞书 App Secret <span class="req-mark">*</span></label>
-          <input class="input" id="wiz-app-secret" name="appSecret" type="password" autocomplete="new-password" required placeholder="应用密钥" />
+          <input class="input" id="wiz-app-secret" name="appSecret" value="${escapeHtml(d.appSecret || "")}" type="password" autocomplete="new-password" required placeholder="应用密钥" />
         </div>
       ` : ""}
     </form>
@@ -302,7 +322,8 @@ function renderSingleBody(state) {
 }
 
 function renderBatchBody(state) {
-  const defaults = defaultBatchValues(selectedEngine, state);
+  const defaults = { ...defaultBatchValues(selectedEngine, state), ...(batchDraft || {}) };
+  const brand = defaults.brand || "feishu";
   return `
     ${renderEnginePicker()}
     <form id="wizard-batch-form" class="form-grid-2">
@@ -335,8 +356,8 @@ function renderBatchBody(state) {
       <div class="field">
         <label for="wiz-batch-brand">飞书平台 <span class="req-mark">*</span></label>
         <select class="select" id="wiz-batch-brand" name="brand">
-          <option value="feishu" selected>飞书（feishu.cn）</option>
-          <option value="lark">Lark（larksuite.com）</option>
+          <option value="feishu" ${brand === "feishu" ? "selected" : ""}>飞书（feishu.cn）</option>
+          <option value="lark" ${brand === "lark" ? "selected" : ""}>Lark（larksuite.com）</option>
         </select>
       </div>
       ${renderProviderFieldsForEngine(selectedEngine, state, defaults)}
@@ -538,12 +559,15 @@ export function renderCreateWizard() {
       selectedEngine = btn.dataset.wizardEngine;
       batchPreview = null;
       singlePreview = null;
+      singleDraft = null;
+      batchDraft = null;
       renderCreateWizard();
     });
   });
 
   backdrop.querySelectorAll("[data-cred-mode]").forEach((btn) => {
     btn.addEventListener("click", () => {
+      captureActiveWizardDraft();
       credentialMode = btn.dataset.credMode;
       renderCreateWizard();
     });
@@ -561,6 +585,7 @@ export function renderCreateWizard() {
   backdrop.querySelector("#btn-wizard-preview-single")?.addEventListener("click", async (event) => {
     const form = backdrop.querySelector("#wizard-single-form");
     if (!form?.reportValidity()) return;
+    captureActiveWizardDraft();
     const btn = event.currentTarget;
     btn.disabled = true;
     try {
@@ -577,6 +602,7 @@ export function renderCreateWizard() {
   backdrop.querySelector("#btn-wizard-submit-single")?.addEventListener("click", async (event) => {
     const form = backdrop.querySelector("#wizard-single-form");
     if (!form?.reportValidity()) return;
+    captureActiveWizardDraft();
     const btn = event.currentTarget;
     const { payload, credentials } = collectSinglePayload(form);
     btn.disabled = true;
@@ -611,6 +637,7 @@ export function renderCreateWizard() {
 
   backdrop.querySelector("#btn-wizard-preview-batch")?.addEventListener("click", async (event) => {
     if (!batchForm?.reportValidity()) return;
+    captureActiveWizardDraft();
     const btn = event.currentTarget;
     btn.disabled = true;
     btn.textContent = "处理中...";
@@ -634,6 +661,7 @@ export function renderCreateWizard() {
       showToast("批量创建队列已生成，可逐个扫码注册", "ok");
       wizardMode = "queue";
       batchPreview = null;
+      batchDraft = null;
       await refreshCallback?.({ force: false });
       renderCreateWizard();
     } catch (error) {

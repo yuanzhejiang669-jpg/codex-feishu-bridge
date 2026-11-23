@@ -12,6 +12,18 @@ function formValues(form) {
   return Object.fromEntries(new FormData(form));
 }
 
+function updateDatalistOptions(container, listId, items) {
+  const datalist = container.querySelector(`#${listId}`);
+  if (!datalist) return;
+  datalist.innerHTML = (items || [])
+    .map((m) => {
+      const value = typeof m === "string" ? m : (m?.modelId || m?.id || "");
+      const label = typeof m === "string" ? "" : (m?.name || "");
+      return `<option value="${escapeHtml(value)}">${label ? escapeHtml(label) : ""}</option>`;
+    })
+    .join("");
+}
+
 function renderCodexProvidersTab(state) {
   const modelSources = state.modelSources || { homes: [], accounts: [] };
   const accounts = modelSources.accounts || [];
@@ -200,7 +212,8 @@ function renderClaudeProvidersTab(state) {
               <div class="item-sub mono">${escapeHtml(prov.id)} · ${escapeHtml(prov.baseUrl)} · 模型 ${escapeHtml(prov.model)} · 强度 ${escapeHtml(prov.effort)}</div>
             </div>
             <div class="inline-actions">
-              <button class="btn btn-sm" type="button" data-claude-edit="${escapeHtml(prov.id)}">编辑 / 换 Key</button>
+              <button class="btn btn-sm" type="button" data-claude-replace-key="${escapeHtml(prov.id)}">替换 Key</button>
+              <button class="btn btn-sm" type="button" data-claude-edit="${escapeHtml(prov.id)}">编辑</button>
             </div>
           </div>
         `).join("") : `<div class="empty-state"><div class="empty-state-sub">尚未配置 Claude Code 渠道。</div></div>`}
@@ -369,7 +382,10 @@ function renderAntigravityProvidersTab(state) {
               </div>
               <div class="item-sub mono">${escapeHtml(prov.id)} · ${escapeHtml(prov.mode)} · 模型 ${escapeHtml(prov.model || "原生默认")}</div>
             </div>
-            ${prov.id !== "official" ? `<button class="btn btn-sm" type="button" data-agy-edit="${escapeHtml(prov.id)}">编辑</button>` : ""}
+            <div class="inline-actions">
+              ${prov.id !== "official" && prov.mode === "gemini-api" ? `<button class="btn btn-sm" type="button" data-agy-replace-key="${escapeHtml(prov.id)}">替换 Key</button>` : ""}
+              ${prov.id !== "official" ? `<button class="btn btn-sm" type="button" data-agy-edit="${escapeHtml(prov.id)}">编辑</button>` : ""}
+            </div>
           </div>
         `).join("")}
       </div>
@@ -611,14 +627,34 @@ export function renderProvidersView(container, actions = {}) {
   container.querySelectorAll("[data-codex-replace-key]").forEach((btn) => {
     btn.addEventListener("click", () => {
       const id = btn.dataset.codexReplaceKey;
-      const key = window.prompt(`请输入 ${id} 的新 API Key（仅提交到本机主进程安全存储）：`);
-      if (!key) return;
-      void api.replaceGlobalProviderKey({ id, apiKey: key.trim() })
-        .then(async () => {
+      const prov = (state.providerCatalog?.providers || []).find((item) => item.id === id);
+      openConfirmModal({
+        title: `替换 API Key：${prov?.name || id}`,
+        description: "新密钥将直接提交至本机主进程安全存储，不会写入配置文件或日志；保存后相关受管 Bot 将在空闲时自动重载。",
+        details: [
+          ["Provider ID", id],
+          ...(prov?.envKey ? [["环境变量", prov.envKey]] : []),
+          ...(prov?.baseUrl ? [["Base URL", prov.baseUrl]] : []),
+        ],
+        inputs: [
+          {
+            name: "apiKey",
+            label: "新的 API Key",
+            type: "password",
+            required: true,
+            autocomplete: "new-password",
+            placeholder: "粘贴新的 API Key（如 sk-...）",
+          },
+        ],
+        confirmLabel: "保存新 Key",
+        onConfirm: async (values) => {
+          const apiKey = String(values.apiKey || "").trim();
+          if (!apiKey) throw new Error("新 API Key 不能为空");
+          await api.replaceGlobalProviderKey({ id, apiKey });
           showToast("新密钥已安全保存，相关 Bot 将在空闲时重载", "ok");
           await actions.onRefresh?.({ force: true });
-        })
-        .catch((error) => showToast(formatIpcError(error), "error"));
+        },
+      });
     });
   });
 
@@ -653,8 +689,8 @@ export function renderProvidersView(container, actions = {}) {
     try {
       const res = await api.listProviderModels(formValues(codexForm));
       codexModelSuggestions = res.models || [];
+      updateDatalistOptions(container, "codex-model-list", codexModelSuggestions);
       showToast(`读取到 ${codexModelSuggestions.length} 个模型`, "ok");
-      renderProvidersView(container, actions);
     } catch (error) {
       showToast(formatIpcError(error), "error");
     } finally {
@@ -692,6 +728,39 @@ export function renderProvidersView(container, actions = {}) {
 
   // Claude bindings
   const claudeForm = container.querySelector("#claude-provider-form");
+  container.querySelectorAll("[data-claude-replace-key]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const id = btn.dataset.claudeReplaceKey;
+      const prov = (state.claudeProviders?.providers || []).find((item) => item.id === id);
+      openConfirmModal({
+        title: `替换 Claude API Key：${prov?.name || id}`,
+        description: "替换前会先验证新密钥连通性，通过后写入加密安全存储；忙碌 Bot 将在空闲时自动重载。",
+        details: [
+          ["渠道 ID", id],
+          ...(prov?.baseUrl ? [["Base URL", prov.baseUrl]] : []),
+          ...(prov?.model ? [["默认模型", prov.model]] : []),
+        ],
+        inputs: [
+          {
+            name: "apiKey",
+            label: "新的 API Key",
+            type: "password",
+            required: true,
+            autocomplete: "new-password",
+            placeholder: "粘贴新的 Claude 渠道 API Key",
+          },
+        ],
+        confirmLabel: "验证并保存新 Key",
+        onConfirm: async (values) => {
+          const apiKey = String(values.apiKey || "").trim();
+          if (!apiKey) throw new Error("新 API Key 不能为空");
+          await api.claudeReplaceKey({ id, apiKey });
+          showToast("Claude 新密钥已验证并保存，相关 Bot 将在空闲时重载", "ok");
+          await actions.onRefresh?.({ force: true });
+        },
+      });
+    });
+  });
   container.querySelectorAll("[data-claude-edit]").forEach((btn) => {
     btn.addEventListener("click", () => {
       const prov = (state.claudeProviders?.providers || []).find((item) => item.id === btn.dataset.claudeEdit);
@@ -701,7 +770,10 @@ export function renderProvidersView(container, actions = {}) {
       }
       if (claudeForm.elements.apiKey) claudeForm.elements.apiKey.value = "";
       const details = container.querySelector("#claude-provider-details");
-      if (details) details.open = true;
+      if (details) {
+        details.open = true;
+        details.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      }
     });
   });
   container.querySelector("#btn-claude-list-models")?.addEventListener("click", async (event) => {
@@ -711,6 +783,7 @@ export function renderProvidersView(container, actions = {}) {
     try {
       const res = await api.claudeListModels(formValues(claudeForm));
       claudeModelSuggestions = res.models || [];
+      updateDatalistOptions(container, "claude-model-list", claudeModelSuggestions);
       showToast(`读取到 ${claudeModelSuggestions.length} 个 Claude 模型`, "ok");
     } catch (error) {
       showToast(formatIpcError(error), "error");
@@ -815,6 +888,48 @@ export function renderProvidersView(container, actions = {}) {
     }
     return input;
   };
+  container.querySelectorAll("[data-agy-replace-key]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const id = btn.dataset.agyReplaceKey;
+      const prov = (state.antigravityConfiguration?.providers || []).find((item) => item.id === id);
+      if (!prov) return;
+      openConfirmModal({
+        title: `替换 Antigravity 渠道 API Key：${prov.name || id}`,
+        description: "替换前将通过原生 CLI 校验新密钥，通过后写入加密凭据存储。",
+        details: [
+          ["渠道 ID", id],
+          ...(prov.baseUrl ? [["Base URL", prov.baseUrl]] : []),
+          ...(prov.model ? [["默认模型", prov.model]] : []),
+        ],
+        inputs: [
+          {
+            name: "apiKey",
+            label: "新的 API Key",
+            type: "password",
+            required: true,
+            autocomplete: "new-password",
+            placeholder: "粘贴新的 Gemini API 兼容密钥",
+          },
+        ],
+        confirmLabel: "验证并保存新 Key",
+        onConfirm: async (values) => {
+          const apiKey = String(values.apiKey || "").trim();
+          if (!apiKey) throw new Error("新 API Key 不能为空");
+          await api.antigravitySaveProvider({
+            id: prov.id,
+            name: prov.name,
+            mode: prov.mode,
+            baseUrl: prov.baseUrl,
+            model: prov.model,
+            effort: prov.effort,
+            apiKey,
+          });
+          showToast("Antigravity 渠道新密钥已验证并保存", "ok");
+          await actions.onRefresh?.({ force: true });
+        },
+      });
+    });
+  });
   container.querySelectorAll("[data-agy-edit]").forEach((btn) => {
     btn.addEventListener("click", () => {
       const prov = (state.antigravityConfiguration?.providers || []).find((item) => item.id === btn.dataset.agyEdit);
@@ -824,7 +939,10 @@ export function renderProvidersView(container, actions = {}) {
       }
       if (agyForm.elements.apiKey) agyForm.elements.apiKey.value = "";
       const details = container.querySelector("#agy-provider-details");
-      if (details) details.open = true;
+      if (details) {
+        details.open = true;
+        details.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      }
     });
   });
   container.querySelector("#btn-agy-list-models")?.addEventListener("click", async (event) => {
@@ -834,6 +952,7 @@ export function renderProvidersView(container, actions = {}) {
     try {
       const res = await api.antigravityListModels(agyPayload());
       agyModelSuggestions = res.models || [];
+      updateDatalistOptions(container, "agy-model-list", agyModelSuggestions);
       showToast(`读取到 ${agyModelSuggestions.length} 个原生模型`, "ok");
     } catch (error) {
       showToast(formatIpcError(error), "error");
