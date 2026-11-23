@@ -16,22 +16,21 @@ function managedRuntimeRoot(localAppData, name) {
   return path.join(localAppData, "CodexFeishuBridge", "instances", name);
 }
 
-function inspectManagedBots(dataRoot, localAppData) {
-  const owners = new Map();
-  if (process.platform === "win32") {
-    for (const bot of readManagedBots(dataRoot)) {
-      const owner = readJson(path.join(managedRuntimeRoot(localAppData, bot.name), "state", "bridge.lock.json"));
-      if (owner?.pid) owners.set(bot.name, owner);
-    }
-  }
+const verifiedBridgeOwners = new Map();
+
+function bridgeOwnerCacheKey(owner) {
+  return JSON.stringify([Number(owner?.pid || 0), Number(owner?.processStartTime || 0), String(owner?.entryPath || ""), Number(owner?.startedAt || 0)]);
+}
+
+function resolveBridgeIdentityModule() {
   const engineRoot = process.resourcesPath && fs.existsSync(path.join(process.resourcesPath, "engine", "src", "runtime", "bridge-process-identity.cjs"))
     ? path.join(process.resourcesPath, "engine")
     : path.resolve(__dirname, "..", "..", "..", "..", "..");
-  const identityResults = owners.size
-    ? require(path.join(engineRoot, "src", "runtime", "bridge-process-identity.cjs")).inspectBridgeOwners([...owners.values()])
-    : [];
-  const identities = new Map([...owners.keys()].map((name, index) => [name, identityResults[index]]));
-  return readManagedBots(dataRoot).map((bot) => {
+  return require(path.join(engineRoot, "src", "runtime", "bridge-process-identity.cjs"));
+}
+
+function buildManagedBotSnapshots(bots, dataRoot, localAppData, owners, identities) {
+  return bots.map((bot) => {
     const runtimeRoot = managedRuntimeRoot(localAppData, bot.name);
     const stateDir = path.join(runtimeRoot, "state");
     const processIdText = (() => {
@@ -67,6 +66,84 @@ function inspectManagedBots(dataRoot, localAppData) {
       logDir: path.join(runtimeRoot, "logs"),
     };
   });
+}
+
+function collectBridgeOwners(bots, localAppData) {
+  const owners = new Map();
+  if (process.platform === "win32") {
+    for (const bot of bots) {
+      const owner = readJson(path.join(managedRuntimeRoot(localAppData, bot.name), "state", "bridge.lock.json"));
+      if (owner?.pid) owners.set(bot.name, owner);
+    }
+  }
+  return owners;
+}
+
+function inspectManagedBots(dataRoot, localAppData) {
+  const bots = readManagedBots(dataRoot);
+  const owners = collectBridgeOwners(bots, localAppData);
+  const identities = new Map();
+  const uncachedNames = [];
+  const uncachedOwners = [];
+  for (const [name, owner] of owners.entries()) {
+    const pid = Number(owner.pid);
+    if (!isProcessAlive(pid)) {
+      identities.set(name, { pid, status: "stale", createdAt: 0 });
+      continue;
+    }
+    const key = bridgeOwnerCacheKey(owner);
+    const cached = verifiedBridgeOwners.get(key);
+    if (cached && cached.status === "alive") {
+      identities.set(name, cached);
+      continue;
+    }
+    uncachedNames.push(name);
+    uncachedOwners.push(owner);
+  }
+  if (uncachedOwners.length) {
+    const results = resolveBridgeIdentityModule().inspectBridgeOwners(uncachedOwners);
+    uncachedNames.forEach((name, idx) => {
+      const res = results[idx];
+      identities.set(name, res);
+      if (res?.status === "alive") verifiedBridgeOwners.set(bridgeOwnerCacheKey(uncachedOwners[idx]), res);
+    });
+  }
+  return buildManagedBotSnapshots(bots, dataRoot, localAppData, owners, identities);
+}
+
+async function inspectManagedBotsAsync(dataRoot, localAppData) {
+  const bots = readManagedBots(dataRoot);
+  const owners = collectBridgeOwners(bots, localAppData);
+  const identities = new Map();
+  const uncachedNames = [];
+  const uncachedOwners = [];
+  for (const [name, owner] of owners.entries()) {
+    const pid = Number(owner.pid);
+    if (!isProcessAlive(pid)) {
+      identities.set(name, { pid, status: "stale", createdAt: 0 });
+      continue;
+    }
+    const key = bridgeOwnerCacheKey(owner);
+    const cached = verifiedBridgeOwners.get(key);
+    if (cached && cached.status === "alive") {
+      identities.set(name, cached);
+      continue;
+    }
+    uncachedNames.push(name);
+    uncachedOwners.push(owner);
+  }
+  if (uncachedOwners.length) {
+    const idMod = resolveBridgeIdentityModule();
+    const results = typeof idMod.inspectBridgeOwnersAsync === "function"
+      ? await idMod.inspectBridgeOwnersAsync(uncachedOwners)
+      : idMod.inspectBridgeOwners(uncachedOwners);
+    uncachedNames.forEach((name, idx) => {
+      const res = results[idx];
+      identities.set(name, res);
+      if (res?.status === "alive") verifiedBridgeOwners.set(bridgeOwnerCacheKey(uncachedOwners[idx]), res);
+    });
+  }
+  return buildManagedBotSnapshots(bots, dataRoot, localAppData, owners, identities);
 }
 
 function runPowerShell(scriptPath, args, options) {
@@ -480,7 +557,7 @@ async function startManagedBot(name, options) {
 
 async function startManagedBotOnce(name, options) {
   const bot = findManagedBot(name, options);
-  const current = inspectManagedBots(options.dataRoot, options.localAppData).find((item) => item.name === name);
+  const current = (await inspectManagedBotsAsync(options.dataRoot, options.localAppData)).find((item) => item.name === name);
   if (current?.online) return current;
   // Resolve again for every start: a long-lived desktop may have a stale snapshot.
   const engine = normalizeEngine(bot.engine);
@@ -513,7 +590,7 @@ async function startManagedBotOnce(name, options) {
 
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
-    const state = inspectManagedBots(options.dataRoot, options.localAppData).find((item) => item.name === name);
+    const state = (await inspectManagedBotsAsync(options.dataRoot, options.localAppData)).find((item) => item.name === name);
     if (state?.online) return state;
     await new Promise((resolve) => setTimeout(resolve, 400));
   }
@@ -522,7 +599,7 @@ async function startManagedBotOnce(name, options) {
 
 async function stopManagedBot(name, options) {
   const bot = findManagedBot(name, options);
-  const current = inspectManagedBots(options.dataRoot, options.localAppData).find((item) => item.name === name);
+  const current = (await inspectManagedBotsAsync(options.dataRoot, options.localAppData)).find((item) => item.name === name);
   if (!current?.online) return current;
   if (current.activeRunCount > 0 && !options.force) {
     const error = new Error(`Bot 仍有 ${current.activeRunCount} 个活动任务，已拒绝停止`);
@@ -540,7 +617,7 @@ async function stopManagedBot(name, options) {
   } else {
     await stopManagedBotPosix(current, options);
   }
-  return inspectManagedBots(options.dataRoot, options.localAppData).find((item) => item.name === name);
+  return (await inspectManagedBotsAsync(options.dataRoot, options.localAppData)).find((item) => item.name === name);
 }
 
 async function stopManagedBotAndDisableAutoStart(name, options) {
@@ -557,7 +634,7 @@ async function stopManagedBotAndDisableAutoStart(name, options) {
 }
 
 async function restartSelectedManagedBots(options) {
-  const inspectBots = options.inspectBots || (() => inspectManagedBots(options.dataRoot, options.localAppData));
+  const inspectBots = options.inspectBots || (() => inspectManagedBotsAsync(options.dataRoot, options.localAppData));
   const stopBot = options.stopBot || ((name, mode) => stopManagedBot(name, { ...options, force: mode.force }));
   const startBot = options.startBot || ((name) => startManagedBot(name, options));
   const clearActiveRuns = options.clearActiveRuns || ((name) => clearManagedBotActiveRuns(name, options));
@@ -662,7 +739,7 @@ async function restartSelectedManagedBots(options) {
 }
 
 async function restartOnlineManagedBots(options) {
-  const inspectBots = options.inspectBots || (() => inspectManagedBots(options.dataRoot, options.localAppData));
+  const inspectBots = options.inspectBots || (() => inspectManagedBotsAsync(options.dataRoot, options.localAppData));
   const bots = await Promise.resolve(inspectBots());
   return restartSelectedManagedBots({
     ...options,
@@ -673,6 +750,7 @@ async function restartOnlineManagedBots(options) {
 
 module.exports = {
   inspectManagedBots,
+  inspectManagedBotsAsync,
   clearManagedBotActiveRuns,
   managedBotStartArguments,
   managedBotStopArguments,

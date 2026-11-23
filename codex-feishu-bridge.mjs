@@ -342,6 +342,10 @@ const {
   runTool,
   terminateProcessTree,
 } = processRunner;
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 const larkClient = createLarkClient({
   larkCli: CONFIG.larkCli,
   larkProfileHome: CONFIG.larkProfileHome,
@@ -469,6 +473,12 @@ const {
   serviceTierPlanForTurnSettings,
   shouldRetryWithoutServiceTier,
 } = createServiceTierPolicy({ findProvider: findCodexProvider });
+const {
+  createSessionData,
+  normalizeSessionData,
+  dedupeSessions,
+  sessionListLimit,
+} = createSessionInventory({ CONFIG });
 const sessionStore = ((CONFIG.engine === 'claude' && CONFIG.claudeSharedSessionsRoot) || (CONFIG.engine === 'antigravity' && CONFIG.antigravitySharedSessionsRoot) ? createSharedClaudeSessionStore : createSessionStore)({
   config: CONFIG,
   preserveSessionIdentity: true,
@@ -595,7 +605,7 @@ const bridgeRuntime = {
   singleInstanceLock, acquireSingleInstanceLock, releaseSingleInstanceLock,
   shutdownCallbacks, activeChildren, activeCodexJobs, activeGoalRuns, pendingDeleteConfirmations, stoppedJobs,
   processRunner, isProcessAlive, runTool, terminateProcessTree,
-  larkClient, larkJson, larkJsonWithData, replyFallback, runLark, sendMarkdown, sendText, uploadImage,
+  larkClient, larkJson, larkJsonWithData, replyFallback, runLark, sendMarkdown, sendText, uploadImage, delay,
   formulaImageService, ManagedCard,
   MODEL_REASONING_REGISTRY, REASONING_EFFORTS, MIN_SIDEBAR_RECONCILE_INTERVAL_MS,
   PROVIDER_MODEL_LIST_TIMEOUT_MS, PROVIDER_MODEL_TEST_TIMEOUT_MS, CODEX_THREAD_ID_PATTERN, PROVIDER_BUNDLES,

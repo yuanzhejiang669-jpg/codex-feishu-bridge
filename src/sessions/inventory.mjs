@@ -6,7 +6,7 @@ import {
   stripWindowsLongPathPrefix,
 } from "../config/paths.mjs";
 import openaiAccounts from "../codex/openai-accounts.cjs";
-import { collapseContinuationEntries } from "../codex/thread-continuity.mjs";
+import { collapseContinuationEntries, normalizeThreadContinuity } from "../codex/thread-continuity.mjs";
 import { normalizeProviderSwitch } from "../providers/session-switch.mjs";
 import { normalizeNativeInputs } from "./native-inputs.mjs";
 import {

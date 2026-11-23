@@ -12,6 +12,7 @@ const { registerBotWithQr } = require("./services/feishu-registration.cjs");
 const { authorizeLarkUser } = require("./services/lark-user-auth.cjs");
 const {
   inspectManagedBots,
+  inspectManagedBotsAsync,
   runPowerShell,
   waitForMacosProviderEnvironment,
   restartSelectedManagedBots,
@@ -362,7 +363,7 @@ function antigravityOptions() {
     },
     encrypt: (value) => { assertSecureStorage(safeStorage, process.platform); return safeStorage.encryptString(value); },
     decrypt: (value) => { assertSecureStorage(safeStorage, process.platform); return safeStorage.decryptString(value); },
-    inspectBots: () => inspectManagedBots(managedDataRoot(), runtimeLocalAppData()),
+    inspectBots: () => inspectManagedBotsAsync(managedDataRoot(), runtimeLocalAppData()),
     inspectExternalClients: inspectAntigravityClients };
 }
 
@@ -577,7 +578,7 @@ function createDesktopUpdater() {
     unsupportedReason: updateSupport.reason,
     updater: platformUpdater,
     currentVersion: app.getVersion(),
-    inspectBots: async () => inspectManagedBots(managedDataRoot(), runtimeLocalAppData()),
+    inspectBots: async () => inspectManagedBotsAsync(managedDataRoot(), runtimeLocalAppData()),
     prepareInstall: prepareUpdateInstall,
     onState: sendUpdateState,
   });
@@ -631,7 +632,7 @@ function detectorScriptPath() {
     : path.join(__dirname, "..", "..", "resources", "scripts", "detect-codex.ps1");
 }
 
-const COLD_CACHE_TTL_MS = 30_000;
+const COLD_CACHE_TTL_MS = 60_000;
 let coldStateCache = null;
 
 async function loadState({ force = false } = {}) {
@@ -671,11 +672,14 @@ async function loadState({ force = false } = {}) {
     coldStateCache = cold;
   }
 
-  const managedBots = inspectManagedBots(managedDataRoot(), runtimeLocalAppData());
-  const capabilityHomes = inspectCapabilityHomes([
-    cold.capabilities.codexHome,
-    ...managedBots.filter((bot) => !['claude', 'antigravity'].includes(bot.engine)).map((bot) => bot.codexHome),
-  ]);
+  const managedBots = await inspectManagedBotsAsync(managedDataRoot(), runtimeLocalAppData());
+  if (!useColdCache || !cold.capabilityHomes) {
+    cold.capabilityHomes = inspectCapabilityHomes([
+      cold.capabilities.codexHome,
+      ...managedBots.filter((bot) => !['claude', 'antigravity'].includes(bot.engine)).map((bot) => bot.codexHome),
+    ]);
+  }
+  const capabilityHomes = cold.capabilityHomes;
   const secureStorage = inspectSecureStorage(safeStorage, process.platform);
   currentState = {
     claude: cold.claude,

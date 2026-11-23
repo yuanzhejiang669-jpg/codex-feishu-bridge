@@ -242,7 +242,9 @@ export async function initApp() {
     onRegistrationProgress: (progress) => handleWizardRegistrationProgress(progress),
     onFactoryRegistrationProgress: (progress) => handleWizardRegistrationProgress(progress),
     onBotRestartProgress: (progress) => {
-      const done = progress?.completed >= progress?.total && progress?.total > 0;
+      const total = Number(progress?.total || 0);
+      const completed = Number(progress?.completed || 0);
+      const done = !progress || total <= 0 || completed >= total;
       setState({ restartProgress: done ? null : progress });
     },
     onUpdateState: (updateState) => {

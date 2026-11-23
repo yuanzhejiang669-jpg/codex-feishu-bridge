@@ -11,7 +11,7 @@ import {
 } from "../config/service-tier.mjs";
 import openaiAccounts from "../codex/openai-accounts.cjs";
 import { normalizeProviderTarget } from "./provider-target.mjs";
-import { readCodexRuntimeVersionStatus } from "../codex/runtime-version.mjs";
+import { codexRuntimeVersionLines, readCodexRuntimeVersionStatus } from "../codex/runtime-version.mjs";
 import { isProcessAlive as isProcessAlivePid } from "../runtime/process-runner.mjs";
 import {
   STEER_CANCELLED_BY_CLEARQUEUE_REPLY,

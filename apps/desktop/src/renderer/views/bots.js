@@ -37,6 +37,8 @@ async function restartSelected(names, force, actions) {
     await actions.onRefresh?.({ force: false });
   } catch (error) {
     showToast(formatIpcError(error), "error");
+  } finally {
+    setState({ restartProgress: null });
   }
 }
 

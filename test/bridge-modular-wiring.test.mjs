@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -151,3 +153,85 @@ test("T-018: all 7 module factories wire cleanly and satisfy every cross-module 
   }
   assert.deepEqual(missing, [], `Unwired deps found: ${missing.join(", ")}`);
 });
+
+for (const engine of ["codex", "claude", "antigravity"]) {
+  test(`T-018 live boot smoke: codex-feishu-bridge.mjs boots cleanly to starting bridge for engine=${engine}`, { timeout: 20_000 }, async (t) => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), `cfb-boot-${engine}-`));
+    t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+    const workspace = path.join(tmp, "ws");
+    const stateDir = path.join(tmp, "state");
+    const logDir = path.join(tmp, "logs");
+    const codexHome = path.join(tmp, "codex-home");
+    const fakeLarkScript = path.join(tmp, "fake-lark.mjs");
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.mkdirSync(logDir, { recursive: true });
+    fs.mkdirSync(codexHome, { recursive: true });
+    fs.writeFileSync(
+      fakeLarkScript,
+      `
+        process.stderr.write("[event] ready event_key=im.message.receive_v1\\n");
+        const timer = setInterval(() => {}, 1000);
+        process.on("SIGTERM", () => { clearInterval(timer); process.exit(0); });
+        process.stdin.on("end", () => { clearInterval(timer); process.exit(0); });
+        process.stdin.resume();
+      `,
+      "utf8",
+    );
+    const fakeLarkBin = path.join(tmp, process.platform === "win32" ? "fake-lark.cmd" : "fake-lark.sh");
+    if (process.platform === "win32") {
+      fs.writeFileSync(fakeLarkBin, `@echo off\r\n"${process.execPath}" "${fakeLarkScript}" %*\r\n`, "utf8");
+    } else {
+      fs.writeFileSync(fakeLarkBin, `#!/bin/sh\nexec "${process.execPath}" "${fakeLarkScript}" "$@"\n`, { encoding: "utf8", mode: 0o755 });
+    }
+
+    const child = spawn(process.execPath, [path.join(ROOT, "codex-feishu-bridge.mjs")], {
+      cwd: workspace,
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: {
+        ...process.env,
+        CODEX_FEISHU_ENGINE: engine,
+        CODEX_FEISHU_WORKSPACE: workspace,
+        CODEX_FEISHU_STATE_DIR: stateDir,
+        CODEX_FEISHU_LOG_DIR: logDir,
+        CODEX_HOME: codexHome,
+        CLAUDE_CONFIG_DIR: codexHome,
+        ANTIGRAVITY_CONFIG_DIR: codexHome,
+        ANTIGRAVITY_BRIDGE_DATA_ROOT: tmp,
+        CODEX_FEISHU_EVENT_KEYS: "im.message.receive_v1",
+        LARK_CLI_BIN: fakeLarkBin,
+      },
+    });
+
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += chunk.toString("utf8"); });
+    child.stderr.on("data", (chunk) => { stderr += chunk.toString("utf8"); });
+
+    try {
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline) {
+        if (child.exitCode !== null) break;
+        if (stdout.includes("starting bridge") && stdout.includes("event consumer ready")) break;
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      assert.equal(child.exitCode, null, `Bridge exited early for ${engine}: stderr=${stderr}\nstdout=${stdout}`);
+      assert.match(stdout, /starting bridge/);
+      assert.match(stdout, /event consumer ready/);
+      assert.equal(stderr.includes("ReferenceError"), false, `Unexpected ReferenceError: ${stderr}`);
+
+      // Trigger clean graceful shutdown via bridge.stop
+      fs.writeFileSync(path.join(stateDir, "bridge.stop"), "stop\n", "utf8");
+      const exited = await new Promise((resolve) => {
+        const tmr = setTimeout(() => resolve(false), 8_000);
+        child.once("close", (code) => { clearTimeout(tmr); resolve(code === 0); });
+      });
+      assert.equal(exited, true, `Bridge did not shut down cleanly on bridge.stop for ${engine}`);
+    } finally {
+      if (child.exitCode === null) {
+        try { child.kill("SIGKILL"); } catch {}
+      }
+    }
+  });
+}
