@@ -113,7 +113,9 @@ test("downloads, verifies, and launches the trusted Linux update helper", async 
     assert.equal(calls[0].command, "/bin/bash");
     assert.equal(calls[0].args[0], helperPath);
     assert.equal(calls[0].args[2], digest);
-    await new Promise((resolve) => setTimeout(resolve, 175));
+    for (let attempt = 0; attempt < 40 && !quit; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
     assert.equal(quit, true);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

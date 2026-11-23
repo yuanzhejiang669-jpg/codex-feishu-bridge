@@ -141,13 +141,13 @@ test("runLarkCli kills child process immediately when AbortSignal fires", async 
       ["-e", "setTimeout(() => {}, 30000)"],
       { profileHome: root, timeoutMs: 30_000, signal: controller.signal },
     );
-    setTimeout(() => controller.abort(), 80);
+    setTimeout(() => controller.abort(), 120);
     await assert.rejects(() => promise, (error) => {
       assert.equal(error.code, "LARK_AUTH_CANCELLED");
       assert.match(error.message, /已取消飞书用户授权/);
       return true;
     });
   } finally {
-    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   }
 });

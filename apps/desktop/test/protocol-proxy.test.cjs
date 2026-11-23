@@ -276,7 +276,9 @@ test("refreshes a managed Provider model catalog live and preserves the requeste
       abortedReq.write('{"model":"model-b","input":"partial');
       setTimeout(() => { abortedReq.destroy(); resolve(); }, 40);
     });
-    await new Promise((resolve) => setTimeout(resolve, 120));
+    for (let attempt = 0; attempt < 40 && service.activeRequestCount("dynamic") !== 0; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
     assert.equal(service.activeRequestCount("dynamic"), 0);
     assert.deepEqual(requestedModels, ["model-b", "model-b"]);
     assert.equal(upstreamRequests[0].reasoning_effort, "minimal");
