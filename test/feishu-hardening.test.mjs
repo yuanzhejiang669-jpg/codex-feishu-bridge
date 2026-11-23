@@ -134,19 +134,22 @@ test("FEISHU-001: formulaImageService launches browser lazily on first render, r
   assert.equal(service.isBrowserActive(), false);
 });
 
-test("FEISHU-001: im.message.recalled_v1 is subscribed by default in policy, supervisor, and PowerShell wrappers", () => {
+test("FEISHU-001: bundled lark-cli 1.0.69 defaults to im.message.receive_v1 and lifecycle degrades optional event consumer failure without killing primary consumer", () => {
   const repoRoot = path.resolve(new URL("..", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"));
   const policy = JSON.parse(fs.readFileSync(path.join(repoRoot, "apps/desktop/src/main/services/recommended-permission-policy.json"), "utf8"));
-  assert.ok(policy.eventKeys.includes("im.message.recalled_v1"));
-  assert.ok(policy.eventKeys.includes("im.message.receive_v1"));
+  assert.deepEqual(policy.eventKeys, ["im.message.receive_v1"]);
 
   const supervisor = fs.readFileSync(path.join(repoRoot, "apps/desktop/src/main/services/supervisor.cjs"), "utf8");
-  assert.match(supervisor, /CODEX_FEISHU_EVENT_KEYS:\s*"im\.message\.receive_v1,im\.message\.recalled_v1"/);
+  assert.match(supervisor, /CODEX_FEISHU_EVENT_KEYS:\s*"im\.message\.receive_v1"/);
 
   const startPs1 = fs.readFileSync(path.join(repoRoot, "start-codex-feishu-bridge.ps1"), "utf8");
-  assert.match(startPs1, /\$EventKeys\s*=\s*"im\.message\.receive_v1,im\.message\.recalled_v1"/);
+  assert.match(startPs1, /\$EventKeys\s*=\s*"im\.message\.receive_v1"/);
   assert.match(startPs1, /\[ValidateSet\('codex',\s*'claude',\s*'antigravity'\)\]/);
 
   const watchPs1 = fs.readFileSync(path.join(repoRoot, "watch-codex-feishu-bridge.ps1"), "utf8");
-  assert.match(watchPs1, /\$EventKeys\s*=\s*"im\.message\.receive_v1,im\.message\.recalled_v1"/);
+  assert.match(watchPs1, /\$EventKeys\s*=\s*"im\.message\.receive_v1"/);
+
+  const lifecycle = fs.readFileSync(path.join(repoRoot, "src/runtime/lifecycle.mjs"), "utf8");
+  assert.match(lifecycle, /const isPrimaryEventKey = eventKey === "im\.message\.receive_v1"/);
+  assert.match(lifecycle, /optional event consumer exited; continuing with primary consumer/);
 });

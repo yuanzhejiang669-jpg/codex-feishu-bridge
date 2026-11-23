@@ -378,7 +378,7 @@ function posixBridgeEnvironment(bot, codexHome, options, paths) {
     CODEX_FEISHU_LARK_PROFILE: bot.profile,
     CODEX_FEISHU_SANDBOX: "danger-full-access",
     CODEX_FEISHU_RUN_MODE: "app-server",
-    CODEX_FEISHU_EVENT_KEYS: "im.message.receive_v1,im.message.recalled_v1",
+    CODEX_FEISHU_EVENT_KEYS: "im.message.receive_v1",
     CODEX_FEISHU_REASONING: String(bot.provider?.reasoning || ""),
     CODEX_FEISHU_CODEX_TIMEOUT_MS: "0",
     CODEX_FEISHU_CODEX_IDLE_TIMEOUT_MS: "3600000",

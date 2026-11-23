@@ -189,16 +189,26 @@ export function createBridgeLifecycle(deps = {}) {
       }
     });
 
+    const isPrimaryEventKey = eventKey === "im.message.receive_v1" || (Array.isArray(CONFIG.eventKeys) && CONFIG.eventKeys.length <= 1);
+
     child.on("error", (error) => {
-      log("ERROR", "event consumer spawn failed", { eventKey, error: String(error.stack || error) });
-      shutdown(1);
+      if (isPrimaryEventKey) {
+        log("ERROR", "event consumer spawn failed", { eventKey, error: String(error.stack || error) });
+        shutdown(1);
+      } else {
+        log("WARN", "optional event consumer spawn failed; continuing with primary consumer", { eventKey, error: String(error.message || error) });
+      }
     });
 
     child.on("close", (code) => {
       activeChildren.delete(child.pid);
       if (!shuttingDown) {
-        log("ERROR", "event consumer stopped unexpectedly", { eventKey, code });
-        shutdown(code || 1);
+        if (isPrimaryEventKey) {
+          log("ERROR", "event consumer stopped unexpectedly", { eventKey, code });
+          shutdown(code || 1);
+        } else {
+          log("WARN", "optional event consumer exited; continuing with primary consumer", { eventKey, code });
+        }
       }
     });
   }

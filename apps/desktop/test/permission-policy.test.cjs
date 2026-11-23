@@ -31,7 +31,7 @@ test("ships a recommended default policy and retains the full advanced policy", 
   assert.equal(summary.tenantScopeCount, 9);
   assert.equal(summary.userScopeCount, 32);
   assert.equal(summary.totalScopeCount, 41);
-  assert.deepEqual(summary.eventKeys, ["im.message.recalled_v1", "im.message.receive_v1"]);
+  assert.deepEqual(summary.eventKeys, ["im.message.receive_v1"]);
   const fullSummary = publicPermissionPolicy(FULL_PERMISSION_POLICY);
   assert.equal(fullSummary.totalScopeCount, 1658);
   assert.equal(RECOMMENDED_PERMISSION_POLICY, DEFAULT_PERMISSION_POLICY);

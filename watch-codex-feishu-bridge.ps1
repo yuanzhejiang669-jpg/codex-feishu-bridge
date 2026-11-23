@@ -10,7 +10,7 @@ param(
   [ValidateSet("app-server", "auto", "exec")]
   [string]$RunMode = "app-server",
   [string]$Reasoning = "",
-  [string]$EventKeys = "im.message.receive_v1,im.message.recalled_v1",
+  [string]$EventKeys = "im.message.receive_v1",
   [int]$CodexTimeoutSeconds = 0,
   [int]$CodexIdleTimeoutSeconds = 3600,
   [int]$ListLimit = 100,
