@@ -8,17 +8,15 @@ const workflow = fs.readFileSync(
   "utf8",
 );
 
-test("stable GitHub releases publish verified Windows, macOS, and Linux desktop assets", () => {
+test("stable GitHub releases publish verified Windows and Linux desktop assets without macOS", () => {
   assert.match(workflow, /^\s{2}build-windows:\s*$/m);
-  assert.match(workflow, /^\s{2}build-macos:\s*$/m);
+  assert.doesNotMatch(workflow, /^\s{2}build-macos:\s*$/m);
   assert.match(workflow, /^\s{2}build-linux:\s*$/m);
-  assert.match(workflow, /^\s{4}needs: \[build-windows, build-macos, build-linux\]\s*$/m);
-  assert.match(workflow, /npm run dist:mac/);
+  assert.match(workflow, /^\s{4}needs: \[build-windows, build-linux\]\s*$/m);
   assert.match(workflow, /CSC_IDENTITY_AUTO_DISCOVERY: "false"/);
-  assert.match(workflow, /macos-release/);
-  assert.match(workflow, /latest-mac\.yml/);
-  assert.match(workflow, /checksums-macos\.txt/);
-  assert.match(workflow, /Codex-Feishu-Bridge-\*-mac-\*\.dmg/);
+  assert.match(workflow, /windows-release/);
+  assert.match(workflow, /latest\.yml/);
+  assert.match(workflow, /checksums-windows\.txt/);
   assert.match(workflow, /npm run dist:linux/);
   assert.match(workflow, /linux-release/);
   assert.match(workflow, /checksums-linux\.txt/);
@@ -28,7 +26,6 @@ test("stable GitHub releases publish verified Windows, macOS, and Linux desktop 
 
 test("Linux revision tags publish only an isolated Ubuntu prerelease", () => {
   assert.match(workflow, /build-windows:\s*\n\s+if: \$\{\{ !contains\(github\.ref_name, '-linux\.'\) \}\}/);
-  assert.match(workflow, /build-macos:\s*\n\s+if: \$\{\{ !contains\(github\.ref_name, '-linux\.'\) \}\}/);
   assert.match(workflow, /publish-linux:\s*\n\s+needs: \[build-linux\]/);
   assert.match(workflow, /--prerelease/);
   assert.match(workflow, /Codex-Feishu-Bridge-\$\{version\}-linux-amd64\.deb/);
