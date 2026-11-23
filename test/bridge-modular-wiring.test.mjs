@@ -157,7 +157,13 @@ test("T-018: all 7 module factories wire cleanly and satisfy every cross-module 
 for (const engine of ["codex", "claude", "antigravity"]) {
   test(`T-018 live boot smoke: codex-feishu-bridge.mjs boots cleanly to starting bridge for engine=${engine}`, { timeout: 20_000 }, async (t) => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), `cfb-boot-${engine}-`));
-    t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+    t.after(() => {
+      try {
+        fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+      } catch {
+        // Windows child handle teardown race on temp dir cleanup
+      }
+    });
     const workspace = path.join(tmp, "ws");
     const stateDir = path.join(tmp, "state");
     const logDir = path.join(tmp, "logs");

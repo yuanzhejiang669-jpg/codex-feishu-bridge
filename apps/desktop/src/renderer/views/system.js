@@ -35,6 +35,13 @@ export function renderSystemView(container, actions = {}) {
   const spaces = setup.managedSpaces || [];
   const activeRuns = (setup.managedBots || []).reduce((sum, bot) => sum + Number(bot.activeRunCount || 0), 0);
   const canInstallUpdate = update.status === "downloaded";
+  const updateBusy = ["checking", "downloading"].includes(update.status);
+  const updateStatusText = update.status === "downloading" && Number.isFinite(Number(update.percent))
+    ? `${update.message || "正在下载更新"} (${Math.round(Number(update.percent))}%)`
+    : (update.message || update.status || "未检查");
+  const ownerHintText = !settings.ownerOpenId && settings.autoBoundOwnerOpenId
+    ? `已通过首次私聊自动绑定：${settings.autoBoundOwnerOpenId}（留空将继续沿用自动绑定；如需覆盖或显式指定请在上方填写并保存）。`
+    : "留空则按最小权限拒绝跨 Bot 私聊共享访问；保存后同步写入共享库 owner.json 并入队重载空闲 Bot。";
 
   container.innerHTML = `
     <div class="two-col">
@@ -54,11 +61,11 @@ export function renderSystemView(container, actions = {}) {
             <dt>引擎提交</dt><dd class="mono">${escapeHtml(engineInfo.manifest?.sourceCommit || "开发态源码")}</dd>
             <dt>内置 Node / Lark</dt><dd class="mono">${escapeHtml(engineInfo.nodeVersion || "-")} · lark-cli ${escapeHtml(engineInfo.larkCliVersion || "-")}</dd>
             <dt>安全凭据后端</dt><dd>${escapeHtml(appInfo.credentialStorage || "未知")}</dd>
-            <dt>更新状态</dt><dd>${escapeHtml(update.message || update.status || "未检查")}${update.latestVersion ? `（最新 v${escapeHtml(update.latestVersion)}）` : ""}</dd>
+            <dt>更新状态</dt><dd>${escapeHtml(updateStatusText)}${update.latestVersion ? `（最新 v${escapeHtml(update.latestVersion)}）` : ""}</dd>
           </dl>
           ${activeRuns > 0 ? `<div class="field-hint text-warn">当前有 ${activeRuns} 个活跃任务；安装更新会自动保护在途任务并在空闲时滚动恢复。</div>` : ""}
           <div class="inline-actions">
-            <button class="btn btn-sm" type="button" id="btn-sys-check-update" ${update.supported === false ? "disabled" : ""}>检查更新</button>
+            <button class="btn btn-sm" type="button" id="btn-sys-check-update" ${update.supported === false || updateBusy ? "disabled" : ""}>${update.status === "downloading" ? "下载中..." : update.status === "checking" ? "检查中..." : "检查更新"}</button>
             <button class="btn btn-primary btn-sm" type="button" id="btn-sys-install-update" ${!canInstallUpdate ? "disabled" : ""}>安装并重启</button>
           </div>
         </div>
@@ -100,7 +107,7 @@ export function renderSystemView(container, actions = {}) {
               />
               <button class="btn btn-primary btn-sm" type="submit" id="btn-save-owner-open-id">保存归属 ID</button>
             </div>
-            <span class="field-hint">留空则按最小权限拒绝跨 Bot 私聊共享访问；保存后同步写入共享库 owner.json 并入队重载空闲 Bot。</span>
+            <span class="field-hint">${escapeHtml(ownerHintText)}</span>
           </form>
         </div>
       </div>

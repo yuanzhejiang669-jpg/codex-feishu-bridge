@@ -71,6 +71,7 @@ export const api = Object.freeze({
   copyPermissionPolicy: (name) => invoke("copyPermissionPolicy", name),
   openFeishuConsole: (value) => invoke("openFeishuConsole", value),
   authorizeLarkUser: (name) => invoke("authorizeLarkUser", name),
+  cancelLarkUserAuth: () => invoke("cancelLarkUserAuth"),
   previewCapabilityMigration: (value) => invoke("previewCapabilityMigration", value),
   applyCapabilityMigration: (value) => invoke("applyCapabilityMigration", value),
   probeMcpHealth: () => invoke("probeMcpHealth"),

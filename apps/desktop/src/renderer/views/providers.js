@@ -309,7 +309,7 @@ function renderAntigravityProvidersTab(state) {
       <div class="card-header">
         <div>
           <h2 class="card-title">Antigravity 官方 Google 账号</h2>
-          <div class="card-sub">全 Antigravity Bot 共享官方登录目录；切换账号前需确保无运行中任务</div>
+          <div class="card-sub">全 Antigravity Bot 自动复用本机当前官方登录；仅需换号登录或切换快照时，先退出 Antigravity App 和 CLI 且确保无在途任务</div>
         </div>
         <button class="btn btn-sm" type="button" id="btn-agy-open-login">打开官方登录窗口</button>
       </div>

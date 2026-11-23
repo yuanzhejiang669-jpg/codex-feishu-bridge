@@ -60,6 +60,7 @@ contextBridge.exposeInMainWorld("bridgeDesktop", Object.freeze({
   copyPermissionPolicy: (name) => ipcRenderer.invoke("desktop:copy-permission-policy", name),
   openFeishuConsole: (value) => ipcRenderer.invoke("desktop:open-feishu-console", value),
   authorizeLarkUser: (name) => ipcRenderer.invoke("desktop:authorize-lark-user", name),
+  cancelLarkUserAuth: () => ipcRenderer.invoke("desktop:cancel-lark-user-auth"),
   previewCapabilityMigration: (value) => ipcRenderer.invoke("desktop:preview-capability-migration", value),
   applyCapabilityMigration: (value) => ipcRenderer.invoke("desktop:apply-capability-migration", value),
   updateBotConfig: (value) => ipcRenderer.invoke("desktop:update-bot-config", value),

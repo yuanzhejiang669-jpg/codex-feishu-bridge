@@ -31,11 +31,12 @@ async function authorizeLarkUser(name, options) {
   const bot = managedBot(name, options.dataRoot);
   const runCli = options.runLarkCli || runLarkCli;
   const profileHome = path.join(options.dataRoot, "profile-home");
+  const signal = options.signal || null;
 
   const begin = await runCli(options.larkCliPath, [
     "auth", "login", "--scope", DEFAULT_PERMISSION_POLICY.userScopes.join(","),
     "--no-wait", "--json", "--profile", bot.profile,
-  ], { profileHome, timeoutMs: 30_000 });
+  ], { profileHome, timeoutMs: 30_000, signal });
   const beginValue = parseJsonOutput(begin.stdout);
   const authorization = beginValue?.data || beginValue;
   const verificationUrl = String(
@@ -51,11 +52,11 @@ async function authorizeLarkUser(name, options) {
 
   await runCli(options.larkCliPath, [
     "auth", "login", "--device-code", deviceCode, "--json", "--profile", bot.profile,
-  ], { profileHome, timeoutMs: options.timeoutMs || 10 * 60_000 });
+  ], { profileHome, timeoutMs: options.timeoutMs || 3 * 60_000, signal });
 
   const result = await runCli(options.larkCliPath, [
     "auth", "status", "--json", "--verify", "--profile", bot.profile,
-  ], { profileHome, timeoutMs: 30_000 });
+  ], { profileHome, timeoutMs: 30_000, signal });
   const identity = publicUserIdentity(parseJsonOutput(result.stdout));
   if (!identity.available || !identity.verified) {
     throw new Error(identity.message || "飞书用户授权尚未完成");

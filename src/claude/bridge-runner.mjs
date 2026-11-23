@@ -102,20 +102,22 @@ export function createClaudeBridge({ config, getSession, getChatState, getChats,
     const accessCtx = accessContextFor(event);
     const chat = getChatState(event.chat_id, accessCtx);
     const trimmed = String(target || '').trim();
+    const direct = chat.sessions.find((s) => s.id === trimmed || s.claudeSessionId === trimmed);
+    if (direct) return { kind: 'bridge', session: direct };
     if (/^[1-9]\d*$/.test(trimmed)) {
       const view = listViews.get(viewKey(event));
       if (view && Date.now() - view.at < 5 * 60_000 && Array.isArray(view.items)) {
         const entry = view.items[Number(trimmed) - 1];
-        if (!entry) return null;
-        if (entry.kind === 'native') return { kind: 'native', native: entry.native };
-        const found = chat.sessions.find((s) => s.id === entry.id);
-        return found ? { kind: 'bridge', session: found } : null;
+        if (entry) {
+          if (entry.kind === 'native') return { kind: 'native', native: entry.native };
+          const found = chat.sessions.find((s) => s.id === entry.id);
+          if (found) return { kind: 'bridge', session: found };
+        }
       }
       const fallback = chat.sessions[Number(trimmed) - 1];
-      return fallback ? { kind: 'bridge', session: fallback } : null;
+      if (fallback) return { kind: 'bridge', session: fallback };
+      if (trimmed.length < 6) return null;
     }
-    const direct = chat.sessions.find((s) => s.id === trimmed || s.claudeSessionId === trimmed);
-    if (direct) return { kind: 'bridge', session: direct };
     const nativeMatch = collectNativeClaudeSessions(chat, accessCtx)
       .find((item) => item.sessionId === trimmed || item.sessionId.startsWith(trimmed));
     if (nativeMatch) return { kind: 'native', native: nativeMatch };

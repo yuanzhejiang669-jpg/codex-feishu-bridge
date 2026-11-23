@@ -16,6 +16,19 @@ function selectedManagedBotNames() {
   return [...store.selectedBotNames].filter((name) => valid.has(name));
 }
 
+function shortWorkspaceLabel(fullPath) {
+  const raw = String(fullPath || "").trim();
+  if (!raw) return "—";
+  if (raw.length <= 28) return raw;
+  const sep = raw.includes("\\") ? "\\" : "/";
+  const parts = raw.split(/[\\/]+/).filter(Boolean);
+  if (parts.length <= 1) return raw;
+  const last = parts[parts.length - 1];
+  const prev = parts[parts.length - 2];
+  if (last.length >= 22) return `…${sep}${last}`;
+  return `…${sep}${prev}${sep}${last}`;
+}
+
 function unadoptedLegacyInstances(state) {
   const managed = new Set(getManagedBots(state).map((bot) => bot.name));
   return (state?.bridge?.instances || []).filter((item) => item?.name && !managed.has(item.name));
@@ -184,7 +197,7 @@ export function renderBotsView(container, actions = {}) {
                     </div>
                   </td>
                   <td class="col-workspace">
-                    <span class="mono truncate" title="${escapeHtml(bot.workspace || "")}">${escapeHtml(bot.workspace || "—")}</span>
+                    <span class="mono truncate" title="${escapeHtml(bot.workspace || "")}">${escapeHtml(shortWorkspaceLabel(bot.workspace))}</span>
                   </td>
                   <td class="col-actions" data-stop-row-click="1">
                     <div class="cell-actions">

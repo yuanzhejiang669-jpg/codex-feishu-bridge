@@ -135,8 +135,24 @@ function previewBot(raw, options) {
   };
 }
 
-function runLarkCli(larkCliPath, args, { input = "", profileHome, timeoutMs = 60_000 } = {}) {
+function sanitizeLarkCliError(raw, { timedOut = false, aborted = false } = {}) {
+  if (aborted) return "已取消飞书用户授权";
+  if (timedOut) return "飞书命令等待超时，请重试";
+  const cleaned = String(raw || "")
+    .replace(/--device-code\s+\S+/gi, "--device-code [redacted]")
+    .replace(/Command failed:[^\r\n]*/gi, "")
+    .trim();
+  return cleaned || "lark-cli 执行失败，请重试";
+}
+
+function runLarkCli(larkCliPath, args, { input = "", profileHome, timeoutMs = 60_000, signal = null } = {}) {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(Object.assign(new Error("已取消飞书用户授权"), { code: "LARK_AUTH_CANCELLED" }));
+      return;
+    }
+    let settled = false;
+    let aborted = false;
     const child = execFile(larkCliPath, args, {
       windowsHide: true,
       timeout: timeoutMs,
@@ -150,12 +166,28 @@ function runLarkCli(larkCliPath, args, { input = "", profileHome, timeoutMs = 60
       },
       maxBuffer: 1024 * 1024,
     }, (error, stdout, stderr) => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener("abort", onAbort);
+      if (aborted) {
+        reject(Object.assign(new Error("已取消飞书用户授权"), { code: "LARK_AUTH_CANCELLED" }));
+        return;
+      }
       if (error) {
-        reject(new Error(String(stderr || stdout || error.message).trim()));
+        const timedOut = Boolean(error.killed && (error.signal === "SIGTERM" || error.code === "ETIMEDOUT"));
+        reject(new Error(sanitizeLarkCliError(stderr || stdout || error.message, { timedOut })));
         return;
       }
       resolve({ stdout, stderr });
     });
+    const onAbort = () => {
+      aborted = true;
+      try { child.kill("SIGTERM"); } catch {}
+      setTimeout(() => {
+        try { if (!child.killed && child.exitCode === null) child.kill("SIGKILL"); } catch {}
+      }, 300).unref?.();
+    };
+    if (signal) signal.addEventListener("abort", onAbort, { once: true });
     if (input) child.stdin?.end(input);
   });
 }
@@ -278,4 +310,5 @@ module.exports = {
   readManagedBots,
   resolveBotCreationTarget,
   runLarkCli,
+  sanitizeLarkCliError,
 };

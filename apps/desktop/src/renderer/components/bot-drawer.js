@@ -5,6 +5,7 @@ import { showToast } from "./toast.js";
 
 let previousFocus = null;
 let refreshCallback = null;
+let larkAuthBotName = "";
 const readinessCache = new Map();
 const logState = {
   stream: "stdout",
@@ -253,6 +254,7 @@ function renderConfigTab(bot, state) {
 function renderReadinessTab(bot) {
   const entry = readinessCache.get(bot.name);
   const checks = entry?.result?.checks || [];
+  const authInFlight = larkAuthBotName === bot.name;
   return `
     <div class="inline-actions">
       <button class="btn btn-sm btn-primary" type="button" id="btn-drawer-check-readiness" ${entry?.loading ? "disabled" : ""}>
@@ -261,7 +263,10 @@ function renderReadinessTab(bot) {
       <button class="btn btn-sm" type="button" id="btn-drawer-copy-policy">复制推荐权限 JSON</button>
       <button class="btn btn-sm" type="button" id="btn-drawer-console-perm">打开权限管理</button>
       <button class="btn btn-sm" type="button" id="btn-drawer-console-event">打开事件配置</button>
-      <button class="btn btn-sm" type="button" id="btn-drawer-lark-auth">登录 Lark CLI 用户身份</button>
+      <button class="btn btn-sm" type="button" id="btn-drawer-lark-auth" ${authInFlight ? "disabled" : ""}>
+        ${authInFlight ? "等待浏览器授权..." : "登录 Lark CLI 用户身份"}
+      </button>
+      ${authInFlight ? `<button class="btn btn-sm btn-danger" type="button" id="btn-drawer-lark-auth-cancel">取消授权</button>` : ""}
     </div>
     ${entry?.error ? `<div class="alert-row danger"><div class="alert-text">${escapeHtml(entry.error)}</div></div>` : ""}
     ${entry?.loading ? `<div class="loading-band">正在检查飞书应用、事件订阅、Lark CLI 身份与模型渠道...</div>` : ""}
@@ -592,7 +597,7 @@ export function renderBotDrawer() {
   backdrop.querySelector("#btn-drawer-copy-policy")?.addEventListener("click", async () => {
     try {
       await api.copyPermissionPolicy(bot.name);
-      showToast("推荐权限 JSON（含撤回事件）已复制", "ok");
+      showToast("推荐权限与事件配置 JSON 已复制", "ok");
     } catch (error) {
       showToast(formatIpcError(error), "error");
     }
@@ -611,19 +616,39 @@ export function renderBotDrawer() {
       showToast(formatIpcError(error), "error");
     }
   });
-  backdrop.querySelector("#btn-drawer-lark-auth")?.addEventListener("click", async (event) => {
-    const btn = event.currentTarget;
-    btn.disabled = true;
-    btn.textContent = "等待浏览器授权...";
+  backdrop.querySelector("#btn-drawer-lark-auth")?.addEventListener("click", async () => {
+    if (larkAuthBotName === bot.name) return;
+    larkAuthBotName = bot.name;
+    renderBotDrawer();
     try {
       await api.authorizeLarkUser(bot.name);
+      if (larkAuthBotName === bot.name) larkAuthBotName = "";
       showToast("Lark CLI 用户身份授权完成", "ok");
       await loadReadiness(bot.name);
     } catch (error) {
+      const msg = formatIpcError(error);
+      if (msg.includes("已取消飞书用户授权")) {
+        showToast("已取消飞书用户授权", "info");
+      } else {
+        showToast(msg, "error");
+      }
+    } finally {
+      if (larkAuthBotName === bot.name) {
+        larkAuthBotName = "";
+        renderBotDrawer();
+      }
+    }
+  });
+  backdrop.querySelector("#btn-drawer-lark-auth-cancel")?.addEventListener("click", async () => {
+    try {
+      await api.cancelLarkUserAuth();
+    } catch (error) {
       showToast(formatIpcError(error), "error");
     } finally {
-      btn.disabled = false;
-      btn.textContent = "登录 Lark CLI 用户身份";
+      if (larkAuthBotName === bot.name) {
+        larkAuthBotName = "";
+        renderBotDrawer();
+      }
     }
   });
 

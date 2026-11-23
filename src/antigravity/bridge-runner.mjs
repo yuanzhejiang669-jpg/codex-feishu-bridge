@@ -244,17 +244,22 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
     const accessCtx = accessContextFor(event);
     const chat = getChatState(event.chat_id, accessCtx);
     const trimmed = String(target || '').trim();
-    if (/^[1-9]\d*$/.test(trimmed)) {
-      const view = listViews.get(viewKey(event));
-      if (!view || Date.now() - view.at > 5 * 60_000) throw new Error('请先 /list 获取最新会话序号');
-      const entry = view.items?.[Number(trimmed) - 1];
-      if (!entry) return null;
-      if (entry.kind === 'native') return { kind: 'native', native: entry.native };
-      const found = chat.sessions.find((item) => item.id === entry.id);
-      return found ? { kind: 'bridge', session: found } : null;
-    }
     const direct = chat.sessions.find((item) => item.id === trimmed || item.antigravitySessionId === trimmed);
     if (direct) return { kind: 'bridge', session: direct };
+    if (/^[1-9]\d*$/.test(trimmed)) {
+      const view = listViews.get(viewKey(event));
+      if (view && Date.now() - view.at <= 5 * 60_000) {
+        const entry = view.items?.[Number(trimmed) - 1];
+        if (entry) {
+          if (entry.kind === 'native') return { kind: 'native', native: entry.native };
+          const found = chat.sessions.find((item) => item.id === entry.id);
+          if (found) return { kind: 'bridge', session: found };
+        }
+        if (trimmed.length < 6) return null;
+      } else if (trimmed.length < 6) {
+        throw new Error('请先 /list 获取最新会话序号');
+      }
+    }
     const nativeMatch = collectNativeConversations(chat, accessCtx)
       .find((item) => item.conversationId === trimmed || item.conversationId.startsWith(trimmed));
     if (nativeMatch) return { kind: 'native', native: nativeMatch };

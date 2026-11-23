@@ -33,6 +33,7 @@ const VIEW_META = {
 
 let refreshInFlight = null;
 let pollTimer = null;
+let lastRenderedView = "";
 
 function navigateTo(view) {
   if (!VIEW_META[view]) return;
@@ -165,6 +166,11 @@ function renderShell(current) {
     if (section) section.classList.toggle("active", key === current.activeView);
   }
 
+  const mainContent = document.querySelector(".main-content");
+  const sameView = lastRenderedView === current.activeView;
+  const prevScrollTop = mainContent && sameView ? mainContent.scrollTop : 0;
+  lastRenderedView = current.activeView;
+
   if (current.activeView === "overview") {
     renderOverview(document.getElementById("view-overview"), sharedActions);
   } else if (current.activeView === "bots") {
@@ -177,15 +183,28 @@ function renderShell(current) {
     renderSystemView(document.getElementById("view-system"), sharedActions);
   }
 
+  if (mainContent) mainContent.scrollTop = prevScrollTop;
+
   if (isBotDrawerOpen()) renderBotDrawer();
   if (isCreateWizardOpen()) renderCreateWizard();
+}
+
+function isUserEditingForm() {
+  if (document.querySelector(".view-section.active details[open]")) return true;
+  const el = document.activeElement;
+  if (!el) return false;
+  const tag = String(el.tagName || "").toUpperCase();
+  if (tag === "TEXTAREA" || tag === "SELECT") return true;
+  if (tag === "INPUT" && el.id !== "bot-search") return true;
+  return false;
 }
 
 function scheduleBackgroundPoll() {
   if (pollTimer) clearInterval(pollTimer);
   pollTimer = setInterval(() => {
     if (document.hidden) return;
-    if (isConfirmModalOpen() || isCreateWizardOpen()) return;
+    if (isConfirmModalOpen() || isCreateWizardOpen() || isBotDrawerOpen()) return;
+    if (isUserEditingForm()) return;
     const loginStatus = store.desktopState?.modelSources?.accountLoginJob?.status;
     const force = ["running", "finishing"].includes(loginStatus);
     void refreshState({ force, silent: true });
@@ -248,6 +267,11 @@ export async function initApp() {
       setState({ restartProgress: done ? null : progress });
     },
     onUpdateState: (updateState) => {
+      if (!store.desktopState) return;
+      if (isBotDrawerOpen() || isCreateWizardOpen() || isUserEditingForm()) {
+        store.desktopState = { ...store.desktopState, update: updateState };
+        return;
+      }
       setState((s) => {
         if (s.desktopState) s.desktopState = { ...s.desktopState, update: updateState };
       });

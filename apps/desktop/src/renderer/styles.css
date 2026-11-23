@@ -832,23 +832,24 @@ a:focus-visible,
 }
 
 .col-bot {
-  width: 24%;
+  width: 31%;
 }
 
 .col-status {
-  width: 18%;
+  width: 15%;
 }
 
 .col-provider {
-  width: 24%;
+  width: 20%;
 }
 
 .col-workspace {
-  width: 18%;
+  width: 20%;
 }
 
-.col-actions {
-  width: 124px;
+.bot-table th.col-actions,
+.bot-table td.col-actions {
+  width: 122px;
   text-align: right;
 }
 
@@ -864,6 +865,10 @@ a:focus-visible,
   align-items: center;
   gap: 6px;
   min-width: 0;
+}
+
+.bot-name-top .pill {
+  flex-shrink: 0;
 }
 
 .bot-title {
@@ -1343,6 +1348,16 @@ a:focus-visible,
   color: var(--ink-inverse);
   font-size: var(--text-xs);
   box-shadow: 0 10px 25px rgba(15, 23, 42, 0.22);
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.toast-message {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.45;
 }
 
 .toast.ok {
@@ -1358,12 +1373,13 @@ a:focus-visible,
 }
 
 .toast-close {
+  flex-shrink: 0;
   border: 0;
   background: transparent;
   color: inherit;
   cursor: pointer;
   font-size: var(--text-xs);
-  padding: 0 4px;
+  padding: 2px 6px;
   line-height: 1.2;
 }
 
@@ -1387,6 +1403,18 @@ a:focus-visible,
 
   .col-workspace {
     display: none;
+  }
+
+  .col-bot {
+    width: 42%;
+  }
+
+  .col-status {
+    width: 20%;
+  }
+
+  .col-provider {
+    width: 24%;
   }
 
   .input-search {

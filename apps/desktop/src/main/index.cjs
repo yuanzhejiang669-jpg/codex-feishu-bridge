@@ -125,7 +125,7 @@ let currentState = null;
 let legacyAdoptionInFlight = false;
 let legacyAdoptionTimer = null;
 let cancelRegistration = null;
-let userAuthorizationInProgress = "";
+let activeLarkAuthorization = null;
 let startupError = "";
 let tray = null;
 let isQuitting = false;
@@ -245,11 +245,29 @@ function runtimeLocalAppData() {
   return path.join(managedDataRoot(), "runtime-localappdata");
 }
 
+function readAutoBoundOwnerOpenId(filePath) {
+  try {
+    const raw = JSON.parse(fs.readFileSync(filePath, "utf8").replace(/^\uFEFF/, ""));
+    const value = String(raw?.primaryOwnerOpenId || raw?.ownerOpenId || "").trim();
+    return /^ou_[A-Za-z0-9]+$/.test(value) ? value : "";
+  } catch {
+    return "";
+  }
+}
+
 function inspectDesktopSettings() {
-  const saved = readDesktopSettings(managedDataRoot());
+  const root = managedDataRoot();
+  const saved = readDesktopSettings(root);
   const login = desktopStartup.inspect();
+  const autoBoundOwnerOpenIds = {
+    claude: readAutoBoundOwnerOpenId(path.join(root, "claude-shared-sessions", "owner.json")),
+    antigravity: readAutoBoundOwnerOpenId(path.join(root, "antigravity-shared-sessions", "owner.json")),
+  };
+  const autoBoundOwnerOpenId = autoBoundOwnerOpenIds.antigravity || autoBoundOwnerOpenIds.claude || "";
   return {
     ...saved,
+    autoBoundOwnerOpenId,
+    autoBoundOwnerOpenIds,
     launchAtLogin: login.supported ? login.enabled : saved.launchAtLogin,
     launchAtLoginSupported: login.supported,
     trayAvailable: Boolean(tray),
@@ -1288,20 +1306,36 @@ if (!singleInstance) {
     ipcMain.handle("desktop:authorize-lark-user", async (_event, name) => {
       const normalized = String(name || "").trim();
       managedBotForAction(normalized);
-      if (userAuthorizationInProgress) {
-        throw new Error(`正在为 ${userAuthorizationInProgress} 完成用户授权，请先完成或关闭浏览器授权页`);
+      if (activeLarkAuthorization) {
+        try {
+          activeLarkAuthorization.controller.abort();
+        } catch {}
+        activeLarkAuthorization = null;
       }
-      userAuthorizationInProgress = normalized;
+      const controller = new AbortController();
+      activeLarkAuthorization = { botName: normalized, controller };
       try {
         const result = await authorizeLarkUser(normalized, {
           ...readinessOptions(),
+          signal: controller.signal,
           openExternal: (url) => shell.openExternal(url),
         });
         await loadState();
         return result;
       } finally {
-        userAuthorizationInProgress = "";
+        if (activeLarkAuthorization?.controller === controller) {
+          activeLarkAuthorization = null;
+        }
       }
+    });
+    ipcMain.handle("desktop:cancel-lark-user-auth", () => {
+      if (!activeLarkAuthorization) return { ok: true, cancelled: false };
+      const botName = activeLarkAuthorization.botName;
+      try {
+        activeLarkAuthorization.controller.abort();
+      } catch {}
+      activeLarkAuthorization = null;
+      return { ok: true, cancelled: true, botName };
     });
     ipcMain.handle("desktop:preview-capability-migration", (_event, input) => (
       previewCapabilityMigration(String(input?.name || ""), input?.selection, migrationOptions())
@@ -1390,6 +1424,10 @@ if (!singleInstance) {
 
   app.on("before-quit", (event) => {
     isQuitting = true;
+    if (activeLarkAuthorization) {
+      try { activeLarkAuthorization.controller.abort(); } catch {}
+      activeLarkAuthorization = null;
+    }
     if (legacyAdoptionTimer) clearInterval(legacyAdoptionTimer);
     if (claudeConfigurationTimer) clearInterval(claudeConfigurationTimer);
     recoverySupervisor?.stop();
