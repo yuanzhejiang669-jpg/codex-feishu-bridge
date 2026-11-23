@@ -181,6 +181,7 @@ export function createSessionInventory(deps = {}) {
       updatedAt: Number(session?.updatedAt) || Number(session?.createdAt) || now,
       messages: Array.isArray(session?.messages) ? session.messages : [],
       codexThreadId: typeof session?.codexThreadId === "string" ? session.codexThreadId : "",
+      codexWorkspace: typeof session?.codexWorkspace === "string" ? session.codexWorkspace : "",
       ...normalizeThreadContinuity(session),
       providerSwitchTransaction: normalizeProviderSwitch(session?.providerSwitchTransaction),
       pendingNativeInputs: normalizeNativeInputs(session?.pendingNativeInputs),
@@ -189,6 +190,7 @@ export function createSessionInventory(deps = {}) {
       antigravitySessionId: typeof session?.antigravitySessionId === 'string' ? session.antigravitySessionId : '',
       antigravitySourceId: typeof session?.antigravitySourceId === 'string' ? session.antigravitySourceId : '',
       antigravityHome: typeof session?.antigravityHome === 'string' ? session.antigravityHome : '',
+      antigravityAppDataDir: typeof session?.antigravityAppDataDir === 'string' ? session.antigravityAppDataDir : '',
       antigravityWorkspace: typeof session?.antigravityWorkspace === 'string' ? session.antigravityWorkspace : '',
       antigravityOriginBot: typeof session?.antigravityOriginBot === 'string' ? session.antigravityOriginBot : '',
       userRenamed: session?.userRenamed === true,
@@ -327,7 +329,7 @@ export function createSessionInventory(deps = {}) {
         "select id, substr(title, 1, 240) as title,",
         "substr(first_user_message, 1, 240) as first_user_message,",
         "substr(preview, 1, 240) as preview,",
-        "created_at, updated_at, created_at_ms, updated_at_ms,",
+        "created_at, updated_at, created_at_ms, updated_at_ms, cwd,",
         "rollout_path",
         "from threads",
         "where coalesce(archived, 0) = 0",
@@ -1091,12 +1093,13 @@ export function createSessionInventory(deps = {}) {
           )
         : [];
       const workspace = path.resolve(stripWindowsLongPathPrefix(CONFIG.workspace || "")).toLowerCase();
+      const includeAllWorkspaces = options.includeAllWorkspaces === true;
       const allThreadIds = desktopThreads.map((row) => String(row?.id || "").trim()).filter(Boolean);
       for (const row of desktopThreads) {
         const threadId = String(row?.id || "").trim();
         if (!threadId) continue;
         const cwd = path.resolve(stripWindowsLongPathPrefix(row.cwd || "") || CONFIG.workspace).toLowerCase();
-        if (cwd !== workspace && !entryMap.has(`thread:${threadId}`)) continue;
+        if (!includeAllWorkspaces && cwd !== workspace && !entryMap.has(`thread:${threadId}`)) continue;
         mergeThreadInventoryEntry(entryMap, {
           ...sessionEntryFromCodexThread(row, allThreadIds),
           _sources: ["desktop DB mirror"],
@@ -1174,16 +1177,23 @@ export function createSessionInventory(deps = {}) {
       .slice(0, boundedListLimit());
   }
 
-  async function listChatSessionsSynced(chatId) {
+  const lastListOptionsByChat = new Map();
+
+  async function listChatSessionsSynced(chatId, options = {}) {
     await syncChatSessionsWithCodex(chatId);
     const chatState = getChatState(chatId);
     chatState.sessions = dedupeSessions(chatState.sessions.map(normalizeSessionIdentity)).slice(0, sessionListLimit());
     saveSessions();
-    return await mergedSessionEntries(chatId);
+    const resolvedOptions = {
+      includeAllWorkspaces: Boolean(options?.includeAllWorkspaces),
+    };
+    lastListOptionsByChat.set(chatId, resolvedOptions);
+    return await mergedSessionEntries(chatId, resolvedOptions);
   }
 
   async function findSessionEntry(chatId, target) {
-    const sessionsList = await listChatSessionsSynced(chatId);
+    const lastOptions = lastListOptionsByChat.get(chatId) || {};
+    const sessionsList = await listChatSessionsSynced(chatId, lastOptions);
     const raw = String(target || "").trim();
     const index = Number(raw);
     const matchIndex = Number.isInteger(index) && index >= 1 && index <= sessionsList.length
@@ -1223,6 +1233,7 @@ export function createSessionInventory(deps = {}) {
       match = chatState.sessions.find((session) => session.codexThreadId === entry.codexThreadId);
     }
     if (!match) {
+      const resolvedCwd = stripWindowsLongPathPrefix(entry?._dbRecord?.cwd || entry?.codexWorkspace || "");
       match = normalizeSessionData({
         id: uniqueSessionId(chatState, entry?.id || String(entry?.codexThreadId || "").slice(0, 8)),
         title: entry?.title || "未命名会话",
@@ -1230,6 +1241,7 @@ export function createSessionInventory(deps = {}) {
         updatedAt: Date.now(),
         messages: [],
         codexThreadId: entry?.codexThreadId || "",
+        codexWorkspace: resolvedCwd && !sameResolvedPath(resolvedCwd, CONFIG.workspace) ? resolvedCwd : "",
         lastTokenUsage: entry?.lastTokenUsage || null,
         lastContextUsage: entry?.lastContextUsage || null,
         lastContextPeakUsage: entry?.lastContextPeakUsage || null,

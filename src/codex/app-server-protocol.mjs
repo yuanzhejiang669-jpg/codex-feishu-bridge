@@ -16,7 +16,7 @@ export function createAppServerProtocol({
 
   function startParams(session, options = {}) {
     const params = {
-      cwd: config.workspace,
+      cwd: session?.codexWorkspace || config.workspace,
       approvalPolicy: "never",
       sandbox: config.codexSandbox,
       threadSource: "user",
@@ -29,7 +29,7 @@ export function createAppServerProtocol({
   function resumeParams(session, options = {}) {
     const params = {
       threadId: session.codexThreadId,
-      cwd: config.workspace,
+      cwd: session?.codexWorkspace || config.workspace,
       approvalPolicy: "never",
       sandbox: config.codexSandbox,
       config: threadConfig(),
@@ -55,7 +55,7 @@ export function createAppServerProtocol({
       threadId,
       input: inputItems(event, userContent),
       clientUserMessageId: event.message_id || event.id || undefined,
-      cwd: config.workspace,
+      cwd: session?.codexWorkspace || config.workspace,
       approvalPolicy: "never",
       sandboxPolicy: { type: "dangerFullAccess" },
     };

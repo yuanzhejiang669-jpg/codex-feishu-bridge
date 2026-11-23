@@ -1,10 +1,19 @@
 import { spawn } from 'node:child_process';
-import { StringDecoder } from 'node:string_decoder';
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import configuration from './configuration.cjs';
 import { terminateProcessTree } from '../runtime/process-runner.mjs';
+
+export const DEFAULT_MAX_LINE_BYTES = 128 * 1024 * 1024;
+export const MAX_ALLOWED_LINE_BYTES = 450 * 1024 * 1024;
+
+function resolveMaxLineBytes(value) {
+  const envRaw = process.env.CODEX_FEISHU_ANTIGRAVITY_MAX_LINE_BYTES;
+  const parsed = Number(value ?? (envRaw ? Number(envRaw) : DEFAULT_MAX_LINE_BYTES));
+  const candidate = Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_MAX_LINE_BYTES;
+  return Math.min(MAX_ALLOWED_LINE_BYTES, Math.max(64 * 1024, Math.floor(candidate)));
+}
 
 export function antigravityArguments({ geminiDir, appDataDir = 'antigravity-cli', logFile, additionalDirectories = [], permissionMode = 'default' } = {}) {
   const args = ['acp', '--process-per-session'];
@@ -54,14 +63,15 @@ export function safeMessage(value, secrets = []) {
 export class AntigravityAcpClient {
   constructor({ command, cwd, geminiDir, appDataDir, logFile, provider, environment = process.env,
     additionalDirectories = [], permissionMode = 'default', spawnProcess = spawn,
-    requestTimeoutMs = 60_000, idleTimeoutMs = 60 * 60_000,
+    requestTimeoutMs = 60_000, idleTimeoutMs = 60 * 60_000, maxLineBytes = undefined,
     onEvent = () => {}, onPermission = async () => false, onStarted = () => {}, onClosed = () => {} } = {}) {
     Object.assign(this, { command, cwd, geminiDir, appDataDir, logFile, provider, environment, additionalDirectories,
       permissionMode, spawnProcess, requestTimeoutMs, idleTimeoutMs, onEvent, onPermission, onStarted, onClosed });
     this.pending = new Map(); this.permissions = new Map(); this.nextId = 1;
-    this.buffer = ''; this.stderr = ''; this.closed = false; this.stopped = false;
+    this.lineChunks = []; this.lineByteLength = 0;
+    this.maxLineBytes = resolveMaxLineBytes(maxLineBytes);
+    this.stderr = ''; this.closed = false; this.stopped = false;
     this.replaying = false; this.sessionId = ''; this.text = ''; this.runtime = {};
-    this.decoder = new StringDecoder('utf8');
     this.closedPromise = new Promise((resolve) => { this.resolveClosed = resolve; });
   }
 
@@ -74,15 +84,26 @@ export class AntigravityAcpClient {
     if (this.closed) return Promise.reject(new Error('Antigravity 已退出'));
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
-      const timer = timeoutMs > 0 ? setTimeout(() => {
+      const armTimer = () => (timeoutMs > 0 ? setTimeout(() => {
         this.pending.delete(id);
         reject(Object.assign(new Error(`Antigravity ${method} 等待响应超时`), { code: 'ANTIGRAVITY_TIMEOUT' }));
-      }, timeoutMs) : null;
+      }, timeoutMs) : null);
+      const timer = armTimer();
       timer?.unref?.();
-      this.pending.set(id, { resolve, reject, timer, method });
+      this.pending.set(id, { resolve, reject, timer, method, timeoutMs, armTimer });
       try { this.write({ jsonrpc: '2.0', id, method, params }); }
       catch (error) { clearTimeout(timer); this.pending.delete(id); reject(error); }
     });
+  }
+
+  touchPendingRequests(methodFilter = null) {
+    for (const pending of this.pending.values()) {
+      if (methodFilter && !methodFilter.includes(pending.method)) continue;
+      if (!(pending.timeoutMs > 0) || !pending.armTimer) continue;
+      clearTimeout(pending.timer);
+      pending.timer = pending.armTimer();
+      pending.timer?.unref?.();
+    }
   }
 
   activity() {
@@ -99,7 +120,9 @@ export class AntigravityAcpClient {
   async initialize() {
     if (this.initialized) return this.runtime;
     if (this.stopped) throw Object.assign(new Error('Antigravity 已停止'), { code: 'USER_STOP' });
-    this.appDataDir = configuration.prepareNativeProfile(this.geminiDir, this.provider);
+    this.appDataDir = configuration.prepareNativeProfile(this.geminiDir, this.provider, {
+      officialAppDataDir: this.appDataDir,
+    });
     this.child = this.spawnProcess(this.command, antigravityArguments(this), {
       cwd: this.cwd, env: antigravityEnvironment(this.environment, this.provider),
       ...(process.platform !== 'win32' ? { detached: true } : {}),
@@ -112,6 +135,11 @@ export class AntigravityAcpClient {
     this.child.once('error', (error) => this.fail(error));
     this.child.once('close', (code, signal) => {
       this.closed = true;
+      if (this.lineByteLength > 0 && this.lineByteLength <= this.maxLineBytes) {
+        const tail = Buffer.concat(this.lineChunks, this.lineByteLength).toString('utf8').trim();
+        if (tail) this.processLine(tail);
+      }
+      this.lineChunks = []; this.lineByteLength = 0;
       this.fail(this.timeoutError || Object.assign(new Error(this.stopped ? 'Antigravity 已停止' : safeMessage(this.stderr) || `Antigravity 退出 (${code ?? signal})`), { code: this.stopped ? 'USER_STOP' : 'ANTIGRAVITY_EXIT' }));
       this.onClosed(this.child);
       clearTimeout(this.closeTimer); this.resolveClosed();
@@ -127,27 +155,60 @@ export class AntigravityAcpClient {
   }
 
   read(chunk) {
-    this.buffer += this.decoder.write(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-    if (this.buffer.length > 32 * 1024 * 1024) { this.fail(new Error('Antigravity 单条事件超过上限')); this.close(); return; }
-    let offset;
-    while ((offset = this.buffer.indexOf('\n')) >= 0) {
-      const line = this.buffer.slice(0, offset); this.buffer = this.buffer.slice(offset + 1);
-      if (!line.trim()) continue;
-      let message;
-      try { message = JSON.parse(line); }
-      catch { this.onEvent({ type: 'protocol_warning', message: '忽略了一条非 JSON 的 CLI 输出' }); continue; }
-      this.activity();
-      if (message.method) {
-        if (message.id != null) void this.handleRequest(message);
-        else {
-          try { this.handleNotification(message); }
-          catch (error) { this.fail(error); void this.close(); }
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk || ''), 'utf8');
+    let offset = 0;
+    while (offset < buf.length) {
+      const nl = buf.indexOf(0x0a, offset);
+      if (nl < 0) {
+        const tail = offset === 0 ? buf : buf.subarray(offset);
+        this.lineChunks.push(tail);
+        this.lineByteLength += tail.length;
+        if (this.lineByteLength > this.maxLineBytes) {
+          this.lineChunks = []; this.lineByteLength = 0;
+          this.fail(new Error(`Antigravity 单条事件超过上限 (${this.maxLineBytes} bytes)`));
+          void this.close();
+          return;
         }
-      } else if (this.pending.has(message.id)) {
-        const pending = this.pending.get(message.id); this.pending.delete(message.id); clearTimeout(pending.timer);
-        if (message.error) pending.reject(Object.assign(new Error(safeMessage(message.error.message, [this.provider?.apiKey])), { rpcCode: message.error.code, code: 'ANTIGRAVITY_RPC_ERROR' }));
-        else pending.resolve(message.result);
+        return;
       }
+      const segment = buf.subarray(offset, nl);
+      offset = nl + 1;
+      const totalBytes = this.lineByteLength + segment.length;
+      if (totalBytes > this.maxLineBytes) {
+        this.lineChunks = []; this.lineByteLength = 0;
+        this.fail(new Error(`Antigravity 单条事件超过上限 (${this.maxLineBytes} bytes)`));
+        void this.close();
+        return;
+      }
+      if (totalBytes === 0) {
+        this.lineChunks = []; this.lineByteLength = 0;
+        continue;
+      }
+      const rawLine = this.lineChunks.length
+        ? Buffer.concat([...this.lineChunks, segment], totalBytes)
+        : segment;
+      this.lineChunks = []; this.lineByteLength = 0;
+      const line = rawLine.toString('utf8').trim();
+      if (!line) continue;
+      this.processLine(line);
+    }
+  }
+
+  processLine(line) {
+    let message;
+    try { message = JSON.parse(line); }
+    catch { this.onEvent({ type: 'protocol_warning', message: '忽略了一条非 JSON 的 CLI 输出' }); return; }
+    this.activity();
+    if (message.method) {
+      if (message.id != null) void this.handleRequest(message);
+      else {
+        try { this.handleNotification(message); }
+        catch (error) { this.fail(error); void this.close(); }
+      }
+    } else if (this.pending.has(message.id)) {
+      const pending = this.pending.get(message.id); this.pending.delete(message.id); clearTimeout(pending.timer);
+      if (message.error) pending.reject(Object.assign(new Error(safeMessage(message.error.message, [this.provider?.apiKey])), { rpcCode: message.error.code, code: 'ANTIGRAVITY_RPC_ERROR' }));
+      else pending.resolve(message.result);
     }
   }
 
@@ -157,6 +218,13 @@ export class AntigravityAcpClient {
       return;
     }
     const params = message.params || {};
+    if (this.permissionMode === 'always-proceed') {
+      const option = (params.options || []).find((item) => item.kind === 'allow_always')
+        || (params.options || []).find((item) => item.kind === 'allow_once');
+      const outcome = option && !this.stopped ? { outcome: 'selected', optionId: option.optionId } : { outcome: 'cancelled' };
+      try { this.write({ jsonrpc: '2.0', id: message.id, result: { outcome } }); } catch {}
+      return;
+    }
     let cancel;
     const cancelled = new Promise((resolve) => { cancel = () => resolve(false); });
     this.permissions.set(message.id, cancel); clearTimeout(this.idleTimer);
@@ -175,6 +243,7 @@ export class AntigravityAcpClient {
 
   handleNotification(message) {
     if (message.method !== 'session/update') return;
+    if (this.replaying) this.touchPendingRequests(['session/load', 'session/resume']);
     const { sessionId, update = {} } = message.params || {};
     if (this.sessionId && sessionId !== this.sessionId) return;
     const type = update.sessionUpdate;
@@ -186,22 +255,64 @@ export class AntigravityAcpClient {
     this.onEvent({ type, update, sessionId });
   }
 
+  supportsResume() {
+    const caps = this.runtime?.agentCapabilities || this.runtime?.agent_capabilities || {};
+    const sessionCaps = caps.sessionCapabilities || caps.session_capabilities || {};
+    return Boolean(sessionCaps && Object.prototype.hasOwnProperty.call(sessionCaps, 'resume'));
+  }
+
   async openSession({ sessionId, mcpServers = [], model, effort, mode } = {}) {
     await this.initialize();
     if (this.stopped) throw Object.assign(new Error('Antigravity 已停止'), { code: 'USER_STOP' });
     this.sessionId = sessionId || '';
     this.replaying = Boolean(sessionId);
+    const openTimeoutMs = Math.max(this.requestTimeoutMs || 60_000, 180_000);
     let result;
     try {
-      result = await this.request(sessionId ? 'session/load' : 'session/new', { ...(sessionId ? { sessionId } : {}), cwd: this.cwd, mcpServers });
+      if (sessionId) {
+        if (this.supportsResume()) {
+          try {
+            result = await this.request('session/resume', { sessionId, cwd: this.cwd, mcpServers }, openTimeoutMs);
+          } catch (error) {
+            if (error?.rpcCode === -32601) {
+              result = await this.request('session/load', { sessionId, cwd: this.cwd, mcpServers }, openTimeoutMs);
+            } else {
+              throw error;
+            }
+          }
+        } else {
+          result = await this.request('session/load', { sessionId, cwd: this.cwd, mcpServers }, openTimeoutMs);
+        }
+      } else {
+        result = await this.request('session/new', { cwd: this.cwd, mcpServers }, openTimeoutMs);
+      }
     } finally { this.replaying = false; }
     this.sessionId = result.sessionId || sessionId;
     if (this.stopped) throw Object.assign(new Error('Antigravity 已停止'), { code: 'USER_STOP' });
     this.runtime = { ...this.runtime, ...result };
-    if (model) await this.request('session/set_model', { sessionId: this.sessionId, modelId: model });
-    if (effort) await this.request('session/set_config_option', { sessionId: this.sessionId, configId: 'thought_level', value: effort });
+    if (model) {
+      const modelConfigOpt = (this.runtime.configOptions || []).find((item) => item?.id === 'model');
+      const baseOptions = Array.isArray(modelConfigOpt?.options)
+        ? modelConfigOpt.options.map((opt) => (typeof opt === 'string' ? opt : String(opt?.value || '').trim())).filter(Boolean)
+        : [];
+      if (baseOptions.includes(model)) {
+        const updated = await this.request('session/set_config_option', { sessionId: this.sessionId, configId: 'model', value: model });
+        if (updated?.configOptions) this.runtime.configOptions = updated.configOptions;
+      } else {
+        await this.request('session/set_model', { sessionId: this.sessionId, modelId: model });
+      }
+    }
+    if (effort) {
+      const updated = await this.request('session/set_config_option', { sessionId: this.sessionId, configId: 'thought_level', value: effort });
+      if (updated?.configOptions) this.runtime.configOptions = updated.configOptions;
+    }
     if (mode && mode !== 'always-proceed') await this.request('session/set_mode', { sessionId: this.sessionId, modeId: mode });
-    return { ...result, sessionId: this.sessionId };
+    return {
+      ...result,
+      sessionId: this.sessionId,
+      configOptions: this.runtime.configOptions || result.configOptions,
+      models: this.runtime.models || result.models,
+    };
   }
 
   async prompt(content) {

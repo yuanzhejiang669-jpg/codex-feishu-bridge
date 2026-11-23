@@ -4,6 +4,15 @@ import readline from 'node:readline';
 import { terminateProcessTree } from '../runtime/process-runner.mjs';
 
 const EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
+export const DEFAULT_MAX_LINE_BYTES = 128 * 1024 * 1024;
+export const MAX_ALLOWED_LINE_BYTES = 450 * 1024 * 1024;
+
+function resolveMaxLineBytes(value) {
+  const envRaw = process.env.CODEX_FEISHU_CLAUDE_MAX_LINE_BYTES;
+  const parsed = Number(value ?? (envRaw ? Number(envRaw) : DEFAULT_MAX_LINE_BYTES));
+  const candidate = Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_MAX_LINE_BYTES;
+  return Math.min(MAX_ALLOWED_LINE_BYTES, Math.max(64 * 1024, Math.floor(candidate)));
+}
 
 export function claudeEnvironment(environment, { home, provider, toolHome = home }) {
   const env = { ...environment };
@@ -64,13 +73,14 @@ export class ClaudeCliClient {
   constructor({ command, cwd, home, toolHome = home, provider, sessionId = crypto.randomUUID(), resume = false,
     model = provider?.model, effort = 'high', permissionMode = 'manual', mcpConfigs = [],
     disableMcp = false, allowedTools = [], tools, additionalDirectories = [], environment = process.env, spawnProcess = spawn,
-    persistSession = true, dispatchCommand = false,
+    persistSession = true, dispatchCommand = false, maxLineBytes = undefined,
     onEvent = () => {}, onPermission = async () => false, onSession = () => {},
     onStarted = () => {}, onClosed = () => {}, totalTimeoutMs = 0, idleTimeoutMs = 60 * 60_000,
     upstreamTimeoutMs = 4 * 60_000, compactionTimeoutMs = 10 * 60_000 }) {
     Object.assign(this, { command, cwd, home, toolHome, provider, sessionId, resume, model, effort, permissionMode,
       mcpConfigs, disableMcp, allowedTools, tools, additionalDirectories, environment, spawnProcess, persistSession, dispatchCommand, onEvent, onPermission,
       onSession, onStarted, onClosed, totalTimeoutMs, idleTimeoutMs, upstreamTimeoutMs, compactionTimeoutMs });
+    this.maxLineBytes = resolveMaxLineBytes(maxLineBytes);
     this.pendingControls = new Set();
     this.seenTools = new Map();
     this.pendingTools = new Set();
@@ -133,6 +143,11 @@ export class ClaudeCliClient {
     if (request.subtype !== 'can_use_tool') {
       this.write({ type: 'control_response', response: { subtype: 'error', request_id: requestId,
         error: `Unsupported host request: ${request.subtype}` } });
+      return;
+    }
+    if (this.permissionMode === 'bypassPermissions') {
+      this.write({ type: 'control_response', response: { subtype: 'success', request_id: requestId,
+        response: { behavior: 'allow', updatedInput: request.input || {} } } });
       return;
     }
     this.pauseUpstreamWait();
@@ -295,7 +310,9 @@ export class ClaudeCliClient {
     const stream = (async () => {
       for await (const line of lines) {
         touch();
-        if (line.length > 16 * 1024 * 1024) throw new Error('Claude Code 返回的单条事件过大');
+        if (Buffer.byteLength(line, 'utf8') > this.maxLineBytes) {
+          throw new Error(`Claude Code 返回的单条事件超过上限 (${this.maxLineBytes} bytes)`);
+        }
         let message;
         try { message = JSON.parse(line); } catch { continue; }
         await this.handleEvent(message);

@@ -59,12 +59,13 @@ function assertOfficialAccount(dataRoot, provider) {
   const accounts = readAccounts(dataRoot);
   if (accounts.activeId !== provider.accountId) throw new Error(`请先在客户端切换官方账号到 ${provider.accountId}。Antigravity 使用 Windows 共享登录槽位，Bridge 不会自动轮换账号。`);
 }
-function prepareNativeProfile(geminiDir, provider = {}) {
-  if (!geminiDir) return 'antigravity-cli';
+function prepareNativeProfile(geminiDir, provider = {}, options = {}) {
+  const officialAppDataDir = String(options?.officialAppDataDir || 'antigravity-cli').trim() || 'antigravity-cli';
+  if (!geminiDir) return officialAppDataDir;
   if (provider.mode !== 'gemini-api') {
-    const settings = readJson(path.join(geminiDir, 'antigravity-cli', 'settings.json'), {});
+    const settings = readJson(path.join(geminiDir, officialAppDataDir, 'settings.json'), {});
     if (settings.modelProvider === 'gemini') throw new Error('官方渠道的原生目录被设置为 Gemini API 模式，请在客户端使用独立渠道目录');
-    return 'antigravity-cli';
+    return officialAppDataDir;
   }
   if (!ID.test(provider.id || '')) throw new Error('Gemini API 渠道 ID 无效');
   // Native authentication mode is selected by settings.json, not by API-key

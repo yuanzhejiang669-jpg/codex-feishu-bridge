@@ -100,6 +100,12 @@ export function createSharedClaudeSessionStore({ config, sessionsPath, createSes
   }
   const knownSources = sources();
   const allowedHomes = new Set(knownSources.map((s) => homeKey(s.home)));
+  if (isAntigravity && config.antigravityDesktopGeminiDir) {
+    allowedHomes.add(homeKey(config.antigravityDesktopGeminiDir));
+  }
+  if (!isAntigravity && config.claudeDesktopHome) {
+    allowedHomes.add(homeKey(config.claudeDesktopHome));
+  }
   function readCatalog() {
     const pool = read(catalogFile, { schemaVersion: 2, sessions: {}, deleted: {} });
     if (![1, 2].includes(pool.schemaVersion) || !pool.sessions || Array.isArray(pool.sessions) || !pool.deleted) {
@@ -198,8 +204,12 @@ export function createSharedClaudeSessionStore({ config, sessionsPath, createSes
       if (!current.sessions[item.id]) current.sessions[item.id] = value;
       else if (baseline) {
         const delta = changes(baseline, value);
+        const allowInitialHomeBind = !current.sessions[item.id][nativeField]
+          && delta[homeField]
+          && allowedHomes.has(homeKey(delta[homeField]));
         // Ownership and access-control scope are fixed at creation; selecting a session never migrates them.
-        for (const key of ['id', 'scopeType', 'ownerOpenId', 'originChatId', homeField, workspaceField, originField]) delete delta[key];
+        for (const key of ['id', 'scopeType', 'ownerOpenId', 'originChatId', workspaceField, originField]) delete delta[key];
+        if (!allowInitialHomeBind) delete delta[homeField];
         Object.assign(current.sessions[item.id], delta);
       }
     }
@@ -244,8 +254,40 @@ export function createSharedClaudeSessionStore({ config, sessionsPath, createSes
   function sessionHome(session) {
     const home = path.resolve(session[homeField] || configuredHome);
     if (!allowedHomes.has(homeKey(home))) for (const origin of sources()) allowedHomes.add(homeKey(origin.home));
+    if (isAntigravity && config.antigravityDesktopGeminiDir) allowedHomes.add(homeKey(config.antigravityDesktopGeminiDir));
+    if (!isAntigravity && config.claudeDesktopHome) allowedHomes.add(homeKey(config.claudeDesktopHome));
     if (!allowedHomes.has(homeKey(home))) throw new Error(`共享会话的原生 Home 不属于已配置 ${label} Bot`);
     return home;
+  }
+  function bindNativeSession(chatId, seed = {}, accessCtx = null) {
+    const ctx = resolveAccessContext(chatId, accessCtx);
+    const chat = getChatState(chatId, ctx);
+    const nativeId = String(seed[nativeField] || '').trim();
+    const targetHome = path.resolve(seed[homeField] || configuredHome);
+    if (targetHome && !allowedHomes.has(homeKey(targetHome))) {
+      throw new Error(`目标原生会话 Home 未受信任：${targetHome}`);
+    }
+    if (nativeId) {
+      const existing = chat.sessions.find((item) => item[nativeField] === nativeId);
+      if (existing) {
+        chat.currentSessionId = existing.id;
+        saveSessions();
+        return existing;
+      }
+    }
+    const base = createSessionData(seed.title || `原生 ${label} 会话`);
+    const merged = normalized({
+      ...base,
+      ...seed,
+      id: base.id,
+      [homeField]: targetHome,
+      [workspaceField]: path.resolve(seed[workspaceField] || config.workspace),
+      [originField]: seed[originField] || source.bot,
+    }, source, ctx);
+    chat.sessions.unshift(merged);
+    chat.currentSessionId = merged.id;
+    saveSessions();
+    return chat.sessions.find((item) => item.id === merged.id) || merged;
   }
   function busy(session, { ignoreDeleteLease = false } = {}) {
     const directory = path.join(root, 'leases', session.id);
@@ -336,7 +378,7 @@ export function createSharedClaudeSessionStore({ config, sessionsPath, createSes
   return {
     sessions: local, getChatState, getSession, resetSession, saveSessions, saveSessionsAsync,
     shared: {
-      catalogFile, ownerFile, accessContextForEvent, sessionHome,
+      catalogFile, ownerFile, accessContextForEvent, sessionHome, bindNativeSession,
       withCatalog, withCatalogAsync, saveSessionsAsync,
       acquire, acquireAsync, acquireMany, acquireManyAsync,
       assertIdle, busy, remove, removeAsync,

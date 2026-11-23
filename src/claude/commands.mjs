@@ -24,7 +24,7 @@ export function claudeHelpMarkdown({ shared = false } = {}) {
     '`/now` / `/how` — 查看工作区、当前会话、任务和队列',
     '`/context` — 查看原生会话、请求 tokens、配置压缩窗口和最近压缩时间',
     '`/new [标题]` — 创建独立会话',
-    shared ? '`/list` / `/sessions` — 列出全部 Claude Bot 共用的会话；序号以最近一次列表为准' : '`/list` / `/sessions` — 列出当前 Bot 的会话',
+    shared ? '`/list [all]` / `/sessions [all]` — 列出全部 Claude Bot 共用的会话（`/list all` 含本机原生 CLI 会话）；序号以最近一次列表为准' : '`/list [all]` / `/sessions` — 列出当前 Bot 的会话',
     '`/switch <序号或ID>` — 切换会话',
     '`/rename 新标题` / `/rename <序号> 新标题` — 修改当前或指定会话名称',
     '`/delete 序号或ID` — 预览删除，支持 `1 2 3`、`1-18`、`3-7 8-12`',
@@ -35,7 +35,7 @@ export function claudeHelpMarkdown({ shared = false } = {}) {
     '`/provider shortcuts` — 查看渠道快捷方式',
     '`/model` / `/model list` / `/model capability` — 查看当前模型、刷新渠道模型或查看 CLI 强度选项',
     '`/model <模型ID> [强度]` — 切换当前会话模型和思考强度',
-    '`/model effort <强度>` / `/model reasoning <强度>` / `/effort <强度>` — 切换强度',
+    '`/model effort <强度|clear>` / `/model reasoning <强度|clear>` / `/effort <强度|clear>` — 切换或清除强度覆盖',
     '`/model save <模型ID> [强度]` / `/model save effort <强度>` — 保存为当前 Bot 默认',
     '`/model clear` — 恢复当前 Bot 默认模型与强度',
     '`/model test <模型ID>` — 独立短请求测活，不续写当前会话',
@@ -204,7 +204,9 @@ export function createClaudeCommands({ config, settings, botConfiguration, provi
           releaseLock();
         }
       } catch (error) { notice = `\n查询失败：${error.message}；以下使用已保存的模型列表。`; }
-      await reply(`当前模型：${settings(session).model}${notice}\n可选模型：\n${models.join('\n')}`); return true;
+      const activeModel = settings(session).model;
+      const formatted = models.map((m) => (m === activeModel ? `● ${m} ← 当前` : `  ${m}`));
+      await reply(`当前模型：${activeModel} · 思考强度：${settings(session).reasoning}${notice}\n可选模型：\n${formatted.join('\n')}`); return true;
     }
     if (['capability', 'capabilities'].includes(op)) {
       await reply(`当前模型：${settings(session).model}\nClaude CLI 接受的强度：low、medium、high、xhigh、max。\n强度原样传给 CLI，渠道实际支持情况以请求结果为准。\n用法：/model effort high；/model <模型ID> high；/model test <模型ID>`); return true;
@@ -224,7 +226,13 @@ export function createClaudeCommands({ config, settings, botConfiguration, provi
     const persist = op === 'save';
     if (persist) args.shift();
     const effortOnly = ['effort', 'reasoning'].includes((args[0] || '').toLowerCase());
-    if (!args[0] || args.length > 2) throw new Error('用法：/model <模型ID> [强度]；/model effort <强度>；可加 save 保存为 Bot 默认');
+    if (!args[0] || args.length > 2) throw new Error('用法：/model <模型ID> [强度]；/model effort <强度|clear>；可加 save 保存为 Bot 默认');
+    if (effortOnly && !persist && ['clear', 'default', 'reset'].includes(effortOf(args[1]))) {
+      session.reasoningOverride = '';
+      changed(session);
+      await reply(modelStatus(session, '已清除会话思考强度覆盖，恢复默认'));
+      return true;
+    }
     const model = effortOnly ? settings(session).model : args[0];
     const effort = effortOnly || args[1] ? validEffort(args[1]) : null;
     if (!(provider.models || [provider.model]).includes(model)) throw new Error('模型不在该渠道列表中，请先 /model list');

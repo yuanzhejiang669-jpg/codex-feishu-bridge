@@ -190,6 +190,9 @@ export function createCommandRouter(deps = {}) {
       case "/model":
         await handleModelCommand(chatId, command.rest, messageId);
         return;
+      case "/effort":
+        await handleEffortCommand(chatId, command.rest, messageId);
+        return;
       case "/fast":
         await handleFastCommand(chatId, command.rest, messageId);
         return;
@@ -1168,6 +1171,31 @@ export function createCommandRouter(deps = {}) {
     }
   }
 
+  async function handleEffortCommand(chatId, rest, messageId) {
+    const trimmed = String(rest || "").trim();
+    const lower = trimmed.toLowerCase();
+    if (!trimmed || lower === "status" || lower === "view") {
+      await syncChatSessionsWithCodex(chatId);
+      const session = getSession(chatId);
+      await sendMarkdown(chatId, modelCapabilityMarkdown(session, { includeUsage: true }), "effort-status", messageId);
+      return;
+    }
+    if (["clear", "default", "reset"].includes(lower)) {
+      if (activeCodexJobs.has(chatId)) {
+        await sendText(chatId, "当前任务运行中不能修改推理强度，请等待完成或 /stop 后再执行 /effort clear。", "effort-busy", messageId);
+        return;
+      }
+      await syncChatSessionsWithCodex(chatId);
+      const session = getSession(chatId);
+      session.reasoningOverride = "";
+      session.updatedAt = Date.now();
+      saveSessions();
+      await sendMarkdown(chatId, modelStatusMarkdown(session, "已清除当前会话的推理强度覆盖，恢复默认。"), "effort-clear", messageId);
+      return;
+    }
+    await handleModelCommand(chatId, `effort ${trimmed}`, messageId);
+  }
+
   function normalizeReasoningEffort(value) {
     const text = String(value || "").trim().toLowerCase();
     return REASONING_EFFORTS.has(text) ? text : "";
@@ -1887,10 +1915,11 @@ export function createCommandRouter(deps = {}) {
       "`/goal [目标]` — 查看或启动原生 Codex Goal mode；运行中普通消息会作为当前 goal 的补充指令；支持 `/goal pause`、`/goal resume`、`/goal clear`",
       "`/provider [id]` — 查看或切换当前会话 provider；`/provider list` 列出真实 provider；`/provider shortcuts` 列出旧快捷组合",
       "`/model [模型ID] [推理强度]` — 查看或切换当前会话模型；`/model list` 查询当前 provider 的 /models；`/model test <id>` 测活",
+      "`/effort [档位|clear]` — 查看、独立切换或清除当前会话推理强度（同 `/model effort`）",
       "`/fast on|off|status` — 切换或查看 Codex Fast 速度模式",
       "`/compact` — 触发当前原生 thread 的上下文压缩",
       "`/steer <补充内容>` — 将补充指令追加到当前正在运行的 Codex turn；不会创建新任务",
-      "`/sessions` — 列出飞书会话和 Codex 侧边栏可见会话",
+      "`/sessions` / `/list [all]` — 列出飞书会话和 Codex 侧边栏会话（`/list all` 包含全部工作区与残留记录）",
       "`/switch <序号或ID>` — 切换到已有 Codex 会话",
       "`/rename 新标题` / `/rename <序号> 新标题` — 修改当前会话或 /list 指定会话标题",
       "`/delete <序号或ID>` — 删除 Codex 本地会话；支持 `1 2 3`、`1-18`、`3-7 8-12`，需 `/confirm delete <序号或区间>` 确认",
@@ -2163,8 +2192,8 @@ export function createCommandRouter(deps = {}) {
   }
 
   async function sessionsMarkdown(chatId, rest = "") {
-    const fullList = await listChatSessionsSynced(chatId);
     const mode = parseSessionsListMode(rest);
+    const fullList = await listChatSessionsSynced(chatId, { includeAllWorkspaces: mode === "all" });
     const visibleItems = visibleSessionItemsForListMode(fullList, mode);
     const hiddenResidue = mode === "default" ? fullList.length - visibleItems.length : 0;
     const currentId = sessions.chats[chatId]?.currentSessionId || "";

@@ -255,14 +255,18 @@ export function classifyCodexFailure(value, fallback = "Codex 运行失败") {
     };
   }
 
-  if (lower.includes("stdout line exceeded") && lower.includes("bytes limit")) {
+  if (
+    (lower.includes("stdout line exceeded") && lower.includes("bytes limit"))
+    || lower.includes("单条事件超过上限")
+    || lower.includes("单条事件过大")
+  ) {
     return {
       ...base,
       kind: "app_server_line_limit",
-      label: "Codex 单行输出超限",
+      label: "单行事件输出超限",
       recoverable: false,
-      message: "Codex app-server 返回的单行 JSON 超过安全内存上限，本轮已中止。",
-      suggestion: "若当前历史会话体积过大，可发送 /new 开启新会话，或升级后使用轻量恢复（excludeTurns）。",
+      message: "底层 Agent 返回的单行 JSON 事件超过安全内存上限，本轮已中止。",
+      suggestion: "若当前历史会话或工具输出体积过大，可发送 /new 开启新会话后继续。",
     };
   }
 

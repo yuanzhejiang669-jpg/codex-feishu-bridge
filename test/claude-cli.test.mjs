@@ -179,7 +179,8 @@ test('native Claude skills stay queued while compact and Bridge approval are man
   assert.equal(parseCommand('/my-skill exact original words', { engine: 'claude' }), null);
   assert.equal(parseCommand('/compact', { engine: 'claude' }).name, '/compact');
   assert.equal(parseCommand('/approve abc', { engine: 'claude' }).name, '/approve');
-  assert.equal(parseCommand('/unknown', { engine: 'codex' }).name, '/unknown');
+  assert.equal(parseCommand('/unknown', { engine: 'codex' }), null);
+  assert.equal(parseCommand('/effort high', { engine: 'codex' }).name, '/effort');
 });
 
 test('explicit full authorization uses the native bypass mode while manual approval remains available', () => {

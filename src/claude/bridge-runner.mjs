@@ -7,7 +7,8 @@ import { feishuMcpConfiguration } from './feishu-tools.mjs';
 import { createClaudeSessionDeletion } from './session-deletion.mjs';
 import { createClaudeCommands } from './commands.mjs';
 import { applyCloakBrowserIsolationToMcpConfig, resolveCloakBrowserDirs } from '../config/cloakbrowser.mjs';
-import { buildAccessContext } from '../sessions/access-control.mjs';
+import { buildAccessContext, isOwnerDmContext } from '../sessions/access-control.mjs';
+import { listClaudeNativeSessions } from './native-sessions.mjs';
 import {
   STEER_CANCELLED_BY_CLEARQUEUE_REPLY,
   ensureSteerEntry,
@@ -89,14 +90,40 @@ export function createClaudeBridge({ config, getSession, getChatState, getChats,
       ? sharedSessions.accessContextForEvent(event)
       : buildAccessContext(event, { config })
   );
-  function resolveSession(event, target) {
-    const chat = getChatState(event.chat_id, accessContextFor(event));
-    if (/^[1-9]\d*$/.test(target)) {
+  function collectNativeClaudeSessions(chat, accessCtx) {
+    if (!isOwnerDmContext(accessCtx) || !config.claudeDesktopHome) return [];
+    const seen = new Set(
+      (chat.sessions || []).map((item) => String(item.claudeSessionId || '').trim()).filter(Boolean),
+    );
+    return listClaudeNativeSessions({ claudeHome: config.claudeDesktopHome, limit: 100 })
+      .filter((item) => item.sessionId && !seen.has(item.sessionId));
+  }
+  function resolveBridgeOrNativeTarget(event, target) {
+    const accessCtx = accessContextFor(event);
+    const chat = getChatState(event.chat_id, accessCtx);
+    const trimmed = String(target || '').trim();
+    if (/^[1-9]\d*$/.test(trimmed)) {
       const view = listViews.get(viewKey(event));
-      const id = view && Date.now() - view.at < 5 * 60_000 ? view.ids[Number(target) - 1] : chat.sessions[Number(target) - 1]?.id;
-      return chat.sessions.find((s) => s.id === id);
+      if (view && Date.now() - view.at < 5 * 60_000 && Array.isArray(view.items)) {
+        const entry = view.items[Number(trimmed) - 1];
+        if (!entry) return null;
+        if (entry.kind === 'native') return { kind: 'native', native: entry.native };
+        const found = chat.sessions.find((s) => s.id === entry.id);
+        return found ? { kind: 'bridge', session: found } : null;
+      }
+      const fallback = chat.sessions[Number(trimmed) - 1];
+      return fallback ? { kind: 'bridge', session: fallback } : null;
     }
-    return chat.sessions.find((s) => s.id === target || s.claudeSessionId === target);
+    const direct = chat.sessions.find((s) => s.id === trimmed || s.claudeSessionId === trimmed);
+    if (direct) return { kind: 'bridge', session: direct };
+    const nativeMatch = collectNativeClaudeSessions(chat, accessCtx)
+      .find((item) => item.sessionId === trimmed || item.sessionId.startsWith(trimmed));
+    if (nativeMatch) return { kind: 'native', native: nativeMatch };
+    return null;
+  }
+  function resolveSession(event, target) {
+    const resolved = resolveBridgeOrNativeTarget(event, target);
+    return resolved?.kind === 'bridge' ? resolved.session : null;
   }
   const sessionDeletion = createClaudeSessionDeletion({ config, getChatState, getChats, saveSessions, activeJobs, sharedSessions, accessContextFor });
   const commands = createClaudeCommands({ config, settings, botConfiguration, providers, saveSessions,
@@ -142,7 +169,7 @@ export function createClaudeBridge({ config, getSession, getChatState, getChats,
     const effort = session?.reasoningOverride || bot.provider?.reasoning || provider.effort || 'high';
     if (!EFFORTS.has(effort)) throw new Error('Claude 思考强度无效');
     return { model, provider: provider.id, reasoning: effort, requestedReasoning: effort,
-      permissionMode: bot.claude?.permissionMode || config.claudePermissionMode || 'manual',
+      permissionMode: bot.claude?.permissionMode || config.claudePermissionMode || 'bypassPermissions',
       reasoningMapping: { supported: true, mapped: false }, serviceTier: '', accountAlias: '' };
   }
 
@@ -201,7 +228,7 @@ export function createClaudeBridge({ config, getSession, getChatState, getChats,
       totalTimeoutMs: config.codexTimeoutMs, idleTimeoutMs: config.codexIdleTimeoutMs,
       dispatchCommand: /^\/[\w:-]+(?:\s|$)/u.test(text),
       onSession: (id) => { session.engine = 'claude'; session.claudeSessionId = id; saveSessions(); },
-      onPermission: (request) => requestPermission(event, request),
+      onPermission: (request) => (selected.permissionMode === 'bypassPermissions' ? true : requestPermission(event, request)),
       onStarted: (child) => {
         activeChildren.set(child.pid, { child, label: 'Claude Code CLI' });
         activeJobs.set(event.chat_id, {
@@ -333,18 +360,70 @@ export function createClaudeBridge({ config, getSession, getChatState, getChats,
       return true;
     }
     if (['/sessions', '/list'].includes(command.name)) {
-      listViews.set(viewKey(event), { ids: chat.sessions.map((s) => s.id), at: Date.now() });
+      const showAll = /\ball\b/i.test(command.rest || '');
+      const nativeAll = collectNativeClaudeSessions(chat, accessCtx);
+      const visibleNative = showAll ? nativeAll : [];
+      const hiddenNativeCount = showAll ? 0 : nativeAll.length;
+      const merged = [
+        ...chat.sessions.map((item) => ({
+          kind: 'bridge',
+          id: item.id,
+          updatedAt: Number(item.updatedAt || item.createdAt || 0),
+          current: item.id === chat.currentSessionId,
+          label: `${item.id === chat.currentSessionId ? '当前 · ' : ''}${item.title} (${item.id})${sharedSessions ? ` · 来自 ${item.claudeOriginBot || 'Claude'}` : ''}`,
+        })),
+        ...visibleNative.map((item) => {
+          const dirTag = item.cwd ? ` · ${path.basename(item.cwd)}` : '';
+          return {
+            kind: 'native',
+            native: item,
+            updatedAt: Number(item.updatedAt || 0),
+            current: false,
+            label: `${item.title} (${item.sessionId.slice(0, 8)}) · 原生 CLI${dirTag}`,
+          };
+        }),
+      ];
+      listViews.set(viewKey(event), { ids: chat.sessions.map((s) => s.id), items: merged, at: Date.now() });
       sessionDeletion.rememberList(event, chat.sessions);
-      await reply((sharedSessions ? '**Claude 共享会话库 · 所有 Claude Bot 可切换续接**\n\n' : '')
-        + (chat.sessions.length
-          ? chat.sessions.map((item, i) => `${i+1}. ${item.id === chat.currentSessionId ? '当前 · ' : ''}${item.title} (${item.id})${sharedSessions ? ` · 来自 ${item.claudeOriginBot || 'Claude'}` : ''}`).join('\n')
+      const heading = showAll
+        ? '**Claude 全部会话（共享库 + 本机原生 CLI）**\n\n'
+        : (sharedSessions ? '**Claude 共享会话库 · 所有 Claude Bot 可切换续接**\n\n' : '');
+      const nativeHint = hiddenNativeCount > 0
+        ? `\n\n本机原生 Claude CLI 另有 ${hiddenNativeCount} 条会话，发送 \`/list all\` 查看全部并支持 \`/switch <序号>\` 续接。`
+        : '';
+      await reply(heading
+        + (merged.length
+          ? merged.map((entry, i) => `${i + 1}. ${entry.label}`).join('\n')
           : '当前作用域下暂无会话，可直接发送消息或使用 `/new` 创建。')
+        + nativeHint
         + '\n\n使用 `/switch 序号或ID` 切换；`/rename 新标题` 或 `/rename 序号 新标题` 改名；`/new [标题]` 创建会话；`/delete 序号或ID` 预览删除，支持 `1 2`、`1-3`；按预览中的 `/confirm delete 序号或区间` 确认。'); return true;
     }
     if (command.name === '/switch') {
       if (activeJobs.has(chatId)) throw new Error('请在当前任务结束后切换会话');
-      const target = resolveSession(event, command.rest.trim());
-      if (!target) throw new Error(`未找到可访问的会话：${command.rest.trim()}，请先发送 /list 查看可用序号。`);
+      const resolved = resolveBridgeOrNativeTarget(event, command.rest.trim());
+      if (!resolved) throw new Error(`未找到可访问的会话：${command.rest.trim()}，请先发送 /list 或 /list all 查看可用序号。`);
+      if (resolved.kind === 'native') {
+        const native = resolved.native;
+        const seed = {
+          title: native.title,
+          engine: 'claude',
+          claudeSessionId: native.sessionId,
+          claudeSessionHome: native.claudeHome,
+          claudeWorkspace: native.cwd || config.workspace,
+          claudeOriginBot: '原生 CLI',
+        };
+        let bound;
+        if (sharedSessions?.bindNativeSession) {
+          bound = sharedSessions.bindNativeSession(chatId, seed, accessCtx);
+        } else {
+          bound = resetSession(chatId, native.title, accessCtx);
+          Object.assign(bound, seed);
+          saveSessions();
+        }
+        await reply(`已切换到原生 Claude 会话：${bound.title} (${bound.id})\n工作区：${bound.claudeWorkspace || config.workspace}`);
+        return true;
+      }
+      const target = resolved.session;
       sharedSessions?.assertIdle(target);
       chat.currentSessionId = target.id; saveSessions(); await reply(`当前 Claude 会话：${target.title} (${target.id})`); return true;
     }

@@ -106,6 +106,12 @@ const CONFIG = {
   engine: agentEngine.normalizeEngine(process.env.CODEX_FEISHU_ENGINE),
   antigravityCli: parseToolEnv('ANTIGRAVITY_CLI_BIN', { command: process.platform === 'win32' ? 'agy.exe' : 'agy', argsPrefix: [] }),
   antigravityHome: process.env.ANTIGRAVITY_CONFIG_DIR || path.join(os.homedir(), '.gemini'),
+  antigravityDesktopGeminiDir: (() => {
+    const raw = process.env.ANTIGRAVITY_DESKTOP_GEMINI_DIR;
+    if (raw !== undefined) return String(raw).trim();
+    const candidate = path.join(os.homedir(), '.gemini');
+    return fs.existsSync(path.join(candidate, 'antigravity', 'conversation_summaries.db')) ? candidate : '';
+  })(),
   antigravityDataRoot: process.env.ANTIGRAVITY_BRIDGE_DATA_ROOT || path.join(os.homedir(), '.antigravity-feishu'),
   antigravityBotConfig: process.env.ANTIGRAVITY_BOT_CONFIG || '',
   antigravityMcpConfig: process.env.ANTIGRAVITY_MCP_CONFIG || '',
@@ -113,10 +119,16 @@ const CONFIG = {
   antigravitySharedSessionsRoot: process.env.ANTIGRAVITY_SHARED_SESSIONS_ROOT || '',
   claudeCli: parseToolEnv('CLAUDE_CLI_BIN', { command: process.platform === 'win32' ? 'claude.exe' : 'claude', argsPrefix: [] }),
   claudeHome: process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'),
+  claudeDesktopHome: (() => {
+    const raw = process.env.CLAUDE_DESKTOP_HOME;
+    if (raw !== undefined) return String(raw).trim();
+    const candidate = path.join(os.homedir(), '.claude');
+    return fs.existsSync(candidate) ? candidate : '';
+  })(),
   claudeProviderCatalog: process.env.CLAUDE_FEISHU_PROVIDER_CATALOG || '',
   claudeProviderId: process.env.CLAUDE_FEISHU_PROVIDER_ID || '',
   claudeBotConfig: process.env.CLAUDE_FEISHU_BOT_CONFIG || '',
-  claudePermissionMode: process.env.CLAUDE_FEISHU_PERMISSION_MODE || 'manual',
+  claudePermissionMode: process.env.CLAUDE_FEISHU_PERMISSION_MODE || 'bypassPermissions',
   claudeToolsRoot: process.env.CLAUDE_FEISHU_TOOLS_ROOT || '',
   claudeSharedSessionsRoot: process.env.CLAUDE_FEISHU_SHARED_SESSIONS_ROOT
     || (process.env.CODEX_FEISHU_ENGINE === 'claude' && process.env.CLAUDE_FEISHU_TOOLS_ROOT

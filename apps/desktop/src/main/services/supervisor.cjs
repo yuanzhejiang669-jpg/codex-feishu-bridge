@@ -264,6 +264,12 @@ function processEnvironment(options, bot = null) {
     environment.ANTIGRAVITY_TOOLS_ROOT = path.join(options.dataRoot, 'antigravity-tools');
     environment.ANTIGRAVITY_SHARED_SESSIONS_ROOT = path.join(options.dataRoot, 'antigravity-shared-sessions');
     environment.ANTIGRAVITY_MCP_CONFIG = path.join(options.dataRoot, 'antigravity-tools', '.mcp.json');
+    if (options.userHome) {
+      const desktopGemini = path.join(options.userHome, '.gemini');
+      if (fs.existsSync(path.join(desktopGemini, 'antigravity', 'conversation_summaries.db'))) {
+        environment.ANTIGRAVITY_DESKTOP_GEMINI_DIR = desktopGemini;
+      }
+    }
   }
   if (normalizeEngine(bot?.engine) === 'claude') {
     environment.CLAUDE_CLI_BIN = options.claudePath || '';
@@ -273,6 +279,10 @@ function processEnvironment(options, bot = null) {
     environment.CLAUDE_FEISHU_BOT_CONFIG = bot.configPath;
     environment.CLAUDE_FEISHU_TOOLS_ROOT = path.join(options.dataRoot, 'claude-tools');
     environment.CLAUDE_FEISHU_PERMISSION_MODE = bot.claude?.permissionMode || 'bypassPermissions';
+    if (options.userHome) {
+      const desktopClaude = path.join(options.userHome, '.claude');
+      if (fs.existsSync(desktopClaude)) environment.CLAUDE_DESKTOP_HOME = desktopClaude;
+    }
   }
   return environment;
 }

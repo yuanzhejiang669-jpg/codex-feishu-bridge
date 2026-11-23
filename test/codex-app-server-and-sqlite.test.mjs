@@ -113,7 +113,7 @@ test("AppServerClient handles >16MiB multi-chunk JSON lines in linear time and c
 
   const failure = classifyCodexFailure(new Error("codex app-server stdout line exceeded 134217728 bytes limit"));
   assert.equal(failure.kind, "app_server_line_limit");
-  assert.match(failure.label, /单行输出超限/);
+  assert.match(failure.label, /单行事件输出超限/);
 });
 
 test("node:sqlite store handles quotes/SQL special chars safely without external sqlite3/python subprocesses", (t) => {
