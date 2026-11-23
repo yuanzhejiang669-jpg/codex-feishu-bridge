@@ -75,7 +75,7 @@ export function renderOverview(container, actions = {}) {
         </div>
         <div class="engine-meta-list">
           <span class="engine-meta-k">CLI 运行时</span>
-          <span class="engine-meta-v mono" title="${escapeHtml(codexRuntime.version || codexRuntime.error || "")}">${escapeHtml(codexRuntime.available ? `${codexRuntime.version || "可用"} (app-server)` : (codexRuntime.error || "未检测到"))}</span>
+          <span class="engine-meta-v mono" title="${escapeHtml(codexRuntime.cliVersion || codexRuntime.version || codexRuntime.error || "")}">${escapeHtml((codexRuntime.runtimeFound || codexRuntime.available) ? `${codexRuntime.cliVersion || codexRuntime.version || "可用"} (app-server)` : (codexRuntime.error || "未检测到"))}</span>
           <span class="engine-meta-k">当前渠道</span>
           <span class="engine-meta-v" title="${escapeHtml(codexProviderText)}">${escapeHtml(codexProviderText)}</span>
           <span class="engine-meta-k">授权策略</span>

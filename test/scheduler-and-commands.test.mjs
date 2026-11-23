@@ -819,12 +819,12 @@ test("SCHED-003 Case 7: Antigravity parses /steer as out-of-band command returni
   assert.match(replies.find((r) => r.messageId === "st-1").text, /\[原生限制\].*\/steer/);
   assert.equal(dispatcher.pendingCount, 0);
 
-  // /goal, /fast, /compact also return [原生限制] without queuing
-  for (const [id, text] of [["g1", "/goal x"], ["f1", "/fast on"], ["c1", "/compact"]]) {
-    dispatcher.enqueue({ chat_id: "chat-ag", sender_id: "u1", message_id: id, content: text });
-    await waitFor(() => replies.some((r) => r.messageId === id));
-    assert.match(replies.find((r) => r.messageId === id).text, /\[原生限制\]/);
-  }
+  // /fast also returns [原生限制] without queuing; /goal and /compact pass through natively to agy ACP
+  dispatcher.enqueue({ chat_id: "chat-ag", sender_id: "u1", message_id: "f1", content: "/fast on" });
+  await waitFor(() => replies.some((r) => r.messageId === "f1"));
+  assert.match(replies.find((r) => r.messageId === "f1").text, /\[原生限制\]/);
+  assert.equal(parseCommand("/goal finish x", { engine: "antigravity" }), null);
+  assert.equal(parseCommand("/compact", { engine: "antigravity" }), null);
 
   // New task C queues and executes after A finishes
   dispatcher.enqueue({ chat_id: "chat-ag", sender_id: "u1", message_id: "C", content: "task C" });

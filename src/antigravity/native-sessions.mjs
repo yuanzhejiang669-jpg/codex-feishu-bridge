@@ -75,6 +75,13 @@ export function listAntigravityNativeConversations({ geminiDir, appDataDir = 'an
   }
 }
 
+const UUID_RE = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
+
+function isInsideRoot(root, target) {
+  const rel = path.relative(root, target);
+  return Boolean(rel && rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel));
+}
+
 export function isAntigravityConversationBusy({ geminiDir, appDataDir = 'antigravity', conversationId } = {}) {
   if (!geminiDir || !conversationId) return false;
   const dbPath = path.join(path.resolve(geminiDir), appDataDir, 'conversation_summaries.db');
@@ -90,4 +97,77 @@ export function isAntigravityConversationBusy({ geminiDir, appDataDir = 'antigra
   } finally {
     try { db?.close(); } catch {}
   }
+}
+
+export function antigravityNativeArtifacts({ geminiDir, appDataDir = 'antigravity', conversationId } = {}) {
+  const id = String(conversationId || '').trim();
+  if (!geminiDir || !id || !UUID_RE.test(id)) return [];
+  const baseDir = path.join(path.resolve(geminiDir), appDataDir);
+  if (!fs.existsSync(baseDir)) return [];
+  const root = fs.realpathSync(baseDir);
+  const candidates = [
+    path.join(root, 'conversations', `${id}.pb`),
+    path.join(root, 'conversations', `${id}.pb.bak`),
+    path.join(root, 'annotations', `${id}.pbtxt`),
+    path.join(root, 'brain', id),
+    path.join(root, 'implicit', `${id}.pb`),
+  ];
+  const found = [];
+  for (const target of candidates) {
+    try {
+      const st = fs.lstatSync(target);
+      if (st.isSymbolicLink() || !isInsideRoot(root, target)) continue;
+      found.push(target);
+    } catch {}
+  }
+  return found;
+}
+
+export function deleteAntigravityNativeConversation({ geminiDir, appDataDir = 'antigravity', conversationId } = {}) {
+  const id = String(conversationId || '').trim();
+  if (!geminiDir || !id || !UUID_RE.test(id)) {
+    throw new Error(`Antigravity 原生会话 ID 无效，已拒绝删除：${id}`);
+  }
+  if (isAntigravityConversationBusy({ geminiDir, appDataDir, conversationId: id })) {
+    throw new Error(`对话 ${id.slice(0, 8)} 正在 Antigravity 客户端中运行，请等待结束后再删除。`);
+  }
+  const baseDir = path.join(path.resolve(geminiDir), appDataDir);
+  const dbPath = path.join(baseDir, 'conversation_summaries.db');
+  const artifacts = antigravityNativeArtifacts({ geminiDir, appDataDir, conversationId: id });
+  let db;
+  if (fs.existsSync(dbPath)) {
+    try {
+      db = new DatabaseSync(dbPath);
+      db.exec('PRAGMA busy_timeout = 3000;');
+      const tables = new Set(
+        db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((row) => String(row.name)),
+      );
+      db.exec('BEGIN IMMEDIATE;');
+      if (tables.has('conversation_summaries')) {
+        db.prepare('DELETE FROM conversation_summaries WHERE conversation_id = ?').run(id);
+      }
+      if (tables.has('conversations_fts')) {
+        try {
+          db.prepare('DELETE FROM conversations_fts WHERE conversation_id = ?').run(id);
+        } catch {}
+      }
+      if (tables.has('conversation_parents')) {
+        db.prepare('DELETE FROM conversation_parents WHERE conversation_id = ? OR parent_id = ?').run(id, id);
+      }
+      db.exec('COMMIT;');
+    } catch (error) {
+      try { db?.exec('ROLLBACK;'); } catch {}
+      throw new Error(`清理 Antigravity 会话索引失败：${error?.message || error}`);
+    } finally {
+      try { db?.close(); } catch {}
+    }
+  }
+  const removedPaths = [];
+  for (const target of artifacts) {
+    try {
+      fs.rmSync(target, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+      removedPaths.push(target);
+    } catch {}
+  }
+  return { deleted: true, conversationId: id, removedPaths };
 }

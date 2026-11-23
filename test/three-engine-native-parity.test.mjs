@@ -452,3 +452,149 @@ test('Claude defaults to bypassPermissions, raises line limit to >=128MiB, fixes
   assert.equal(classifyCodexFailure(new Error('Claude Code 返回的单条事件超过上限 (134217728 bytes)')).kind, 'app_server_line_limit');
   assert.equal(classifyCodexFailure(new Error('Antigravity 单条事件超过上限 (134217728 bytes)')).kind, 'app_server_line_limit');
 });
+
+test('Antigravity supports native /goal & /compact pass-through plus batch/range /delete 1 3-4 across Bridge & native stores with busy/SEC-001 guards', async (t) => {
+  for (const cmd of ['/goal build x', '/compact', '/plan step 1', '/boost deep', '/teamwork big', '/swarm run', '/schedule every 5m', '/browser open', '/grill-me', '/learn', '/btw hi']) {
+    assert.equal(parseCommand(cmd, { engine: 'antigravity' }), null, `${cmd} should pass through natively`);
+  }
+  assert.equal(parseCommand('/steer 1', { engine: 'antigravity' })?.name, '/steer');
+  assert.equal(parseCommand('/fast on', { engine: 'antigravity' })?.name, '/fast');
+
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cfb-agy-del-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }));
+
+  const stateDir = path.join(root, 'state');
+  const logDir = path.join(root, 'logs');
+  const agyHome = path.join(root, 'agy-home');
+  const desktopGeminiDir = path.join(root, 'desktop-gemini');
+  const desktopAppDir = path.join(desktopGeminiDir, 'antigravity');
+  const cliAppDir = path.join(agyHome, 'antigravity-cli');
+  const sharedRoot = path.join(root, 'antigravity-shared-sessions');
+  const workspace = path.join(root, 'ws-agy');
+  for (const dir of [stateDir, logDir, agyHome, desktopAppDir, cliAppDir, sharedRoot, workspace]) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+
+  const initDb = (dir, appDataDir, rows) => {
+    const db = new DatabaseSync(path.join(dir, 'conversation_summaries.db'));
+    db.exec(`
+      CREATE TABLE conversation_summaries (
+        conversation_id text PRIMARY KEY,
+        title text NOT NULL DEFAULT "",
+        preview text NOT NULL DEFAULT "",
+        step_count integer NOT NULL DEFAULT 0,
+        last_modified_time datetime NOT NULL,
+        workspace_uris text NOT NULL,
+        status text NOT NULL DEFAULT "",
+        not_fully_idle numeric NOT NULL DEFAULT false,
+        killed numeric NOT NULL DEFAULT false,
+        parent_conversation_id text NOT NULL DEFAULT "",
+        app_data_dir text NOT NULL DEFAULT "antigravity"
+      );
+    `);
+    const ins = db.prepare(`INSERT INTO conversation_summaries (conversation_id, title, preview, step_count, last_modified_time, workspace_uris, status, not_fully_idle, killed, parent_conversation_id, app_data_dir) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+    for (const r of rows) {
+      ins.run(r.id, r.title, '', 5, r.ts, workspace, r.busy ? 'running' : 'idle', r.busy ? 1 : 0, 0, '', appDataDir);
+      fs.mkdirSync(path.join(dir, 'conversations'), { recursive: true });
+      fs.mkdirSync(path.join(dir, 'brain', r.id), { recursive: true });
+      fs.writeFileSync(path.join(dir, 'conversations', `${r.id}.pb`), 'pb-data');
+      fs.writeFileSync(path.join(dir, 'brain', r.id, 'note.md'), 'artifact');
+    }
+    db.close();
+  };
+
+  const busyUuid = '11111111-1111-4111-8111-111111111111';
+  const idleDeskUuid = '22222222-2222-4222-8222-222222222222';
+  const idleCliUuid = '33333333-3333-4333-8333-333333333333';
+  initDb(desktopAppDir, 'antigravity', [
+    { id: busyUuid, title: 'Busy Desktop Conv', ts: '2026-11-23 12:00:00.000+00:00', busy: true },
+    { id: idleDeskUuid, title: 'Idle Desktop Conv', ts: '2026-11-23 11:00:00.000+00:00', busy: false },
+  ]);
+  initDb(cliAppDir, 'antigravity-cli', [
+    { id: idleCliUuid, title: 'Idle CLI Conv', ts: '2026-11-23 10:00:00.000+00:00', busy: false },
+  ]);
+
+  const botConfigPath = path.join(root, 'bot.json');
+  fs.writeFileSync(botConfigPath, JSON.stringify({
+    engine: 'antigravity',
+    provider: { id: 'official', model: '', reasoning: '' },
+    antigravity: { permissionMode: 'always-proceed' },
+  }));
+
+  const config = {
+    engine: 'antigravity',
+    larkProfile: 'antigravity-5',
+    stateDir,
+    logDir,
+    workspace,
+    antigravityHome: agyHome,
+    antigravityDesktopGeminiDir: desktopGeminiDir,
+    antigravityDataRoot: root,
+    antigravityBotConfig: botConfigPath,
+    antigravitySharedSessionsRoot: sharedRoot,
+    ownerOpenId: 'ou_owner999',
+    antigravityCli: { command: 'agy' },
+  };
+  const sharedStore = createSharedClaudeSessionStore({
+    config,
+    sources: [{ bot: 'antigravity-5', home: agyHome, workspace, stateFile: path.join(stateDir, 'sessions.json') }],
+    sessionsPath: path.join(stateDir, 'sessions.json'),
+    createSessionData: (title) => ({ id: 'bridge01', title, engine: 'antigravity', createdAt: Date.now(), updatedAt: Date.now(), messages: [], antigravitySessionId: '' }),
+  });
+  const replies = [];
+  const bridge = createAntigravityBridge({
+    config,
+    getSession: sharedStore.getSession,
+    getChatState: sharedStore.getChatState,
+    getChats: sharedStore.getChats,
+    resetSession: sharedStore.resetSession,
+    saveSessions: sharedStore.saveSessions,
+    sharedSessions: sharedStore.shared,
+    userText: (c) => String(c || ''),
+    sendMarkdown: async (_c, text) => { replies.push(text); },
+    activeChildren: new Map(),
+    activeJobs: new Map(),
+    appendText: () => {},
+    reduceEvent: () => {},
+    markPhase: () => {},
+    ensureDone: () => {},
+    markInterrupted: () => {},
+    markError: () => {},
+    queueSummary: () => '无',
+  });
+
+  const dmEvt = { chat_id: 'oc_dm', chat_type: 'p2p', sender_id: 'ou_owner999', message_id: 'm1' };
+  const grpEvt = { chat_id: 'oc_grp', chat_type: 'group', sender_id: 'ou_owner999', message_id: 'm2' };
+
+  // Seed Bridge session #1
+  sharedStore.getSession(dmEvt.chat_id, sharedStore.shared.accessContextForEvent(dmEvt));
+  sharedStore.saveSessions();
+
+  // /list all -> 1=Bridge, 2=Busy Desktop, 3=Idle Desktop, 4=Idle CLI
+  await bridge.handleCommand(dmEvt, { name: '/list', rest: 'all' });
+  assert.match(replies.at(-1), /\*\*1\.\*\*/);
+  assert.match(replies.at(-1), /\*\*4\.\*\*/);
+
+  // Trying to include busy item #2 rejects cleanly
+  await assert.rejects(() => bridge.handleCommand(dmEvt, { name: '/delete', rest: '1 2-4' }), /正在 Antigravity 客户端中运行/);
+
+  // Group chat cannot delete native UUID (SEC-001)
+  await bridge.handleCommand(grpEvt, { name: '/delete', rest: idleDeskUuid });
+  assert.match(replies.at(-1), /未找到可访问的会话/);
+
+  // Owner DM batch/range /delete 1 3-4 -> preview -> /confirm delete 1 3-4 deletes all 3 cleanly!
+  await bridge.handleCommand(dmEvt, { name: '/delete', rest: '1 3-4' });
+  assert.match(replies.at(-1), /待删除：3 条/);
+  assert.match(replies.at(-1), /\/confirm delete 1 3-4/);
+
+  await bridge.handleCommand(dmEvt, { name: '/confirm', rest: 'delete 1 3-4' });
+  assert.match(replies.at(-1), /已删除 3 条会话（共享绑定 1 条，原生对话记录 2 条）/);
+
+  // Verify idle Desktop & CLI artifacts and DB rows are gone while busy conversation stays untouched
+  assert.equal(fs.existsSync(path.join(desktopAppDir, 'conversations', `${idleDeskUuid}.pb`)), false);
+  assert.equal(fs.existsSync(path.join(desktopAppDir, 'brain', idleDeskUuid)), false);
+  assert.equal(fs.existsSync(path.join(cliAppDir, 'conversations', `${idleCliUuid}.pb`)), false);
+  assert.equal(fs.existsSync(path.join(desktopAppDir, 'conversations', `${busyUuid}.pb`)), true);
+  assert.equal(listAntigravityNativeConversations({ geminiDir: desktopGeminiDir, appDataDir: 'antigravity' }).length, 1);
+  assert.equal(listAntigravityNativeConversations({ geminiDir: agyHome, appDataDir: 'antigravity-cli' }).length, 0);
+});

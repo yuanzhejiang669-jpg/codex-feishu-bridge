@@ -89,9 +89,10 @@ test('provider secrets are isolated and redacted; native slash commands remain n
   assert.equal(api.GEMINI_API_KEY, 'test-secret');
   assert.throws(() => antigravityEnvironment({}, { mode: 'gemini-api' }), /Key/);
   assert.ok(!safeMessage('echo test-secret Bearer abc sk-example', ['test-secret']).includes('test-secret'));
-  assert.equal(parseCommand('/compact', { engine: 'antigravity' }).name, '/compact');
+  assert.equal(parseCommand('/compact', { engine: 'antigravity' }), null);
   assert.equal(parseCommand('/steer 1', { engine: 'antigravity' }).name, '/steer');
-  assert.equal(parseCommand('/goal do x', { engine: 'antigravity' }).name, '/goal');
+  assert.equal(parseCommand('/goal do x', { engine: 'antigravity' }), null);
+  assert.equal(parseCommand('/swarm parallel task', { engine: 'antigravity' }), null);
   assert.equal(parseCommand('/fast on', { engine: 'antigravity' }).name, '/fast');
   assert.equal(parseCommand('/eli5 hello', { engine: 'antigravity' }), null);
   assert.equal(parseCommand('/context', { engine: 'antigravity' }).name, '/context');

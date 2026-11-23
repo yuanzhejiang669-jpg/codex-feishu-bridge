@@ -206,14 +206,25 @@ async function probeMcpHealth(options = {}) {
     const lowerName = name.toLowerCase();
 
     if (lowerName === "codex_browser_control") {
+      const scriptArg = (Array.isArray(primary.args) ? primary.args : [])
+        .map((arg) => String(arg || "").trim())
+        .find((arg) => /\.(?:m?js|cjs)$/i.test(arg)) || "";
+      const scriptMissing = Boolean(scriptArg && !fs.existsSync(scriptArg));
       const bridgeProbe = await probeLocalLoopbackBridge(fetchImpl);
+      const isOnline = bridgeProbe.status === "ok";
       servers.push({
         name,
         engines,
         active: true,
         disabled: false,
-        status: commandAvailable === false ? "error" : bridgeProbe.status,
-        detail: commandAvailable === false ? `命令不可用：${command}` : bridgeProbe.detail,
+        status: commandAvailable === false || scriptMissing ? "error" : "ok",
+        detail: commandAvailable === false
+          ? `命令不可用：${command}`
+          : scriptMissing
+            ? `脚本不存在：${scriptArg}`
+            : isOnline
+              ? bridgeProbe.detail
+              : "命令与脚本就绪（Edge 扩展桥 127.0.0.1:18795 按需启动，当前空闲）",
         commandAvailable,
       });
       continue;

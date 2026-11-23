@@ -7,7 +7,13 @@ import accountLock from './account-lock.cjs';
 import { feishuMcpConfiguration } from '../claude/feishu-tools.mjs';
 import { applyCloakBrowserIsolationToServer, resolveCloakBrowserDirs } from '../config/cloakbrowser.mjs';
 import { buildAccessContext, isOwnerDmContext } from '../sessions/access-control.mjs';
-import { isAntigravityConversationBusy, listAntigravityNativeConversations } from './native-sessions.mjs';
+import { compressIndexes, parseDeleteSelectionSpec } from '../sessions/delete-selection.mjs';
+import {
+  antigravityNativeArtifacts,
+  deleteAntigravityNativeConversation,
+  isAntigravityConversationBusy,
+  listAntigravityNativeConversations,
+} from './native-sessions.mjs';
 
 const { readCatalog, readJson, atomicJson, selectProvider, assertOfficialAccount, EFFORTS, NATIVE_MODES } = configuration;
 const EFFORT_ORDER = ['low', 'medium', 'high', 'xhigh', 'max'];
@@ -455,16 +461,8 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
       await reply('[原生限制] Antigravity 原生 ACP 协议不支持回合内 /steer，请等待本轮结束或发送 /stop 后重新提问。');
       return true;
     }
-    if (command.name === '/goal') {
-      await reply('[原生限制] Antigravity 原生 ACP 协议不支持 Codex /goal 模式，请直接发送任务目标。');
-      return true;
-    }
     if (command.name === '/fast') {
       await reply('[原生限制] Antigravity 原生 ACP 协议不支持 Codex /fast 服务档位，当前模型与思考强度保持原设置。');
-      return true;
-    }
-    if (command.name === '/compact') {
-      await reply('[原生限制] Antigravity 原生 ACP 协议暂不支持 Bridge /compact 指令，请使用 /new 开启新会话。');
       return true;
     }
     if (['/approve', '/deny'].includes(command.name)) {
@@ -475,14 +473,14 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
     }
     if (command.name === '/help') {
       await reply(['**Antigravity Bot · 官方 CLI / ACP**',
-        '/new [标题] · /list [all] · /switch 序号或ID · /rename 标题 · /reset',
-        '/delete 序号 · /confirm delete 序号（删除共享 Bridge 绑定，保留原生历史）',
+        '/new [标题] · /list [all] · /switch 序号或ID · /rename [序号] 新标题 · /reset',
+        '/delete <序号或区间>（支持 `1 3-14`、`1-3`）· /confirm delete <预览中的序号或区间>',
         '/provider [list|渠道ID|save|clear] · /model [status|list|refresh|模型ID [强度]|save|clear]',
         '/effort [low|medium|high|xhigh|max|clear]（独立切换思考强度，以所选模型支持为准）',
         '/mode [always-proceed|auto|accept-edits|default|plan] · /context · /status',
         '/stop · /stopall · /queue · /clearqueue [all] · /approve · /deny',
-        '原生技能与 /plan 等斜杠指令通过正常任务队列交给 Antigravity。',
-        '不支持的指令（[原生限制]）：/steer、/goal、/fast、/compact、/model test。',
+        '原生斜杠指令直接透传执行：/goal · /compact · /plan · /boost · /teamwork · /swarm · /schedule · /browser · /grill-me · /learn · /btw 及全部原生技能。',
+        '不支持的指令（[原生限制]）：/steer、/fast、/model test。',
         '官方账号登录与手动切换请在客户端的 Antigravity 区域操作；不会自动轮换账号。'].join('\n')); return true;
     }
     if (command.name === '/new' || command.name === '/reset') {
@@ -523,11 +521,11 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
       listViews.set(viewKey(event), { at: Date.now(), items: merged });
       const title = showAll ? '**Antigravity 全部会话（共享库 + 客户端侧边栏）**' : '**Antigravity 共享会话库**';
       const body = merged.length
-        ? merged.map((entry, index) => `${index + 1}. ${entry.label}`).join('\n')
+        ? merged.map((entry, index) => `**${index + 1}.** ${entry.label}`).join('\n')
         : '当前作用域下暂无会话，可直接发送消息或使用 `/new` 创建。';
       const footer = [
         hiddenDesktopCount > 0 ? `Antigravity 客户端侧边栏另有 ${hiddenDesktopCount} 条原生对话，发送 \`/list all\` 查看全部并支持 \`/switch <序号>\` 续接。` : '',
-        '发送 `/switch <序号或ID>` 切换续接；`/new [标题]` 新建对话。',
+        '发送 `/switch <序号或ID>` 切换续接；`/delete 1 3-5` 预览批量删除；`/new [标题]` 新建对话。',
       ].filter(Boolean).join('\n');
       await reply(`${title}\n${body}\n\n${footer}`);
       return true;
@@ -578,32 +576,225 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
     }
     if (['/delete', '/del', '/rm'].includes(command.name)) {
       if (activeJobs.has(event.chat_id)) { await reply('当前聊天有任务正在运行，请先 /stop 或等待结束后再执行 /delete。'); return true; }
-      const target = resolveSession(event, command.rest.trim());
-      if (!target) { await reply(`未找到可访问的会话：${command.rest.trim()}，请先发送 /list 查看可用序号。`); return true; }
-      deleteViews.set(viewKey(event), { id: target.id, nativeId: target.antigravitySessionId || '', selector: command.rest.trim(), at: Date.now() });
-      sharedSessions?.assertIdle(target);
-      await reply(`删除预览：${target.title} (${target.id})\n确认：/confirm delete ${command.rest.trim()}\n删除所有 Antigravity Bot 中的此共享 Bridge 绑定；原生历史和工作区文件保留。`); return true;
+      const rawSpec = command.rest.trim();
+      if (!rawSpec) {
+        await reply('用法：`/delete <序号或ID>`，支持批量与区间（例如 `/delete 1 3-14`、`/delete 2,5-8`）。请先 `/list` 或 `/list all` 查看序号。');
+        return true;
+      }
+      for (const token of rawSpec.split(/[\s,，、]+/)) {
+        if (/^\d+(?:[-~～]\d+)?$/.test(token) && token.split(/[-~～]/).some((part) => Number(part) > 10_000)) {
+          await reply('会话序号超出范围，请先发送 `/list` 或 `/list all` 查看有效序号。');
+          return true;
+        }
+      }
+      const parsed = parseDeleteSelectionSpec(rawSpec);
+      if (parsed.error) {
+        await reply(parsed.error === 'empty' ? '请输入会话序号或 ID。' : parsed.error);
+        return true;
+      }
+
+      const view = listViews.get(viewKey(event));
+      const viewValid = Boolean(view && Date.now() - view.at <= 5 * 60_000 && Array.isArray(view.items));
+      const resolvedItems = [];
+
+      const pushResolved = (resolved, index) => {
+        if (!resolved) return false;
+        if (resolved.kind === 'bridge') {
+          const s = resolved.session;
+          const nativeId = String(s.antigravitySessionId || '').trim();
+          const targetInfo = nativeId ? resolveSessionTarget(s, selectProvider(catalogRoot, settings(s).provider)) : null;
+          resolvedItems.push({
+            index,
+            kind: 'bridge',
+            id: s.id,
+            nativeId,
+            title: s.title || '未命名会话',
+            sourceLabel: s.antigravityAppDataDir === 'antigravity' ? '共享绑定 + 客户端侧边栏' : '共享会话绑定',
+            geminiDir: targetInfo?.geminiDir || '',
+            appDataDir: targetInfo?.appDataDir || '',
+          });
+          return true;
+        }
+        if (resolved.kind === 'native') {
+          if (!isOwnerDmContext(accessCtx)) return false;
+          const n = resolved.native;
+          resolvedItems.push({
+            index,
+            kind: 'native',
+            id: n.conversationId.slice(0, 8),
+            nativeId: n.conversationId,
+            title: n.title || n.conversationId.slice(0, 8),
+            sourceLabel: n.sourceLabel || (n.appDataDir === 'antigravity' ? '客户端侧边栏' : 'Bridge 原生库'),
+            geminiDir: n.geminiDir,
+            appDataDir: n.appDataDir,
+          });
+          return true;
+        }
+        return false;
+      };
+
+      if (parsed.indexes) {
+        const directSingle = parsed.indexes.length === 1 && !parsed.isBatch
+          ? chat.sessions.find((item) => item.id === rawSpec || item.antigravitySessionId === rawSpec)
+          : null;
+        if (directSingle) {
+          pushResolved({ kind: 'bridge', session: directSingle }, chat.sessions.indexOf(directSingle) + 1);
+        } else {
+          if (!viewValid && parsed.indexes.some((idx) => idx > chat.sessions.length)) {
+            await reply('请先发送 `/list` 或 `/list all` 获取最新会话序号后再删除。');
+            return true;
+          }
+          for (const idx of parsed.indexes) {
+            if (viewValid) {
+              const entry = view.items[idx - 1];
+              if (!entry) { await reply(`未找到序号 ${idx} 对应的会话，请先发送 /list 或 /list all 查看可用序号。`); return true; }
+              if (entry.kind === 'native') {
+                if (!pushResolved({ kind: 'native', native: entry.native }, idx)) {
+                  await reply(`无权删除序号 ${idx} 对应的原生会话。`);
+                  return true;
+                }
+              } else {
+                const found = chat.sessions.find((item) => item.id === entry.id);
+                if (!found) { await reply(`序号 ${idx} 对应的会话已不存在，请重新 /list。`); return true; }
+                pushResolved({ kind: 'bridge', session: found }, idx);
+              }
+            } else {
+              const found = chat.sessions[idx - 1];
+              if (!found) { await reply(`未找到序号 ${idx} 对应的会话，请先发送 /list 查看可用序号。`); return true; }
+              pushResolved({ kind: 'bridge', session: found }, idx);
+            }
+          }
+        }
+      } else {
+        const resolved = resolveBridgeOrNativeTarget(event, parsed.target);
+        if (!resolved || !pushResolved(resolved, 1)) {
+          await reply(`未找到可访问的会话：${rawSpec}，请先发送 /list 或 /list all 查看可用序号。`);
+          return true;
+        }
+      }
+
+      if (!resolvedItems.length) {
+        await reply(`未找到可访问的会话：${rawSpec}，请先发送 /list 或 /list all 查看可用序号。`);
+        return true;
+      }
+
+      let artifactCount = 0;
+      for (const item of resolvedItems) {
+        if (item.kind === 'bridge') {
+          const found = chat.sessions.find((s) => s.id === item.id);
+          if (!found) throw new Error('会话绑定已变化，请重新 /list 预览');
+          if ([...activeJobs.values()].some((job) => job.sessionId === found.id)) {
+            throw new Error(`会话「${item.title}」正在运行，不能删除`);
+          }
+          sharedSessions?.assertIdle(found);
+        }
+        if (item.nativeId && item.geminiDir) {
+          if (isAntigravityConversationBusy({ geminiDir: item.geminiDir, appDataDir: item.appDataDir, conversationId: item.nativeId })) {
+            throw new Error(`对话「${item.title}」正在 Antigravity 客户端中运行，请等待结束后再删除。`);
+          }
+          artifactCount += antigravityNativeArtifacts({ geminiDir: item.geminiDir, appDataDir: item.appDataDir, conversationId: item.nativeId }).length;
+        }
+      }
+
+      const confirmText = parsed.indexes ? compressIndexes(resolvedItems.map((item) => item.index)) : rawSpec;
+      const ttl = Number(config.deleteConfirmTtlMs) > 0 ? Number(config.deleteConfirmTtlMs) : 5 * 60_000;
+      const expiresAt = Date.now() + ttl;
+      deleteViews.set(viewKey(event), { items: resolvedItems, confirmText, isIndexSpec: Boolean(parsed.indexes), at: Date.now(), expiresAt });
+
+      const previewLines = resolvedItems.slice(0, 20).map((item) => (
+        `**${item.index}.** ${item.title} · \`${item.id}\` · ${item.sourceLabel}${item.kind === 'bridge' && item.id === chat.currentSessionId ? ' · 当前会话' : ''}`
+      ));
+      if (resolvedItems.length > 20) previewLines.push(`… 其余 ${resolvedItems.length - 20} 条已省略`);
+      await reply([
+        '**Antigravity 会话删除确认**',
+        '',
+        `待删除：${resolvedItems.length} 条（关联本地会话文件/目录 ${artifactCount} 个）；工作区代码与文件完整保留。`,
+        ...previewLines,
+        '',
+        `确认删除请输入：\`/confirm delete ${confirmText}\``,
+      ].join('\n'));
+      return true;
     }
     if (command.name === '/confirm') {
       if (activeJobs.has(event.chat_id)) { await reply('当前聊天有任务正在运行，请先 /stop 或等待结束后再执行 /delete。'); return true; }
       const pending = deleteViews.get(viewKey(event));
-      if (!pending || Date.now() - pending.at > 5 * 60_000 || command.rest.trim() !== `delete ${pending.selector}`) { await reply('删除确认无效或过期，请重新 /delete 预览。'); return true; }
-      const target = chat.sessions.find((item) => item.id === pending.id);
-      if (!target || (target.antigravitySessionId || '') !== pending.nativeId) throw new Error('会话绑定已变化，请重新预览');
-      if ([...activeJobs.values()].some((job) => job.sessionId === target.id)) throw new Error('会话正在运行，不能删除');
-      const release = sharedSessions
-        ? (sharedSessions.acquireManyAsync ? await sharedSessions.acquireManyAsync([target]) : sharedSessions.acquireMany([target]))
+      const match = command.rest.trim().match(/^delete\s+(.+)$/i);
+      if (!pending || !match || Date.now() > (pending.expiresAt || pending.at + 5 * 60_000)) {
+        await reply('删除确认无效或过期，请重新 /delete 预览。');
+        return true;
+      }
+      const confirmArg = match[1].trim();
+      let matched = confirmArg === pending.confirmText;
+      if (!matched && pending.isIndexSpec) {
+        const parsedConfirm = parseDeleteSelectionSpec(confirmArg);
+        if (parsedConfirm.indexes && compressIndexes(parsedConfirm.indexes) === pending.confirmText) matched = true;
+      }
+      if (!matched) {
+        await reply(`删除确认与预览不一致，请输入 \`/confirm delete ${pending.confirmText}\` 或重新 /delete 预览。`);
+        return true;
+      }
+
+      const bridgeItems = pending.items.filter((item) => item.kind === 'bridge');
+      const nativeItems = pending.items.filter((item) => item.kind === 'native');
+      const bridgeTargets = bridgeItems.map((item) => {
+        const found = chat.sessions.find((s) => s.id === item.id);
+        if (!found || String(found.antigravitySessionId || '').trim() !== item.nativeId) {
+          throw new Error('会话绑定已变化，请重新 /list 并 /delete 预览');
+        }
+        if ([...activeJobs.values()].some((job) => job.sessionId === found.id)) {
+          throw new Error(`会话「${item.title}」正在运行，不能删除`);
+        }
+        return { item, session: found };
+      });
+      for (const item of pending.items) {
+        if (item.nativeId && item.geminiDir
+          && isAntigravityConversationBusy({ geminiDir: item.geminiDir, appDataDir: item.appDataDir, conversationId: item.nativeId })) {
+          throw new Error(`对话「${item.title}」正在 Antigravity 客户端中运行，已取消本次删除。`);
+        }
+      }
+
+      const release = bridgeTargets.length && sharedSessions
+        ? (sharedSessions.acquireManyAsync
+          ? await sharedSessions.acquireManyAsync(bridgeTargets.map((entry) => entry.session))
+          : sharedSessions.acquireMany(bridgeTargets.map((entry) => entry.session)))
         : null;
+      let removedBridgeCount = 0;
+      let removedNativeCount = 0;
+      const deletedNativeIds = new Set();
       try {
-        if (sharedSessions?.removeAsync) await sharedSessions.removeAsync([target.id], accessCtx);
-        else sharedSessions?.remove([target.id], accessCtx);
-        chat.sessions = chat.sessions.filter((item) => item.id !== target.id);
-        if (chat.currentSessionId === target.id) chat.currentSessionId = chat.sessions[0]?.id || '';
+        if (bridgeTargets.length) {
+          const removeIds = bridgeTargets.map((entry) => entry.session.id);
+          const removeSet = new Set(removeIds);
+          if (sharedSessions?.removeAsync) await sharedSessions.removeAsync(removeIds, accessCtx);
+          else sharedSessions?.remove(removeIds, accessCtx);
+          chat.sessions = chat.sessions.filter((item) => !removeSet.has(item.id));
+          if (removeSet.has(chat.currentSessionId)) chat.currentSessionId = chat.sessions[0]?.id || '';
+          if (sharedSessions?.saveSessionsAsync) await sharedSessions.saveSessionsAsync();
+          else saveSessions();
+          removedBridgeCount = removeIds.length;
+        }
+        for (const { item } of bridgeTargets) {
+          if (item.nativeId && item.geminiDir && !deletedNativeIds.has(`${item.geminiDir}\0${item.appDataDir}\0${item.nativeId}`)) {
+            try {
+              deleteAntigravityNativeConversation({ geminiDir: item.geminiDir, appDataDir: item.appDataDir, conversationId: item.nativeId });
+              deletedNativeIds.add(`${item.geminiDir}\0${item.appDataDir}\0${item.nativeId}`);
+              removedNativeCount += 1;
+            } catch {}
+          }
+        }
+        for (const item of nativeItems) {
+          if (!isOwnerDmContext(accessCtx)) throw new Error('仅主用户私聊允许删除本机原生对话');
+          const key = `${item.geminiDir}\0${item.appDataDir}\0${item.nativeId}`;
+          if (deletedNativeIds.has(key)) continue;
+          deleteAntigravityNativeConversation({ geminiDir: item.geminiDir, appDataDir: item.appDataDir, conversationId: item.nativeId });
+          deletedNativeIds.add(key);
+          removedNativeCount += 1;
+        }
         deleteViews.delete(viewKey(event));
-        if (sharedSessions?.saveSessionsAsync) await sharedSessions.saveSessionsAsync();
-        else saveSessions();
+        listViews.delete(viewKey(event));
       } finally { release?.(); }
-      await reply('已删除所选共享 Bridge 会话绑定，原生历史与文件保留。'); return true;
+      await reply(`已删除 ${pending.items.length} 条会话（共享绑定 ${removedBridgeCount} 条，原生对话记录 ${removedNativeCount} 条），工作区文件已保留。`);
+      return true;
     }
     const session = currentSession();
     if (['/status', '/now', '/how', '/context'].includes(command.name)) {
