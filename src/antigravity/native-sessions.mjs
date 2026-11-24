@@ -70,6 +70,12 @@ export function listAntigravityNativeConversations({ geminiDir, appDataDir = 'an
     return rows
       .filter((row) => row && typeof row.conversation_id === 'string' && row.conversation_id.trim())
       .filter((row) => !hasConversationsDir || hasConversationStoreFile(baseDir, row.conversation_id.trim()))
+      .filter((row) => !(
+        Number(row.step_count || 0) === 0
+        && !String(row.title || '').trim()
+        && !String(row.preview || '').trim()
+        && parseTimestamp(row.last_modified_time) <= 0
+      ))
       .map((row) => {
         const status = String(row.status || '').trim();
         const notFullyIdle = Boolean(Number(row.not_fully_idle));

@@ -228,6 +228,8 @@ export function createClaudeBridge({ config, getSession, getChatState, getChats,
     const releaseSession = sharedSessions
       ? (sharedSessions.acquireAsync ? await sharedSessions.acquireAsync(session) : sharedSessions.acquire(session))
       : null;
+    let resolveFinished;
+    const finished = new Promise((resolve) => { resolveFinished = resolve; });
     let client;
     try { client = createClient({ command: config.claudeCli.command, cwd: workspace,
       home: nativeHome, toolHome: config.claudeHome, provider: { ...definition, model: selected.model, apiKey },
@@ -241,14 +243,18 @@ export function createClaudeBridge({ config, getSession, getChatState, getChats,
       onSession: (id) => { session.engine = 'claude'; session.claudeSessionId = id; saveSessions(); },
       onPermission: (request) => (selected.permissionMode === 'bypassPermissions' ? true : requestPermission(event, request)),
       onStarted: (child) => {
-        activeChildren.set(child.pid, { child, label: 'Claude Code CLI' });
+        if (child?.pid !== undefined) activeChildren.set(child.pid, { child, label: 'Claude Code CLI' });
         activeJobs.set(event.chat_id, {
-          pid: child.pid, mode: 'claude', client, startedAt,
+          pid: child?.pid, mode: 'claude', client, startedAt, finished,
           messageId: event.message_id || event.id, sessionId: session.id,
           clearGeneration: 0, pendingSteerEntries: [], steerInFlight: null,
         });
       },
-      onClosed: (child) => { activeChildren.delete(child.pid); if (activeJobs.get(event.chat_id)?.pid === child.pid) activeJobs.delete(event.chat_id); },
+      onClosed: (child) => {
+        if (child?.pid !== undefined) activeChildren.delete(child.pid);
+        if (activeJobs.get(event.chat_id)?.client === client) activeJobs.delete(event.chat_id);
+        resolveFinished?.();
+      },
       onEvent: (item) => {
         if (item.type === 'permission_cancelled') {
           for (const [token, pending] of permissions) if (pending.id === item.id) { pending.resolve(false); permissions.delete(token); }
@@ -342,6 +348,8 @@ export function createClaudeBridge({ config, getSession, getChatState, getChats,
       throw error;
     } finally {
       clearTimeout(flushTimer);
+      if (activeJobs.get(event.chat_id)?.client === client) activeJobs.delete(event.chat_id);
+      resolveFinished?.();
       releaseSession?.();
       for (const [token, pending] of permissions) if (pending.sessionId === sessionId) {
         permissions.delete(token); pending.resolve(false);

@@ -152,13 +152,14 @@ export function createCommandRouter(deps = {}) {
 
   async function handleCommand(event, command) {
     const chatId = event.chat_id;
-    const accessCtx = recordChatScope(chatId, event);
-    if (CONFIG.engine === 'antigravity' && await antigravityBridge.handleCommand(event, command)) return;
     const messageId = event.message_id || event.id || chatId;
-    log("INFO", "command received", { messageId, chatId, command: command.name });
-    if (CONFIG.engine === 'claude' && await claudeBridge.handleCommand(event, command)) return;
+    try {
+      const accessCtx = recordChatScope(chatId, event);
+      if (CONFIG.engine === 'antigravity' && await antigravityBridge.handleCommand(event, command)) return;
+      log("INFO", "command received", { messageId, chatId, command: command.name });
+      if (CONFIG.engine === 'claude' && await claudeBridge.handleCommand(event, command)) return;
 
-    switch (command.name) {
+      switch (command.name) {
       case "/help":
         await sendMarkdown(chatId, helpMarkdown(), "help", messageId);
         return;
@@ -255,6 +256,23 @@ export function createCommandRouter(deps = {}) {
       }
       default:
         await sendMarkdown(chatId, `未知命令：\`${command.name}\`\n\n发送 \`/help\` 查看可用命令。`, "unknown-command", messageId);
+      }
+    } catch (error) {
+      log("ERROR", "command handling failed", {
+        messageId,
+        chatId,
+        command: command?.name || "",
+        error: String(error?.stack || error),
+      });
+      const detail = truncateCardText(errorText(error), 1200);
+      const replyMd = `**${ENGINE_LABEL} 指令失败（\`${command?.name || "/command"}\`）**\n\n${detail}`;
+      try {
+        await sendMarkdown(chatId, replyMd, "command-error", messageId);
+      } catch {
+        try {
+          await sendText(chatId, `${ENGINE_LABEL} 指令失败（${command?.name || "/command"}）：${detail}`, "command-error-fallback", messageId);
+        } catch {}
+      }
     }
   }
 
@@ -401,8 +419,14 @@ export function createCommandRouter(deps = {}) {
 
   function forgetDeleteConfirmationsForThread(threadId) {
     const id = String(threadId || "").trim();
+    if (!id) return;
     for (const [key, pending] of pendingDeleteConfirmations) {
-      if (pending?.threadId === id) pendingDeleteConfirmations.delete(key);
+      if (
+        pending?.threadId === id
+        || (Array.isArray(pending?.items) && pending.items.some((item) => item?.threadId === id))
+      ) {
+        pendingDeleteConfirmations.delete(key);
+      }
     }
   }
 
@@ -639,7 +663,7 @@ export function createCommandRouter(deps = {}) {
         chatId,
         items.length === 1
           ? deletePreviewMarkdown({
-              entry: { ...items[0], id: items[0].sessionId, codexThreadId: items[0].threadId },
+              entry: { ...items[0], id: items[0].sessionId, codexThreadId: items[0].threadId, _isCurrent: Boolean(items[0].isCurrent) },
               record: { id: items[0].threadId, title: items[0].title, rollout_path: items[0].rolloutPath },
               index: items[0].index,
               expiresAt,
@@ -1651,15 +1675,6 @@ export function createCommandRouter(deps = {}) {
       return;
     }
     await sendText(chatId, "Stopping", "stop-start", messageId);
-    if (['claude', 'antigravity'].includes(job.mode) && job.client) {
-      stoppedJobs.add(job.messageId);
-      if (job.rootMessageId) stoppedJobs.add(job.rootMessageId);
-      job.client.interrupt();
-      setTimeout(() => {
-        if (activeCodexJobs.get(chatId) === job && job.pid) terminateProcessTree(job.pid, true);
-      }, 5000).unref?.();
-      return;
-    }
     const ended = await interruptSingleActiveJob(chatId, job);
     await sendText(
       chatId,

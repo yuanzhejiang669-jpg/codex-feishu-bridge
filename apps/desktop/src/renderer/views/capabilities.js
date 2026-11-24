@@ -383,9 +383,14 @@ export function renderCapabilitiesView(container, actions = {}) {
       if (!botName) return;
       btn.disabled = true;
       try {
-        const preview = await api.previewCapabilityMigration({ name: botName });
-        const mcpNames = (preview?.mcpServers || []).map((m) => m.name);
-        const skillNames = (preview?.skills || []).map((s) => s.name);
+        const allMcpNames = (state.capabilities?.mcpServers || []).map((m) => m.name).filter(Boolean);
+        const allSkillNames = (state.capabilities?.skills || []).map((s) => s.name).filter(Boolean);
+        const preview = await api.previewCapabilityMigration({
+          name: botName,
+          selection: { mcpServers: allMcpNames, skills: allSkillNames },
+        });
+        const mcpNames = (preview?.mcpServers || []).filter((m) => m.status === "ready").map((m) => m.name);
+        const skillNames = (preview?.skills || []).filter((s) => s.status === "ready").map((s) => s.name);
         if (!mcpNames.length && !skillNames.length) {
           showToast("该隔离空间已具备全部全局能力，无需迁移", "ok");
           return;

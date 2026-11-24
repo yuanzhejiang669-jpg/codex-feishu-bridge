@@ -48,7 +48,11 @@ async function restoreUpdateBots(dataRoot, startBot) {
       failed.push({ name, error: String(error?.message || error) });
     }
   }
-  if (!failed.length) clearRecoveryMarker(dataRoot);
+  if (!failed.length) {
+    clearRecoveryMarker(dataRoot);
+  } else {
+    writeRecoveryMarker(dataRoot, failed.map((item) => item.name), marker.targetVersion);
+  }
   return { restored, failed };
 }
 

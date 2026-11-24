@@ -7,6 +7,9 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { createAttachmentManager } from "../src/feishu/attachments.mjs";
+import { createPendingAttachmentStore } from "../src/attachments/pending.mjs";
+import { createManagedCardClass } from "../src/feishu/cards/managed-card.mjs";
+import { createProcessRunner } from "../src/runtime/process-runner.mjs";
 import { createCodexSidebarSync } from "../src/codex/sidebar-sync.mjs";
 import { createSessionInventory } from "../src/sessions/inventory.mjs";
 import { createRunCardRenderer } from "../src/feishu/cards/run-card.mjs";
@@ -241,3 +244,146 @@ for (const engine of ["codex", "claude", "antigravity"]) {
     }
   });
 }
+
+test("v0.10.14 regressions: attachments Object.assign has zero self-recursion, /steer works, command errors reply to Feishu, ManagedCard preserves flush failure, and ENOENT cleans activeChildren", async () => {
+  // 1) P0-1: Attachment helpers survive Object.assign(runtime, attachments) without RangeError recursion, and /steer succeeds
+  const store = createPendingAttachmentStore({ maxPendingAttachments: 12, pendingTtlMs: 60_000 });
+  const cleared = [];
+  const sentTexts = [];
+  const sentMarkdowns = [];
+  const steerRequests = [];
+  const runtime = {
+    CONFIG: { engine: "codex", workspace: ROOT, codexHome: ROOT, deleteConfirmTtlMs: 300_000 },
+    ENGINE_LABEL: "Codex",
+    log: () => {},
+    pendingAttachmentStore: store,
+    addPendingAttachments: store.add,
+    cleanupPendingAttachments: store.cleanup,
+    dropPendingAttachmentsByMessageId: store.dropByMessageId,
+    dropPendingAttachmentsForMessage: store.dropForMessage,
+    takePendingAttachments: store.take,
+    withAttachmentLock: store.withAttachmentLock,
+    cleanupClearedDownloads: (items) => cleared.push(...(items || [])),
+    activeCodexJobs: new Map(),
+    activeGoalRuns: new Map(),
+    pendingDeleteConfirmations: new Map(),
+    stoppedJobs: new Set(),
+    sessions: { chats: { c1: { currentSessionId: "s1", sessions: [{ id: "s1", title: "Demo", messages: [] }] } } },
+    saveSessions: () => {},
+    recordChatScope: () => ({}),
+    sendText: async (_c, text) => { sentTexts.push(text); },
+    sendMarkdown: async (_c, md) => { sentMarkdowns.push(md); },
+    appServerSteerParams: (threadId, turnId, _event, text) => ({ threadId, turnId, text }),
+    appendHistory: () => {},
+    clearPendingEventsForChat: () => ({ removedQueued: 0, cancelledPreflight: 0 }),
+    queueSummary: () => "总队列 0",
+  };
+  const attachments = createAttachmentManager(runtime);
+  Object.assign(runtime, attachments);
+
+  // Calling every wrapped helper AFTER Object.assign must never recurse
+  const realFile = path.join(ROOT, "package.json");
+  await runtime.withAttachmentLock("c1", () => {
+    runtime.addPendingAttachments("c1", [{ type: "image", path: realFile, messageId: "m1", receivedAt: Date.now() }]);
+    assert.equal(runtime.cleanupPendingAttachments("c1").length, 1);
+  });
+  assert.equal(runtime.takePendingAttachments("c1").length, 1);
+  runtime.restorePendingAttachments("c1", [{ type: "image", path: realFile, messageId: "m2", receivedAt: Date.now() }]);
+  assert.equal(runtime.dropPendingAttachmentsForMessage("m2", "c1"), 1);
+  assert.deepEqual(await runtime.dropPendingAttachmentsByMessageId("m3", "c1"), []);
+  runtime.cleanupClearedDownloads([{ path: "x.tmp" }]);
+  assert.equal(cleared.length, 1);
+
+  const router = createCommandRouter(runtime);
+  runtime.activeCodexJobs.set("c1", {
+    mode: "app-server",
+    threadId: "thr-1",
+    turnId: "turn-1",
+    sessionId: "s1",
+    clearGeneration: 0,
+    pendingSteerEntries: [],
+    steerInFlight: null,
+    client: {
+      closed: false,
+      request: async (method, params) => { steerRequests.push({ method, params }); return { turnId: "turn-2" }; },
+    },
+  });
+  await router.handleCommand({ chat_id: "c1", message_id: "m-steer", content: "/steer 转成png" }, { name: "/steer", rest: "转成png" });
+  assert.equal(steerRequests.length, 1);
+  assert.equal(steerRequests[0].method, "turn/steer");
+  assert.match(sentTexts.at(-1), /已将补充指令/);
+
+  // 2) P0-2: Thrown validation errors in Claude/Antigravity handleCommand are caught and sent back to Feishu
+  const agyRuntime = {
+    ...runtime,
+    CONFIG: { engine: "antigravity", workspace: ROOT },
+    ENGINE_LABEL: "Antigravity",
+    antigravityBridge: {
+      handleCommand: async () => { throw new Error("思考强度无效，当前模型可用选项：low、high"); },
+    },
+  };
+  const agyRouter = createCommandRouter(agyRuntime);
+  await agyRouter.handleCommand({ chat_id: "c1", message_id: "m-err" }, { name: "/effort", rest: "bogus" });
+  assert.match(sentMarkdowns.at(-1), /Antigravity 指令失败.*\/effort/);
+  assert.match(sentMarkdowns.at(-1), /思考强度无效/);
+
+  // 3) P1-2: /stopall waits on job.finished and accurately reports stopped count for Claude/Antigravity
+  let resolveFinish;
+  const finishPromise = new Promise((r) => { resolveFinish = r; });
+  const stopRuntime = {
+    ...runtime,
+    CONFIG: { engine: "claude", workspace: ROOT },
+    ENGINE_LABEL: "Claude Code",
+    activeCodexJobs: new Map(),
+    stoppedJobs: new Set(),
+    terminateProcessTree: () => {},
+  };
+  stopRuntime.activeCodexJobs.set("c1", {
+    mode: "claude",
+    messageId: "m-run",
+    finished: finishPromise,
+    client: {
+      interrupt: () => {
+        setTimeout(() => {
+          stopRuntime.activeCodexJobs.delete("c1");
+          resolveFinish();
+        }, 10);
+      },
+    },
+  });
+  const stopRouter = createCommandRouter(stopRuntime);
+  await stopRouter.stopAllActiveJobs("c1", "m-stopall");
+  assert.match(sentTexts.at(-1), /已停止全部 1 个运行中聊天任务/);
+
+  // 4) P2-1: forgetDeleteConfirmationsForThread cleans batch/index confirmations
+  runtime.pendingDeleteConfirmations.set("k-batch", {
+    chatId: "c1",
+    index: "1-2",
+    items: [{ threadId: "thr-dead" }],
+    expiresAt: Date.now() + 60_000,
+  });
+  router.forgetDeleteConfirmationsForThread("thr-dead");
+  assert.equal(runtime.pendingDeleteConfirmations.has("k-batch"), false);
+
+  // 5) P1-1: ManagedCard.flush() after failed flush + close() still returns false
+  const ManagedCard = createManagedCardClass({
+    larkJsonWithData: async () => { throw new Error("network down"); },
+    findDeepKey: () => "",
+    idempotencyKey: (a, b) => `${a}-${b}`,
+    useThreadReply: false,
+    cardThrottleMs: 100,
+    log: () => {},
+  });
+  const card = new ManagedCard("card-1", "msg-1", "base-1");
+  assert.equal(await card.flush({ schema: "2.0" }), false);
+  card.close();
+  assert.equal(await card.flush({ schema: "2.0" }), false);
+
+  // 6) P2-5: process-runner ENOENT does not leak activeChildren[undefined]
+  const activeChildren = new Map();
+  const runner = createProcessRunner({ activeChildren, workspace: ROOT });
+  await assert.rejects(
+    runner.runTool({ command: "nonexistent-command-xyz-01014", argsPrefix: [] }, [], { timeoutMs: 5000 }),
+  );
+  assert.equal(activeChildren.size, 0);
+});

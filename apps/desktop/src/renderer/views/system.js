@@ -34,11 +34,18 @@ export function renderSystemView(container, actions = {}) {
   const setup = state.setup || {};
   const spaces = setup.managedSpaces || [];
   const activeRuns = (setup.managedBots || []).reduce((sum, bot) => sum + Number(bot.activeRunCount || 0), 0);
-  const canInstallUpdate = update.status === "downloaded";
-  const updateBusy = ["checking", "downloading"].includes(update.status);
-  const updateStatusText = update.status === "downloading" && Number.isFinite(Number(update.percent))
-    ? `${update.message || "正在下载更新"} (${Math.round(Number(update.percent))}%)`
-    : (update.message || update.status || "未检查");
+  const canInstallUpdate = ["downloaded", "blocked"].includes(update.status);
+  const updateBusy = ["checking", "downloading", "installing"].includes(update.status);
+  const progressValue = update.progress ?? update.percent;
+  const updateStatusText = update.status === "downloading" && Number.isFinite(Number(progressValue))
+    ? `${update.message || "正在下载更新"} (${Math.round(Number(progressValue))}%)`
+    : update.status === "installing"
+      ? "正在停止 Bot 并准备安装..."
+      : update.status === "blocked" && update.error
+        ? `已暂停安装：${update.error}`
+        : update.status === "error" && update.error
+          ? `更新失败：${update.error}`
+          : (update.message || update.status || "未检查");
   const ownerHintText = !settings.ownerOpenId && settings.autoBoundOwnerOpenId
     ? `已通过首次私聊自动绑定：${settings.autoBoundOwnerOpenId}（留空将继续沿用自动绑定；如需覆盖或显式指定请在上方填写并保存）。`
     : "留空则按最小权限拒绝跨 Bot 私聊共享访问；保存后同步写入共享库 owner.json 并入队重载空闲 Bot。";
@@ -58,7 +65,7 @@ export function renderSystemView(container, actions = {}) {
         <div class="card-body">
           <dl class="kv-grid">
             <dt>客户端版本</dt><dd class="mono">v${escapeHtml(appInfo.version || "")} (${escapeHtml(appInfo.platform || "")}/${escapeHtml(appInfo.arch || "")})</dd>
-            <dt>引擎提交</dt><dd class="mono">${escapeHtml(engineInfo.manifest?.sourceCommit || "开发态源码")}</dd>
+            <dt>引擎提交</dt><dd class="mono">${escapeHtml(engineInfo.sourceCommit || engineInfo.manifest?.sourceCommit || "开发态源码")}</dd>
             <dt>内置 Node / Lark</dt><dd class="mono">${escapeHtml(engineInfo.nodeVersion || "-")} · lark-cli ${escapeHtml(engineInfo.larkCliVersion || "-")}</dd>
             <dt>安全凭据后端</dt><dd>${escapeHtml(appInfo.credentialStorage || "未知")}</dd>
             <dt>更新状态</dt><dd>${escapeHtml(updateStatusText)}${update.latestVersion ? `（最新 v${escapeHtml(update.latestVersion)}）` : ""}</dd>
@@ -66,7 +73,7 @@ export function renderSystemView(container, actions = {}) {
           ${activeRuns > 0 ? `<div class="field-hint text-warn">当前有 ${activeRuns} 个活跃任务；安装更新会自动保护在途任务并在空闲时滚动恢复。</div>` : ""}
           <div class="inline-actions">
             <button class="btn btn-sm" type="button" id="btn-sys-check-update" ${update.supported === false || updateBusy ? "disabled" : ""}>${update.status === "downloading" ? "下载中..." : update.status === "checking" ? "检查中..." : "检查更新"}</button>
-            <button class="btn btn-primary btn-sm" type="button" id="btn-sys-install-update" ${!canInstallUpdate ? "disabled" : ""}>安装并重启</button>
+            <button class="btn btn-primary btn-sm" type="button" id="btn-sys-install-update" ${!canInstallUpdate ? "disabled" : ""}>${update.status === "installing" ? "安装中..." : "安装并重启"}</button>
           </div>
         </div>
       </div>
@@ -173,7 +180,11 @@ export function renderSystemView(container, actions = {}) {
     btn.disabled = true;
     btn.textContent = "准备安装...";
     try {
-      await api.installUpdate();
+      const result = await api.installUpdate();
+      if (result?.status === "blocked") {
+        showToast(result.error || "请等待活动任务结束后再安装", "warn");
+        await actions.onRefresh?.({ force: false });
+      }
     } catch (error) {
       showToast(formatIpcError(error), "error");
       btn.disabled = false;

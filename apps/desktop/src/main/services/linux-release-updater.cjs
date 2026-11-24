@@ -30,10 +30,11 @@ function compareDesktopVersions(left, right) {
   return a.linuxRevision > b.linuxRevision ? 1 : -1;
 }
 
-function releaseCandidates(releases) {
+function releaseCandidates(releases, allowPrerelease = true) {
   const values = [];
   for (const release of Array.isArray(releases) ? releases : []) {
     if (!release || release.draft) continue;
+    if (!allowPrerelease && release.prerelease) continue;
     const assets = Array.isArray(release.assets) ? release.assets : [];
     const checksum = assets.find((asset) => asset?.name === "checksums-linux.txt");
     if (!checksum?.browser_download_url) continue;
@@ -51,8 +52,8 @@ function releaseCandidates(releases) {
   return values.sort((a, b) => compareDesktopVersions(b.version, a.version) || 0);
 }
 
-function selectLinuxRelease(releases, currentVersion) {
-  return releaseCandidates(releases).find((candidate) => compareDesktopVersions(candidate.version, currentVersion) === 1) || null;
+function selectLinuxRelease(releases, currentVersion, allowPrerelease = true) {
+  return releaseCandidates(releases, allowPrerelease).find((candidate) => compareDesktopVersions(candidate.version, currentVersion) === 1) || null;
 }
 
 function parseExpectedChecksum(text, assetName) {
@@ -172,9 +173,10 @@ class LinuxReleaseUpdater extends EventEmitter {
     this.emit("checking-for-update");
     try {
       const releases = await fetchJson(this.fetch, this.releasesUrl, this.metadataTimeoutMs);
-      const candidate = selectLinuxRelease(releases, this.currentVersion);
+      const allowPrerelease = this.allowPrerelease !== false;
+      const candidate = selectLinuxRelease(releases, this.currentVersion, allowPrerelease);
       if (!candidate) {
-        this.emit("update-not-available", { version: releaseCandidates(releases)[0]?.version || this.currentVersion });
+        this.emit("update-not-available", { version: releaseCandidates(releases, allowPrerelease)[0]?.version || this.currentVersion });
         return null;
       }
       const info = { version: candidate.version, releaseNotes: candidate.releaseNotes };

@@ -13,7 +13,9 @@ export function createProcessRunner({
       windowsHide: true,
       stdio: ["pipe", "pipe", "pipe"],
     });
-    activeChildren.set(child.pid, { child, label: `${tool.command} ${finalArgs.join(" ")}` });
+    if (child.pid !== undefined) {
+      activeChildren.set(child.pid, { child, label: `${tool.command} ${finalArgs.join(" ")}` });
+    }
     options.onSpawn?.(child);
 
     const stdoutChunks = [];
@@ -36,15 +38,21 @@ export function createProcessRunner({
       const timer = options.timeoutMs
         ? setTimeout(() => {
             timedOut = true;
-            terminateProcessTree(child.pid, false);
-            setTimeout(() => terminateProcessTree(child.pid, true), 5000).unref?.();
+            if (child.pid !== undefined) {
+              terminateProcessTree(child.pid, false);
+              setTimeout(() => terminateProcessTree(child.pid, true), 5000).unref?.();
+            }
           }, options.timeoutMs)
         : null;
 
-      child.on("error", reject);
+      child.on("error", (error) => {
+        if (timer) clearTimeout(timer);
+        if (child.pid !== undefined) activeChildren.delete(child.pid);
+        reject(error);
+      });
       child.on("close", (code) => {
         if (timer) clearTimeout(timer);
-        activeChildren.delete(child.pid);
+        if (child.pid !== undefined) activeChildren.delete(child.pid);
         const stdout = Buffer.concat(stdoutChunks).toString("utf8");
         const stderr = [
           Buffer.concat(stderrChunks).toString("utf8"),

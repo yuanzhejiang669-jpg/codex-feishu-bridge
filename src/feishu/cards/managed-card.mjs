@@ -104,7 +104,7 @@ export function createManagedCardClass({
     }
 
     async flush(card) {
-      if (this.closed) return;
+      if (this.closed) return this.lastFlushOk;
       if (card) this.pendingCard = card;
       if (this.pendingTimer) {
         clearTimeout(this.pendingTimer);

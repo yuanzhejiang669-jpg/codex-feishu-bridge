@@ -385,9 +385,10 @@ function antigravityOptions() {
     inspectExternalClients: inspectAntigravityClients };
 }
 
+let updateInstallPending = false;
 const operationCoordinator = createOperationCoordinator({
   pauseRecovery: () => recoverySupervisor?.stop(),
-  resumeRecovery: () => { if (!isQuitting) recoverySupervisor?.start(); },
+  resumeRecovery: () => { if (!isQuitting && !updateInstallPending) recoverySupervisor?.start(); },
 });
 
 async function applyPendingAntigravityConfiguration() {
@@ -539,6 +540,7 @@ function sendUpdateState(value) {
 
 async function prepareUpdateInstall(restartNames, targetVersion) {
   return operationCoordinator.runExclusive("prepare-update-install", async () => {
+    updateInstallPending = true;
     writeRecoveryMarker(managedDataRoot(), restartNames, targetVersion);
     const stoppedNames = [];
     try {
@@ -548,6 +550,7 @@ async function prepareUpdateInstall(restartNames, targetVersion) {
       }
       await protocolProxyService?.stop();
     } catch (error) {
+      updateInstallPending = false;
       for (const name of stoppedNames) {
         try { await startManagedBot(name, supervisorOptions()); } catch {}
       }
@@ -557,11 +560,13 @@ async function prepareUpdateInstall(restartNames, targetVersion) {
     }
     return {
       rollback: async () => {
+        updateInstallPending = false;
         for (const name of stoppedNames) {
           try { await startManagedBot(name, supervisorOptions()); } catch {}
         }
         clearRecoveryMarker(managedDataRoot());
         await protocolProxyService?.start().catch(() => {});
+        if (!isQuitting) recoverySupervisor?.start();
       },
     };
   });

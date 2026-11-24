@@ -517,8 +517,17 @@ export function renderBotDrawer() {
     safeRestartBtn.disabled = true;
     safeRestartBtn.textContent = "处理中...";
     try {
-      await api.restartBots({ names: [bot.name], force: false });
-      showToast(`已安全重启 ${bot.label || bot.name}`, "ok");
+      const result = await api.restartBots({ names: [bot.name], force: false });
+      const label = bot.label || bot.name;
+      if (result?.failed?.length) {
+        showToast(`重启 ${label} 失败：${result.failed[0]?.error || "未知错误"}`, "error");
+      } else if (result?.skippedActive?.length) {
+        showToast(`${label} 当前有活跃任务，已跳过安全重启`, "warn");
+      } else if (result?.skippedOffline?.length) {
+        showToast(`${label} 当前未运行，无需重启`, "warn");
+      } else {
+        showToast(`已安全重启 ${label}`, "ok");
+      }
       await refreshCallback?.({ force: false });
     } catch (error) {
       showToast(formatIpcError(error), "error");

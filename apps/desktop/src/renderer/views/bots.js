@@ -38,13 +38,19 @@ async function restartSelected(names, force, actions) {
   if (!names.length) return;
   try {
     const result = await api.restartBots({ names, force });
-    const restarted = Array.isArray(result?.restarted) ? result.restarted.length : names.length;
-    const skipped = Array.isArray(result?.skipped) ? result.skipped.length : 0;
+    const restarted = Array.isArray(result?.restarted) ? result.restarted.length : 0;
+    const skippedActive = Array.isArray(result?.skippedActive) ? result.skippedActive.length : 0;
+    const skippedOffline = Array.isArray(result?.skippedOffline) ? result.skippedOffline.length : 0;
+    const failed = Array.isArray(result?.failed) ? result.failed.length : 0;
+    const parts = [`已重启 ${restarted} 个`];
+    if (skippedActive) parts.push(`跳过 ${skippedActive} 个有在途任务`);
+    if (skippedOffline) parts.push(`跳过 ${skippedOffline} 个未运行`);
+    if (failed) parts.push(`失败 ${failed} 个`);
     showToast(
-      skipped
-        ? `已重启 ${restarted} 个 Bot，跳过 ${skipped} 个有在途任务的 Bot`
+      parts.length > 1
+        ? parts.join("，")
         : `已完成 ${restarted} 个 Bot 的${force ? "强制" : "安全"}重启`,
-      "ok",
+      failed ? "error" : (skippedActive || skippedOffline ? "warn" : "ok"),
     );
     store.selectedBotNames.clear();
     await actions.onRefresh?.({ force: false });

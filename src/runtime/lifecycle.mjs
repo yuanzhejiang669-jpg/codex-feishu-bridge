@@ -82,6 +82,7 @@ export function createBridgeLifecycle(deps = {}) {
   }
 
   function startSidebarReconciler() {
+    if (CONFIG.engine !== "codex" || !CONFIG.syncSidebar) return;
     scheduleSidebarReconcile("startup", 0);
 
     const intervalMs = Math.max(

@@ -7,6 +7,7 @@ function createUpdaterService(options) {
   const checkIntervalMs = Math.max(60_000, Number(options.checkIntervalMs ?? 4 * 60 * 60_000));
   let timer = null;
   let interval = null;
+  let installInFlight = false;
   let state = {
     supported,
     status: supported ? "idle" : "unsupported",
@@ -42,16 +43,18 @@ function createUpdaterService(options) {
 
   async function install() {
     if (!supported) throw new Error(state.unsupportedReason);
+    if (installInFlight || state.status === "installing") return snapshot();
     if (!["downloaded", "blocked"].includes(state.status)) throw new Error("更新尚未下载完成");
     const plan = buildInstallPlan(await options.inspectBots());
     if (!plan.allowed) {
       publish({ status: "blocked", activeBots: plan.activeBots, error: "请等待活动任务结束后再安装" });
       return snapshot();
     }
+    installInFlight = true;
+    publish({ status: "installing", progress: 100, error: "", activeBots: [] });
     let transaction = null;
     try {
       transaction = await options.prepareInstall(plan.restartNames, state.latestVersion);
-      publish({ status: "installing", progress: 100, error: "", activeBots: [] });
       await new Promise((resolve, reject) => {
         setImmediate(() => {
           try {
@@ -63,6 +66,7 @@ function createUpdaterService(options) {
         });
       });
     } catch (error) {
+      installInFlight = false;
       await transaction?.rollback?.();
       publish({ status: "downloaded", error: String(error?.message || error), activeBots: [] });
       throw error;

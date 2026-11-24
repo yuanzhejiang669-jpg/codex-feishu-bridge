@@ -860,8 +860,19 @@ async function handleOutOfBandCommand(rawEvent, command) {
     contentPreview: userTextFromContent(event.content).slice(0, 200),
   });
   const executeCommand = async () => {
-    await prepareCommandAttachments(event, command);
-    await handleCommand(event, command);
+    try {
+      await prepareCommandAttachments(event, command);
+      await handleCommand(event, command);
+    } catch (error) {
+      log("ERROR", "out-of-band command execution failed", {
+        messageId,
+        chatId,
+        command: command?.name || "",
+        error: String(error?.stack || error),
+      });
+      const detail = truncateCardText(errorText(error), 1200);
+      await sendText(chatId, `${ENGINE_LABEL} 指令失败（${command?.name || "/command"}）：${detail}`, "command-error-outer", messageId).catch(() => {});
+    }
   };
   if (LEVEL_A_COMMANDS.has(command.name) || command.name === "/steer") {
     await executeCommand();
@@ -920,8 +931,19 @@ async function handleEvent(rawEvent, dispatchControl = {}) {
       contentPreview: userContent.slice(0, 120),
     });
     stats.commands += 1;
-    await prepareCommandAttachments(event, command);
-    await handleCommand(event, command);
+    try {
+      await prepareCommandAttachments(event, command);
+      await handleCommand(event, command);
+    } catch (error) {
+      log("ERROR", "queued command execution failed", {
+        messageId,
+        chatId,
+        command: command?.name || "",
+        error: String(error?.stack || error),
+      });
+      const detail = truncateCardText(errorText(error), 1200);
+      await sendText(chatId, `${ENGINE_LABEL} 指令失败（${command?.name || "/command"}）：${detail}`, "command-error-queued", messageId).catch(() => {});
+    }
     return;
   }
 
@@ -1047,6 +1069,7 @@ async function handleEvent(rawEvent, dispatchControl = {}) {
       }
       await state.formulaRenderPromise;
     }
+    if (card.closed) return;
     const rendered = renderRunCard(state);
     if (state.terminal === "running") {
       card.update(rendered);

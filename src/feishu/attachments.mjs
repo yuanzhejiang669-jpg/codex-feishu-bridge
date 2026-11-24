@@ -451,6 +451,30 @@ export function createAttachmentManager(deps = {}) {
     return parts.join("\n\n");
   }
 
+  const pendingStore = deps.pendingAttachmentStore || null;
+  const withAttachmentLockImpl = pendingStore?.withAttachmentLock
+    ? (...args) => pendingStore.withAttachmentLock(...args)
+    : deps.withAttachmentLock;
+  const addPendingAttachmentsImpl = pendingStore?.add
+    ? (...args) => pendingStore.add(...args)
+    : deps.addPendingAttachments;
+  const takePendingAttachmentsImpl = pendingStore?.take
+    ? (...args) => pendingStore.take(...args)
+    : deps.takePendingAttachments;
+  const restorePendingAttachmentsImpl = pendingStore?.restore
+    ? (...args) => pendingStore.restore(...args)
+    : addPendingAttachmentsImpl;
+  const cleanupPendingAttachmentsImpl = pendingStore?.cleanup
+    ? (...args) => pendingStore.cleanup(...args)
+    : deps.cleanupPendingAttachments;
+  const dropPendingAttachmentsForMessageImpl = pendingStore?.dropForMessage
+    ? (...args) => pendingStore.dropForMessage(...args)
+    : deps.dropPendingAttachmentsForMessage;
+  const dropPendingAttachmentsByMessageIdImpl = pendingStore?.dropByMessageId
+    ? (...args) => pendingStore.dropByMessageId(...args)
+    : deps.dropPendingAttachmentsByMessageId;
+  const cleanupClearedDownloadsImpl = deps.cleanupClearedDownloads;
+
   return {
     larkTextIndicatesRecalled,
     messageRecordLooksRecalled,
@@ -473,13 +497,13 @@ export function createAttachmentManager(deps = {}) {
     parseCommand,
     attachmentPromptBlock,
     buildPrompt,
-    withAttachmentLock: (...args) => deps.pendingAttachmentStore?.withAttachmentLock?.(...args) ?? deps.withAttachmentLock(...args),
-    addPendingAttachments: (...args) => deps.addPendingAttachments?.(...args),
-    takePendingAttachments: (...args) => deps.takePendingAttachments?.(...args),
-    restorePendingAttachments: (...args) => deps.pendingAttachmentStore?.restore?.(...args) ?? deps.addPendingAttachments?.(...args),
-    cleanupPendingAttachments: (...args) => deps.cleanupPendingAttachments?.(...args),
-    dropPendingAttachmentsForMessage: (...args) => deps.dropPendingAttachmentsForMessage?.(...args),
-    dropPendingAttachmentsByMessageId: (...args) => deps.dropPendingAttachmentsByMessageId?.(...args),
-    cleanupClearedDownloads: (...args) => deps.cleanupClearedDownloads?.(...args),
+    withAttachmentLock: (...args) => withAttachmentLockImpl?.(...args),
+    addPendingAttachments: (...args) => addPendingAttachmentsImpl?.(...args),
+    takePendingAttachments: (...args) => takePendingAttachmentsImpl?.(...args),
+    restorePendingAttachments: (...args) => restorePendingAttachmentsImpl?.(...args),
+    cleanupPendingAttachments: (...args) => cleanupPendingAttachmentsImpl?.(...args),
+    dropPendingAttachmentsForMessage: (...args) => dropPendingAttachmentsForMessageImpl?.(...args),
+    dropPendingAttachmentsByMessageId: (...args) => dropPendingAttachmentsByMessageIdImpl?.(...args),
+    cleanupClearedDownloads: (...args) => cleanupClearedDownloadsImpl?.(...args),
   };
 }

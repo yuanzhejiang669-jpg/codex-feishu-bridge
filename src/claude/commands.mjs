@@ -191,10 +191,13 @@ export function createClaudeCommands({ config, settings, botConfiguration, provi
       changed(session); await reply(modelStatus(session, persist ? '已切换并保存为当前 Bot 默认渠道' : '已切换当前会话渠道')); return true;
     }
     if (!['/model', '/effort'].includes(command.name)) return false;
-    if (command.name === '/effort' && !action) { await reply(modelStatus(session)); return true; }
-    if (command.name === '/effort') args.unshift('effort');
+    if (command.name === '/effort') {
+      if (!action || ['status', 'view'].includes(action)) { await reply(modelStatus(session)); return true; }
+      if (action === 'save') args.splice(0, 1, 'save', 'effort');
+      else args.unshift('effort');
+    }
     const op = (args[0] || '').toLowerCase();
-    if (!op || op === 'status') { await reply(modelStatus(session)); return true; }
+    if (!op || ['status', 'view'].includes(op)) { await reply(modelStatus(session)); return true; }
     const provider = currentProvider(session);
     if (op === 'list') {
       let models = provider.models || [provider.model]; let notice = '';

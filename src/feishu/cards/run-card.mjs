@@ -78,7 +78,7 @@ export function createRunCardRenderer(deps = {}) {
       formulaSources: [],
       formulaRenderStats: null,
       meta: {
-        engine: session.engine || 'codex',
+        engine: CONFIG?.engine || session.engine || 'codex',
         durationMs: undefined,
         inputTokens: undefined,
         outputTokens: undefined,
