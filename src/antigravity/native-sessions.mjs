@@ -37,11 +37,23 @@ export function decodeWorkspaceUri(rawUris) {
   return '';
 }
 
+function isStatusRunning(status) {
+  return /^(?:cascade_run_status_)?running$/i.test(String(status || '').trim());
+}
+
+function hasConversationStoreFile(baseDir, conversationId) {
+  const convDir = path.join(baseDir, 'conversations');
+  return fs.existsSync(path.join(convDir, `${conversationId}.db`))
+    || fs.existsSync(path.join(convDir, `${conversationId}.pb`));
+}
+
 export function listAntigravityNativeConversations({ geminiDir, appDataDir = 'antigravity', limit = 100 } = {}) {
   if (!geminiDir) return [];
   const resolvedDir = path.resolve(geminiDir);
-  const dbPath = path.join(resolvedDir, appDataDir, 'conversation_summaries.db');
+  const baseDir = path.join(resolvedDir, appDataDir);
+  const dbPath = path.join(baseDir, 'conversation_summaries.db');
   if (!fs.existsSync(dbPath)) return [];
+  const hasConversationsDir = fs.existsSync(path.join(baseDir, 'conversations'));
   let db;
   try {
     db = new DatabaseSync(dbPath, { readOnly: true });
@@ -57,17 +69,24 @@ export function listAntigravityNativeConversations({ geminiDir, appDataDir = 'an
     `).all(Math.max(1, Math.min(500, Number(limit) || 100)));
     return rows
       .filter((row) => row && typeof row.conversation_id === 'string' && row.conversation_id.trim())
-      .map((row) => ({
-        conversationId: row.conversation_id.trim(),
-        title: String(row.title || '').trim() || String(row.preview || '').trim().slice(0, 80) || row.conversation_id.slice(0, 8),
-        cwd: decodeWorkspaceUri(row.workspace_uris),
-        updatedAt: parseTimestamp(row.last_modified_time),
-        notFullyIdle: Boolean(Number(row.not_fully_idle)),
-        stepCount: Number(row.step_count || 0),
-        status: String(row.status || '').trim(),
-        geminiDir: resolvedDir,
-        appDataDir: String(row.app_data_dir || appDataDir).trim() || appDataDir,
-      }));
+      .filter((row) => !hasConversationsDir || hasConversationStoreFile(baseDir, row.conversation_id.trim()))
+      .map((row) => {
+        const status = String(row.status || '').trim();
+        const notFullyIdle = Boolean(Number(row.not_fully_idle));
+        const running = status ? isStatusRunning(status) : notFullyIdle;
+        return {
+          conversationId: row.conversation_id.trim(),
+          title: String(row.title || '').trim() || String(row.preview || '').trim().slice(0, 80) || row.conversation_id.slice(0, 8),
+          cwd: decodeWorkspaceUri(row.workspace_uris),
+          updatedAt: parseTimestamp(row.last_modified_time),
+          running,
+          notFullyIdle,
+          stepCount: Number(row.step_count || 0),
+          status,
+          geminiDir: resolvedDir,
+          appDataDir: String(row.app_data_dir || appDataDir).trim() || appDataDir,
+        };
+      });
   } catch {
     return [];
   } finally {
@@ -82,21 +101,41 @@ function isInsideRoot(root, target) {
   return Boolean(rel && rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel));
 }
 
-export function isAntigravityConversationBusy({ geminiDir, appDataDir = 'antigravity', conversationId } = {}) {
-  if (!geminiDir || !conversationId) return false;
+export function getAntigravityConversationState({ geminiDir, appDataDir = 'antigravity', conversationId } = {}) {
+  const empty = { exists: false, status: '', running: false, notFullyIdle: false, updatedAt: 0 };
+  if (!geminiDir || !conversationId) return empty;
   const dbPath = path.join(path.resolve(geminiDir), appDataDir, 'conversation_summaries.db');
-  if (!fs.existsSync(dbPath)) return false;
+  if (!fs.existsSync(dbPath)) return empty;
   let db;
   try {
     db = new DatabaseSync(dbPath, { readOnly: true });
     db.exec('PRAGMA busy_timeout = 2000;');
-    const row = db.prepare('SELECT not_fully_idle FROM conversation_summaries WHERE conversation_id = ? LIMIT 1').get(String(conversationId));
-    return Boolean(row && Number(row.not_fully_idle));
+    const row = db.prepare(
+      'SELECT status, not_fully_idle, last_modified_time FROM conversation_summaries WHERE conversation_id = ? LIMIT 1',
+    ).get(String(conversationId));
+    if (!row) return empty;
+    const status = String(row.status || '').trim();
+    const notFullyIdle = Boolean(Number(row.not_fully_idle));
+    // Antigravity writes status=CASCADE_RUN_STATUS_IDLE with not_fully_idle=1 when a turn ends with
+    // uncollected background tasks; treating IDLE+not_fully_idle as "busy" permanently deadlocks a
+    // conversation after the ACP worker exits. Only an explicit RUNNING status counts as busy.
+    const running = status ? isStatusRunning(status) : notFullyIdle;
+    return {
+      exists: true,
+      status,
+      running,
+      notFullyIdle,
+      updatedAt: parseTimestamp(row.last_modified_time),
+    };
   } catch {
-    return false;
+    return empty;
   } finally {
     try { db?.close(); } catch {}
   }
+}
+
+export function isAntigravityConversationBusy({ geminiDir, appDataDir = 'antigravity', conversationId } = {}) {
+  return getAntigravityConversationState({ geminiDir, appDataDir, conversationId }).running;
 }
 
 export function antigravityNativeArtifacts({ geminiDir, appDataDir = 'antigravity', conversationId } = {}) {

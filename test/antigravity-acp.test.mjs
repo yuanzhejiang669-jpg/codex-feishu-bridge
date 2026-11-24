@@ -3,11 +3,19 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { DatabaseSync } from 'node:sqlite';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { AntigravityAcpClient, antigravityEnvironment, safeMessage } from '../src/antigravity/acp-client.mjs';
 import { createAntigravityBridge } from '../src/antigravity/bridge-runner.mjs';
+import {
+  getAntigravityConversationState,
+  isAntigravityConversationBusy,
+  listAntigravityNativeConversations,
+} from '../src/antigravity/native-sessions.mjs';
+import { createClaudeBridge } from '../src/claude/bridge-runner.mjs';
 import { parseCommand } from '../src/commands/parser.mjs';
+import { classifyCodexFailure } from '../src/logging/errors.mjs';
 import agentEngine from '../src/agents/engine.cjs';
 
 function fixture(handler, extra = {}) {
@@ -285,4 +293,221 @@ test('ENG-AGY-002: /model status uses zero subprocesses, /model list uses zero-M
   ].join('\n');
   assert.match(bridgeSrc, /当前没有运行中的 \$\{ENGINE_LABEL\} 任务/);
   assert.doesNotMatch(bridgeSrc, /当前没有运行中的 Codex 任务/);
+});
+
+test('Antigravity native sessions: filters ghost summary rows without .db files, avoids IDLE+not_fully_idle deadlock, and tags engine errors cleanly', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cfb-agy-ghost-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }));
+
+  const desktopAppDir = path.join(root, 'antigravity');
+  const convDir = path.join(desktopAppDir, 'conversations');
+  fs.mkdirSync(convDir, { recursive: true });
+
+  const aliveRunningId = 'aaaaaaaa-1111-4111-8111-111111111111';
+  const staleIdleId = 'bbbbbbbb-2222-4222-8222-222222222222';
+  const deletedGhostId = 'cccccccc-3333-4333-8333-333333333333';
+
+  // Only the first two exist on disk; deletedGhostId is a stale orphan row in SQLite
+  fs.writeFileSync(path.join(convDir, `${aliveRunningId}.db`), 'live-db');
+  fs.writeFileSync(path.join(convDir, `${staleIdleId}.db`), 'idle-db');
+
+  const db = new DatabaseSync(path.join(desktopAppDir, 'conversation_summaries.db'));
+  db.exec(`
+    CREATE TABLE conversation_summaries (
+      conversation_id text PRIMARY KEY,
+      title text NOT NULL DEFAULT "",
+      preview text NOT NULL DEFAULT "",
+      step_count integer NOT NULL DEFAULT 0,
+      last_modified_time datetime NOT NULL,
+      workspace_uris text NOT NULL,
+      status text NOT NULL DEFAULT "",
+      not_fully_idle numeric NOT NULL DEFAULT false,
+      killed numeric NOT NULL DEFAULT false,
+      parent_conversation_id text NOT NULL DEFAULT "",
+      app_data_dir text NOT NULL DEFAULT "antigravity"
+    );
+  `);
+  const ins = db.prepare(`INSERT INTO conversation_summaries VALUES (?, ?, '', 10, ?, '', ?, ?, 0, '', 'antigravity')`);
+  ins.run(aliveRunningId, 'Actually Running', '2026-11-24 01:25:00.000+00:00', 'CASCADE_RUN_STATUS_RUNNING', 1);
+  ins.run(staleIdleId, 'Stale Background Idle', '2026-11-24 01:20:00.000+00:00', 'CASCADE_RUN_STATUS_IDLE', 1);
+  ins.run(deletedGhostId, 'Deleted Ghost Row', '2026-11-23 07:00:00.000+00:00', 'CASCADE_RUN_STATUS_IDLE', 0);
+  db.close();
+
+  // 1) Deleted ghost row is filtered out because conversations/ exists and lacks cccccccc*.db/.pb
+  const listed = listAntigravityNativeConversations({ geminiDir: root, appDataDir: 'antigravity' });
+  assert.deepEqual(listed.map((item) => item.conversationId), [aliveRunningId, staleIdleId]);
+  assert.equal(listed[0].running, true);
+  assert.equal(listed[1].running, false);
+
+  // 2) IDLE + not_fully_idle=1 must NOT be considered busy (fixes permanent self-deadlock)
+  assert.equal(isAntigravityConversationBusy({ geminiDir: root, appDataDir: 'antigravity', conversationId: aliveRunningId }), true);
+  assert.equal(isAntigravityConversationBusy({ geminiDir: root, appDataDir: 'antigravity', conversationId: staleIdleId }), false);
+  const staleState = getAntigravityConversationState({ geminiDir: root, appDataDir: 'antigravity', conversationId: staleIdleId });
+  assert.equal(staleState.exists, true);
+  assert.equal(staleState.running, false);
+  assert.equal(staleState.notFullyIdle, true);
+
+  // 3) Pre-flight Antigravity busy error carries engine='antigravity' and classifies cleanly (never "Codex 运行失败")
+  const stateDir = path.join(root, 'state');
+  const logDir = path.join(root, 'logs');
+  fs.mkdirSync(stateDir, { recursive: true });
+  fs.mkdirSync(logDir, { recursive: true });
+  const botConfigPath = path.join(root, 'bot.json');
+  fs.writeFileSync(botConfigPath, JSON.stringify({ engine: 'antigravity', provider: { id: 'official' }, antigravity: { permissionMode: 'always-proceed' } }));
+  const agySession = {
+    id: 's1',
+    title: 'Actually Running',
+    engine: 'antigravity',
+    antigravitySessionId: aliveRunningId,
+    antigravityHome: root,
+    antigravityAppDataDir: 'antigravity',
+  };
+  const agyBridge = createAntigravityBridge({
+    config: {
+      stateDir, logDir, workspace: root, antigravityDataRoot: root, antigravityHome: root,
+      antigravityDesktopGeminiDir: root, antigravityBotConfig: botConfigPath, antigravityCli: { command: 'agy' },
+    },
+    getSession: () => agySession,
+    getChatState: () => ({ currentSessionId: 's1', sessions: [agySession] }),
+    getChats: () => ({ c1: { currentSessionId: 's1', sessions: [agySession] } }),
+    resetSession: () => agySession,
+    saveSessions: () => {},
+    userText: (c) => String(c || ''),
+    sendMarkdown: async () => {},
+    activeChildren: new Map(),
+    activeJobs: new Map(),
+    appendText: () => {}, reduceEvent: () => {}, markPhase: () => {}, ensureDone: () => {}, markInterrupted: () => {}, markError: () => {},
+  });
+  t.after(() => agyBridge.close());
+  let caughtAgy;
+  try {
+    await agyBridge.run({ chat_id: 'c1', message_id: 'm1', content: '现在怎么样了' }, agySession);
+  } catch (err) {
+    caughtAgy = err;
+  }
+  assert.ok(caughtAgy);
+  assert.equal(caughtAgy.engine, 'antigravity');
+  assert.equal(caughtAgy.code, 'ANTIGRAVITY_DESKTOP_BUSY');
+  const agyFailure = classifyCodexFailure(caughtAgy);
+  assert.equal(agyFailure.kind, 'desktop_busy');
+  assert.equal(agyFailure.label, '客户端对话运行中');
+  assert.doesNotMatch(agyFailure.message, /Codex/);
+
+  // 4) Claude pre-flight error (wrong engine) also carries engine='claude' and never mislabels as "Codex 运行失败"
+  const claudeBridge = createClaudeBridge({
+    config: { stateDir, logDir, workspace: root, claudeHome: root, claudeCli: { command: 'claude' } },
+    getSession: () => ({ id: 'x1', engine: 'codex' }),
+    getChatState: () => ({ currentSessionId: 'x1', sessions: [] }),
+    getChats: () => ({}),
+    resetSession: () => ({}),
+    saveSessions: () => {},
+    userText: (c) => String(c || ''),
+    sendText: async () => {}, sendMarkdown: async () => {},
+    activeChildren: new Map(), activeJobs: new Map(),
+    appendText: () => {}, reduceEvent: () => {}, markPhase: () => {}, ensureDone: () => {}, markInterrupted: () => {}, markError: () => {},
+    terminateProcessTree: () => {}, log: () => {},
+  });
+  t.after(() => claudeBridge.close());
+  let caughtClaude;
+  try {
+    await claudeBridge.run({ chat_id: 'c1', message_id: 'm2', content: 'hi' }, { id: 'x1', engine: 'codex' });
+  } catch (err) {
+    caughtClaude = err;
+  }
+  assert.ok(caughtClaude);
+  assert.equal(caughtClaude.engine, 'claude');
+  const claudeFailure = classifyCodexFailure(caughtClaude);
+  assert.match(claudeFailure.message, /Claude Code 运行失败/);
+  assert.doesNotMatch(claudeFailure.message, /Codex 运行失败/);
+});
+
+test('Antigravity ACP keepalive: preserves live worker across background tasks, delivers out-of-turn wakeup to Feishu, and reuses live worker on follow-up', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cfb-agy-bg-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }));
+  const stateDir = path.join(root, 'state');
+  const logDir = path.join(root, 'logs');
+  fs.mkdirSync(stateDir, { recursive: true });
+  fs.mkdirSync(logDir, { recursive: true });
+  const botConfigPath = path.join(root, 'bot.json');
+  fs.writeFileSync(botConfigPath, JSON.stringify({ engine: 'antigravity', provider: { id: 'official' }, antigravity: { permissionMode: 'always-proceed' } }));
+
+  const session = { id: 'bg1', title: 'HVI-CIDNet', engine: 'antigravity', messages: [], antigravitySessionId: '' };
+  const chat = { currentSessionId: 'bg1', sessions: [session] };
+  const sentMessages = [];
+  const activeJobs = new Map();
+  let spawnCount = 0;
+  let activeFixture = null;
+  let promptIndex = 0;
+
+  const bridge = createAntigravityBridge({
+    config: {
+      stateDir, logDir, workspace: root, antigravityDataRoot: root, antigravityHome: root,
+      antigravityBotConfig: botConfigPath, antigravityCli: { command: 'fixture' },
+      antigravityBackgroundPollMs: 40,
+      antigravityBackgroundFlushMs: 50,
+      antigravityBackgroundUsageFlushMs: 30,
+      antigravityBackgroundTimeoutMs: 10_000,
+    },
+    getSession: () => session,
+    getChatState: () => chat,
+    getChats: () => ({ 'chat-bg': chat }),
+    resetSession: () => session,
+    saveSessions: () => {},
+    userText: (c) => String(c || ''),
+    sendMarkdown: async (chatId, text, kind) => { sentMessages.push({ chatId, text, kind }); },
+    activeChildren: new Map(),
+    activeJobs,
+    appendText: () => {}, reduceEvent: () => {}, markPhase: () => {}, ensureDone: () => {}, markInterrupted: () => {}, markError: () => {},
+    createClient: (opts) => {
+      spawnCount += 1;
+      activeFixture = fixture((request, send) => {
+        if (request.method !== 'session/prompt') return false;
+        promptIndex += 1;
+        if (promptIndex === 1) {
+          // Turn 1 launches an in-flight background tool and ends turn waiting for wakeup
+          send({ method: 'session/update', params: { sessionId: 'native-session', update: { sessionUpdate: 'tool_call', toolCallId: 'bg-task-1', title: 'Download LOL', status: 'in_progress' } } });
+          send({ method: 'session/update', params: { sessionId: 'native-session', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '正在后台下载数据集' } } } });
+          send({ id: request.id, result: { stopReason: 'end_turn' } });
+          return true;
+        }
+        // Turn 2 ("现在怎么样了") arrives on the SAME reused live worker while bg-task-1 is still running
+        send({ method: 'session/update', params: { sessionId: 'native-session', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '还在下载，已完成 60%' } } } });
+        send({ id: request.id, result: { stopReason: 'end_turn' } });
+        return true;
+      }, opts);
+      return activeFixture.client;
+    },
+  });
+  t.after(() => bridge.close());
+
+  // 1) Turn 1 returns with pending tool -> client stays alive & parked
+  const r1 = await bridge.run({ chat_id: 'chat-bg', message_id: 'm1', content: '开始实验' }, session);
+  assert.equal(r1.text, '正在后台下载数据集');
+  assert.equal(spawnCount, 1);
+  assert.equal(bridge.hasBackground('chat-bg'), true);
+  assert.equal(activeFixture.client.closed, false);
+
+  // 2) Follow-up ("现在怎么样了") reuses the exact same parked client (spawnCount stays 1!)
+  const r2 = await bridge.run({ chat_id: 'chat-bg', message_id: 'm2', content: '现在怎么样了' }, session);
+  assert.equal(r2.text, '还在下载，已完成 60%');
+  assert.equal(spawnCount, 1);
+  assert.equal(bridge.hasBackground('chat-bg'), true);
+  assert.equal(activeFixture.client.closed, false);
+
+  // 3) Background task completes and wakes the agent out-of-turn -> automatically delivered to Feishu & auto-retired!
+  activeFixture.send({ method: 'session/update', params: { sessionId: 'native-session', update: { sessionUpdate: 'tool_call_update', toolCallId: 'bg-task-1', status: 'completed' } } });
+  activeFixture.send({ method: 'session/update', params: { sessionId: 'native-session', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '数据集已就绪，已启动两张 4090 训练。' } } } });
+  activeFixture.send({ method: 'session/update', params: { sessionId: 'native-session', update: { sessionUpdate: 'usage_update', used: 2048, size: 1048576 } } });
+
+  const deadline = Date.now() + 3000;
+  while (Date.now() < deadline && (sentMessages.length === 0 || bridge.hasBackground('chat-bg'))) {
+    await new Promise((r) => setTimeout(r, 30));
+  }
+  assert.equal(sentMessages.length, 1);
+  assert.equal(sentMessages[0].kind, 'antigravity-background-wakeup');
+  assert.match(sentMessages[0].text, /Antigravity 后台任务进展/);
+  assert.match(sentMessages[0].text, /已启动两张 4090 训练/);
+  assert.equal(bridge.hasBackground('chat-bg'), false);
+  assert.equal(activeFixture.client.closed, true);
+  assert.ok(session.messages.some((m) => m.role === 'assistant' && m.content.includes('4090')));
 });

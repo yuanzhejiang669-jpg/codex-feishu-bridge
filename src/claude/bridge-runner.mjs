@@ -194,6 +194,15 @@ export function createClaudeBridge({ config, getSession, getChatState, getChats,
   }
 
   async function run(event, session, state, onState, contentOverride) {
+    try {
+      return await runInternal(event, session, state, onState, contentOverride);
+    } catch (error) {
+      if (error && typeof error === 'object' && !error.engine) error.engine = 'claude';
+      throw error;
+    }
+  }
+
+  async function runInternal(event, session, state, onState, contentOverride) {
     if (session.engine && session.engine !== 'claude') throw new Error('该会话属于其他内核，请新建 Claude 会话');
     const selected = settings(session);
     const definition = providers().find((item) => item.id === selected.provider);

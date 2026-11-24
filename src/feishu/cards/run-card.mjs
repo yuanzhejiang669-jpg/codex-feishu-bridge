@@ -247,7 +247,8 @@ export function createRunCardRenderer(deps = {}) {
       closeStreamingBlocks(state);
       state.terminal = "error";
       state.footer = null;
-      state.errorMsg = raw.message || raw.error || "Codex 运行失败";
+      const engineName = state.meta?.engine === "antigravity" ? "Antigravity" : state.meta?.engine === "claude" ? "Claude Code" : "Codex";
+      state.errorMsg = raw.message || raw.error || `${engineName} 运行失败`;
       state.meta.durationMs = Date.now() - state.startedAt;
       markRunPhase(state, "error", { connection: "connected" });
       return true;
@@ -436,6 +437,9 @@ export function createRunCardRenderer(deps = {}) {
   }
 
   function markRunError(state, error) {
+    if (error && typeof error === "object" && !error.engine && state?.meta?.engine) {
+      try { error.engine = state.meta.engine; } catch {}
+    }
     const failure = classifyCodexFailure(error);
     const disconnected = /app-server\s+(?:exited|ended before)|broken pipe|write after end/i.test(errorText(error));
     closeStreamingBlocks(state);

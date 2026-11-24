@@ -115,6 +115,12 @@ export function classifyCodexFailure(value, fallback = "Codex 运行失败") {
       suggestion: '原会话和工作区已保留。服务恢复后可继续；本轮不会无限等待或自动重放已执行的工具。' };
   }
 
+  if (errorCode === 'ANTIGRAVITY_DESKTOP_BUSY' || /正在\s*Antigravity\s*客户端中运行/.test(detail)) {
+    return { ...base, kind: 'desktop_busy', label: '客户端对话运行中',
+      message: '该对话正在 Antigravity 桌面客户端中执行当前回合，暂不能同时从飞书续接。',
+      suggestion: '请等待客户端本轮完成后重试，或先 /new 创建独立会话。' };
+  }
+
   if (httpStatus >= 500 && httpStatus <= 599) {
     return { ...base, kind: 'upstream_http', label: `上游服务异常（HTTP ${httpStatus}）`,
       message: `模型服务商返回 HTTP ${httpStatus}，本轮请求未能完成。`,

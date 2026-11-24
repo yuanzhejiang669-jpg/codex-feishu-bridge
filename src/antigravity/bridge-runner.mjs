@@ -18,6 +18,7 @@ import {
 import {
   antigravityNativeArtifacts,
   deleteAntigravityNativeConversation,
+  getAntigravityConversationState,
   isAntigravityConversationBusy,
   listAntigravityNativeConversations,
 } from './native-sessions.mjs';
@@ -149,8 +150,13 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
   };
   const cleanupPendingForChat = (chatId) => (pendingAttachments?.cleanup ? pendingAttachments.cleanup(chatId) : []);
   const clients = new Set(); const permissions = new Map(); const listViews = new Map(); const deleteViews = new Map();
+  const backgroundSessions = new Map();
   const modelCatalogCache = new Map();
   const MODEL_CATALOG_TTL_MS = 5 * 60_000;
+  const BG_POLL_MS = Math.max(20, Number(config.antigravityBackgroundPollMs) || 3000);
+  const BG_FLUSH_QUIET_MS = Math.max(20, Number(config.antigravityBackgroundFlushMs) || 2500);
+  const BG_USAGE_FLUSH_MS = Math.max(10, Number(config.antigravityBackgroundUsageFlushMs) || 600);
+  const BG_MAX_MS = Math.max(1000, Number(config.antigravityBackgroundTimeoutMs) || 4 * 60 * 60_000);
   const runtimePath = path.join(config.stateDir, 'antigravity-runtime.json');
   const catalogRoot = config.antigravityDataRoot;
   const botConfiguration = () => config.antigravityBotConfig ? readJson(config.antigravityBotConfig, {}) : {};
@@ -336,27 +342,252 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
     });
   }
 
+  function sessionFingerprint(session, selected, target) {
+    return JSON.stringify([
+      session?.id || '',
+      session?.antigravitySessionId || '',
+      selected?.provider || '',
+      selected?.model || '',
+      selected?.reasoning || '',
+      selected?.permissionMode || '',
+      target?.geminiDir || '',
+      target?.appDataDir || '',
+      session?.antigravityWorkspace || config.workspace || '',
+    ]);
+  }
+
+  function flushBackgroundBuffer(entry) {
+    if (!entry) return Promise.resolve();
+    clearTimeout(entry.flushTimer);
+    entry.flushTimer = null;
+    const text = entry.outOfTurnText.trim();
+    if (!text) {
+      entry.outOfTurnText = '';
+      return entry.flushChain;
+    }
+    entry.outOfTurnText = '';
+    if (entry.client && !entry.client.turnActive) entry.client.text = '';
+    entry.flushChain = entry.flushChain.catch(() => {}).then(async () => {
+      try {
+        entry.session.messages ||= [];
+        entry.session.messages.push({ role: 'assistant', content: text, at: Date.now() });
+        saveSessions();
+      } catch {}
+      try {
+        await sendMarkdown(
+          entry.chatId,
+          `**Antigravity 后台任务进展**\n\n${text}`,
+          'antigravity-background-wakeup',
+          entry.replyMessageId,
+        );
+      } catch {}
+    });
+    return entry.flushChain;
+  }
+
+  function clearBackgroundTimers(entry) {
+    if (!entry) return;
+    clearInterval(entry.pollTimer);
+    clearTimeout(entry.flushTimer);
+    clearTimeout(entry.maxTimer);
+    entry.pollTimer = null;
+    entry.flushTimer = null;
+    entry.maxTimer = null;
+  }
+
+  function releaseEntryLeases(entry) {
+    if (!entry || entry.leasesReleased) return;
+    entry.leasesReleased = true;
+    try { entry.releaseAccount?.(); } catch {}
+    try { entry.releaseSession?.(); } catch {}
+  }
+
+  async function retireBackgroundSession(chatId, reason = 'retired', { interrupt = false, flush = true } = {}) {
+    const entry = backgroundSessions.get(chatId);
+    if (!entry) return false;
+    backgroundSessions.delete(chatId);
+    entry.retired = true;
+    clearBackgroundTimers(entry);
+    if (flush) await flushBackgroundBuffer(entry);
+    else entry.outOfTurnText = '';
+    if (interrupt && !entry.client.closed) {
+      try { entry.client.interrupt(); } catch {}
+    }
+    clients.delete(entry.client);
+    try { await entry.client.close(); } catch {}
+    releaseEntryLeases(entry);
+    return true;
+  }
+
+  function parkBackgroundSession({ chatId, session, client, target, selected, fingerprint, releaseAccount, releaseSession, replyMessageId, event }) {
+    const entry = {
+      chatId,
+      session,
+      client,
+      target,
+      selected,
+      fingerprint,
+      releaseAccount,
+      releaseSession,
+      replyMessageId,
+      event,
+      outOfTurnText: '',
+      flushChain: Promise.resolve(),
+      flushTimer: null,
+      pollTimer: null,
+      maxTimer: null,
+      lastEventAt: Date.now(),
+      idleStreak: 0,
+      parkedAt: Date.now(),
+      retired: false,
+      leasesReleased: false,
+    };
+    backgroundSessions.set(chatId, entry);
+
+    const scheduleOutOfTurnFlush = (delayMs) => {
+      if (entry.retired) return;
+      clearTimeout(entry.flushTimer);
+      entry.flushTimer = setTimeout(() => { void flushBackgroundBuffer(entry); }, delayMs);
+      entry.flushTimer?.unref?.();
+    };
+
+    client.onPermission = (request) => (selected.permissionMode === 'always-proceed' ? true : requestPermission(event, request));
+    client.onEvent = (item) => {
+      if (entry.retired || backgroundSessions.get(chatId) !== entry) return;
+      const update = item.update || {};
+      entry.lastEventAt = Date.now();
+      entry.idleStreak = 0;
+      if (item.type === 'session_info_update' && update.title && !session.userRenamed) {
+        session.title = update.title;
+        saveSessions();
+      }
+      if (item.type === 'usage_update') {
+        session.lastContextUsage = {
+          usedTokens: update.used,
+          contextWindow: update.size,
+          percent: update.size > 0 ? Math.round(update.used / update.size * 1000) / 10 : null,
+          updatedAt: Date.now(),
+        };
+        saveSessions();
+        if (entry.outOfTurnText.trim()) scheduleOutOfTurnFlush(BG_USAGE_FLUSH_MS);
+      }
+      if (item.type === 'agent_message_chunk' && update.content?.type === 'text') {
+        entry.outOfTurnText += update.content.text;
+        scheduleOutOfTurnFlush(BG_FLUSH_QUIET_MS);
+      }
+    };
+
+    entry.pollTimer = setInterval(() => {
+      if (entry.retired || backgroundSessions.get(chatId) !== entry) return;
+      if (client.closed || client.stopped) {
+        void retireBackgroundSession(chatId, 'client-closed', { interrupt: false, flush: true });
+        return;
+      }
+      const hasTools = Boolean(client.hasPendingTools?.());
+      const dbState = session.antigravitySessionId
+        ? getAntigravityConversationState({ geminiDir: target.geminiDir, appDataDir: target.appDataDir, conversationId: session.antigravitySessionId })
+        : { exists: false, running: false, notFullyIdle: false };
+      const recentEvent = Date.now() - entry.lastEventAt < BG_POLL_MS;
+      const stillActive = hasTools || recentEvent || (dbState.exists && (dbState.running || dbState.notFullyIdle));
+      if (stillActive) {
+        entry.idleStreak = 0;
+      } else {
+        entry.idleStreak += 1;
+        if (entry.idleStreak >= 2) {
+          void retireBackgroundSession(chatId, 'background-completed', { interrupt: false, flush: true });
+        }
+      }
+    }, BG_POLL_MS);
+    entry.pollTimer?.unref?.();
+
+    entry.maxTimer = setTimeout(() => {
+      if (backgroundSessions.get(chatId) === entry) {
+        void retireBackgroundSession(chatId, 'background-timeout', { interrupt: true, flush: true });
+      }
+    }, BG_MAX_MS);
+    entry.maxTimer?.unref?.();
+
+    client.closedPromise?.then(() => {
+      if (backgroundSessions.get(chatId) === entry) {
+        void retireBackgroundSession(chatId, 'process-exited', { interrupt: false, flush: true });
+      }
+    });
+    return entry;
+  }
+
+  async function stopBackground(chatId, { all = false } = {}) {
+    if (all) {
+      const ids = [...backgroundSessions.keys()];
+      let count = 0;
+      for (const id of ids) {
+        if (await retireBackgroundSession(id, 'stop-all', { interrupt: true, flush: true })) count += 1;
+      }
+      return count;
+    }
+    return (await retireBackgroundSession(chatId, 'user-stop', { interrupt: true, flush: true })) ? 1 : 0;
+  }
+
+  function hasBackground(chatId) {
+    return backgroundSessions.has(chatId);
+  }
+
   async function run(event, session, state, onState, contentOverride) {
+    try {
+      return await runInternal(event, session, state, onState, contentOverride);
+    } catch (error) {
+      if (error && typeof error === 'object' && !error.engine) error.engine = 'antigravity';
+      throw error;
+    }
+  }
+
+  async function runInternal(event, session, state, onState, contentOverride) {
     if (session.engine && session.engine !== 'antigravity') throw new Error('此会话属于其他内核，请 /new 创建 Antigravity 会话');
     const selected = settings(session); const startedAt = Date.now();
     const provider = selectProvider(catalogRoot, selected.provider);
     const target = resolveSessionTarget(session, provider);
-    if (session.antigravitySessionId && target.appDataDir === 'antigravity'
-      && isAntigravityConversationBusy({ geminiDir: target.geminiDir, appDataDir: target.appDataDir, conversationId: session.antigravitySessionId })) {
-      throw new Error('该对话正在 Antigravity 客户端中运行，请等待客户端本轮结束后再在飞书续接。');
+    const desiredFingerprint = sessionFingerprint(session, selected, target);
+
+    let reusedParked = false;
+    let client;
+    let releaseSession = null;
+    let releaseAccount = null;
+
+    const parked = backgroundSessions.get(event.chat_id);
+    if (parked) {
+      if (parked.fingerprint === desiredFingerprint && !parked.client.closed && !parked.client.stopped) {
+        backgroundSessions.delete(event.chat_id);
+        parked.retired = true;
+        clearBackgroundTimers(parked);
+        await flushBackgroundBuffer(parked);
+        client = parked.client;
+        releaseSession = parked.releaseSession;
+        releaseAccount = parked.releaseAccount;
+        reusedParked = true;
+      } else {
+        await retireBackgroundSession(event.chat_id, 'session-replaced', { interrupt: true, flush: true });
+      }
     }
-    const releaseSession = sharedSessions
-      ? (sharedSessions.acquireAsync ? await sharedSessions.acquireAsync(session) : sharedSessions.acquire(session))
-      : null;
-    let releaseAccount;
-    try { releaseAccount = accountLock.acquireOfficialLease(catalogRoot, provider); }
-    catch (error) { releaseSession?.(); throw error; }
+
+    if (!reusedParked) {
+      if (session.antigravitySessionId && target.appDataDir === 'antigravity'
+        && isAntigravityConversationBusy({ geminiDir: target.geminiDir, appDataDir: target.appDataDir, conversationId: session.antigravitySessionId })) {
+        throw Object.assign(
+          new Error('该对话正在 Antigravity 客户端中运行，请等待客户端本轮结束后再在飞书续接。'),
+          { engine: 'antigravity', code: 'ANTIGRAVITY_DESKTOP_BUSY' },
+        );
+      }
+      releaseSession = sharedSessions
+        ? (sharedSessions.acquireAsync ? await sharedSessions.acquireAsync(session) : sharedSessions.acquire(session))
+        : null;
+      try { releaseAccount = accountLock.acquireOfficialLease(catalogRoot, provider); }
+      catch (error) { releaseSession?.(); throw error; }
+    }
+
     let flushTimer; let flushing = Promise.resolve();
     const flush = () => { clearTimeout(flushTimer); flushTimer = null; flushing = flushing.then(() => onState?.(state)); return flushing; };
     const schedule = () => { if (!flushTimer) flushTimer = setTimeout(() => { void flush().catch(() => {}); }, 150); };
-    let initialized = false;
-    let client;
-    try { client = newClient(session, event, (item) => {
+    let initialized = reusedParked;
+    const foregroundOnEvent = (item) => {
       const update = item.update;
       if (item.type === 'session_info_update' && update.title && !session.userRenamed) { session.title = update.title; saveSessions(); }
       if (item.type === 'usage_update') {
@@ -372,46 +603,66 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
       else if (item.type === 'tool_call_update' && ['completed', 'failed'].includes(update.status)) reduceEvent(state, { type: 'item.completed', item: { type: 'tool', id: update.toolCallId, name: update.name || update.title || update.kind, output: update.rawOutput || update.content, status: update.status === 'failed' ? 'error' : 'completed' } });
       else if (initialized) markPhase(state, 'model_thinking', { connection: 'connected' });
       schedule();
-    }, target); } catch (error) { releaseAccount(); releaseSession?.(); throw error; }
-    clients.add(client);
+    };
+    const foregroundOnPermission = (request) => (selected.permissionMode === 'always-proceed' ? true : requestPermission(event, request));
+
+    if (!reusedParked) {
+      try { client = newClient(session, event, foregroundOnEvent, target); }
+      catch (error) { releaseAccount?.(); releaseSession?.(); throw error; }
+      clients.add(client);
+    } else {
+      client.onEvent = foregroundOnEvent;
+      client.onPermission = foregroundOnPermission;
+    }
+
     const job = {
       client, mode: 'antigravity', sessionId: session.id, messageId: event.message_id || event.id, startedAt,
       clearGeneration: 0, pendingSteerEntries: [], steerInFlight: null,
+      ...(reusedParked ? { pid: client.child?.pid, threadId: session.antigravitySessionId } : {}),
     };
     activeJobs.set(event.chat_id, job);
+    let runSucceeded = false;
+    let shouldPark = false;
     try {
-      if (state) { state.meta.engine = 'antigravity'; markPhase(state, 'initializing', { connection: 'starting' }); await flush(); }
+      if (state) { state.meta.engine = 'antigravity'; markPhase(state, reusedParked ? 'model_thinking' : 'initializing', { connection: reusedParked ? 'connected' : 'starting' }); await flush(); }
       // Record the exact source. Switching a channel must not silently replay into an unrelated native session.
       if (session.antigravitySourceId && session.antigravitySourceId !== selected.provider) {
         throw new Error('此原生会话已绑定另一渠道。请切回原渠道继续，或 /new 创建新会话后使用新渠道。');
       }
-      const opened = await client.openSession({
-        sessionId: session.antigravitySessionId || '',
-        mcpServers: nativeMcpServers({ ...config, workspace: session.antigravityWorkspace || config.workspace }, event),
-        model: selected.model,
-        effort: selected.reasoning,
-        mode: selected.permissionMode,
-      });
-      initialized = true;
-      session.engine = 'antigravity';
-      session.antigravitySessionId = opened.sessionId;
-      session.antigravitySourceId = selected.provider;
-      session.antigravityHome = target.geminiDir || session.antigravityHome || config.antigravityHome;
-      if (target.appDataDir) session.antigravityAppDataDir = target.appDataDir;
-      session.antigravityWorkspace ||= config.workspace;
-      saveSessions();
-      const observedCatalog = extractAntigravityModelCatalog(opened.models, opened.configOptions);
-      atomicJson(runtimePath, { engine: 'antigravity', version: client.runtime.agentInfo?.version,
-        sessionId: opened.sessionId, pid: client.child?.pid, provider: selected.provider,
-        accountId: selected.accountAlias, models: opened.models, configOptions: opened.configOptions,
-        modes: opened.modes, observedAt: new Date().toISOString(), geminiDir: target.geminiDir, appDataDir: target.appDataDir || 'antigravity-cli' });
-      Object.assign(job, { pid: client.child.pid, threadId: opened.sessionId });
-      if (state) {
-        state.threadId = opened.sessionId;
-        const resolvedModel = observedCatalog.currentBaseModel || selected.model || observedCatalog.currentModelId;
-        const resolvedEffort = observedCatalog.currentEffort || selected.reasoning;
-        if (resolvedModel) state.meta.model = resolvedEffort ? `${resolvedModel} (${resolvedEffort})` : resolvedModel;
-        markPhase(state, 'model_thinking', { connection: 'connected' });
+      if (!reusedParked) {
+        const opened = await client.openSession({
+          sessionId: session.antigravitySessionId || '',
+          mcpServers: nativeMcpServers({ ...config, workspace: session.antigravityWorkspace || config.workspace }, event),
+          model: selected.model,
+          effort: selected.reasoning,
+          mode: selected.permissionMode,
+        });
+        initialized = true;
+        session.engine = 'antigravity';
+        session.antigravitySessionId = opened.sessionId;
+        session.antigravitySourceId = selected.provider;
+        session.antigravityHome = target.geminiDir || session.antigravityHome || config.antigravityHome;
+        if (target.appDataDir) session.antigravityAppDataDir = target.appDataDir;
+        session.antigravityWorkspace ||= config.workspace;
+        saveSessions();
+        const observedCatalog = extractAntigravityModelCatalog(opened.models, opened.configOptions);
+        atomicJson(runtimePath, { engine: 'antigravity', version: client.runtime.agentInfo?.version,
+          sessionId: opened.sessionId, pid: client.child?.pid, provider: selected.provider,
+          accountId: selected.accountAlias, models: opened.models, configOptions: opened.configOptions,
+          modes: opened.modes, observedAt: new Date().toISOString(), geminiDir: target.geminiDir, appDataDir: target.appDataDir || 'antigravity-cli' });
+        Object.assign(job, { pid: client.child.pid, threadId: opened.sessionId });
+        if (state) {
+          state.threadId = opened.sessionId;
+          const resolvedModel = observedCatalog.currentBaseModel || selected.model || observedCatalog.currentModelId;
+          const resolvedEffort = observedCatalog.currentEffort || selected.reasoning;
+          if (resolvedModel) state.meta.model = resolvedEffort ? `${resolvedModel} (${resolvedEffort})` : resolvedModel;
+          markPhase(state, 'model_thinking', { connection: 'connected' });
+          await flush();
+        }
+      } else if (state) {
+        state.threadId = session.antigravitySessionId || client.sessionId;
+        const info = displayModelInfo(session);
+        if (info.effectiveModel) state.meta.model = info.effectiveEffort ? `${info.effectiveModel} (${info.effectiveEffort})` : info.effectiveModel;
         await flush();
       }
       const result = await client.prompt(antigravityContent(contentOverride ?? userText(event.content), event.attachments));
@@ -422,6 +673,14 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
       saveSessions();
       if (state) { state.meta.inputTokens = usage.inputTokens || 0; state.meta.outputTokens = usage.outputTokens || 0;
         ensureDone(state, result.text); state.meta.durationMs = Date.now() - startedAt; await flush(); }
+      runSucceeded = true;
+      const dbState = session.antigravitySessionId
+        ? getAntigravityConversationState({ geminiDir: target.geminiDir, appDataDir: target.appDataDir, conversationId: session.antigravitySessionId })
+        : { exists: false, running: false, notFullyIdle: false };
+      shouldPark = !client.closed && !client.stopped && (
+        Boolean(client.hasPendingTools?.())
+        || Boolean(dbState.exists && (dbState.running || dbState.notFullyIdle))
+      );
       return { text: result.text || '(Antigravity 没有返回文字)', durationMs: Date.now() - startedAt,
         tokens: `${usage.inputTokens || 0}↑ ${usage.outputTokens || 0}↓` };
     } catch (error) {
@@ -430,9 +689,27 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
       throw error;
     } finally {
       for (const [token, pending] of permissions) if (pending.event === event) { clearTimeout(pending.timer); pending.resolve(false); permissions.delete(token); }
-      clearTimeout(flushTimer); clients.delete(client); await client.close();
-      releaseAccount(); releaseSession?.();
+      clearTimeout(flushTimer);
       if (activeJobs.get(event.chat_id)?.client === client) activeJobs.delete(event.chat_id);
+      if (runSucceeded && shouldPark && !client.closed && !client.stopped) {
+        parkBackgroundSession({
+          chatId: event.chat_id,
+          session,
+          client,
+          target,
+          selected,
+          fingerprint: sessionFingerprint(session, selected, target),
+          releaseAccount,
+          releaseSession,
+          replyMessageId: event.message_id || event.id,
+          event,
+        });
+      } else {
+        clients.delete(client);
+        await client.close();
+        releaseAccount?.();
+        releaseSession?.();
+      }
     }
   }
 
@@ -594,10 +871,11 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
     }
     if (command.name === '/new' || command.name === '/reset') {
       if (activeJobs.has(event.chat_id)) { await reply('当前任务仍在运行，请先 /stop 或等待完成。'); return true; }
+      const stoppedBg = await retireBackgroundSession(event.chat_id, 'new-session', { interrupt: true, flush: true });
       const previous = command.name === '/reset' ? currentSession() : null;
       const next = resetSession(event.chat_id, command.rest || '新 Antigravity 会话', accessCtx);
       if (previous) for (const key of ['providerOverride', 'modelOverride', 'reasoningOverride']) next[key] = previous[key];
-      saveSessions(); await reply(`已创建 Antigravity 会话：${next.title} (${next.id})`); return true;
+      saveSessions(); await reply(`已创建 Antigravity 会话：${next.title} (${next.id})${stoppedBg ? '\n（已结束原会话的后台保活）' : ''}`); return true;
     }
     if (['/list', '/sessions'].includes(command.name)) {
       const showAll = /\ball\b/i.test(command.rest || '');
@@ -616,7 +894,7 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
         })),
         ...visibleNative.map((item) => {
           const dirTag = item.cwd ? ` · ${path.basename(item.cwd)}` : '';
-          const busyTag = item.notFullyIdle ? ' · [客户端运行中]' : '';
+          const busyTag = item.running ? ' · [客户端运行中]' : '';
           return {
             kind: 'native',
             native: item,
@@ -643,6 +921,7 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
       if (activeJobs.has(event.chat_id)) { await reply('当前任务仍在运行，请先 /stop 或等待完成。'); return true; }
       const resolved = resolveBridgeOrNativeTarget(event, command.rest.trim());
       if (!resolved) { await reply(`未找到可访问的会话：${command.rest.trim()}，请先发送 /list 或 /list all 查看可用序号。`); return true; }
+      const stoppedBg = await retireBackgroundSession(event.chat_id, 'switch-session', { interrupt: true, flush: true });
       if (resolved.kind === 'native') {
         const native = resolved.native;
         if (isAntigravityConversationBusy({ geminiDir: native.geminiDir, appDataDir: native.appDataDir, conversationId: native.conversationId })) {
@@ -667,12 +946,12 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
           Object.assign(bound, seed);
           saveSessions();
         }
-        await reply(`已切换到原生对话：${bound.title} (${bound.id})\n工作区：${bound.antigravityWorkspace || config.workspace}`);
+        await reply(`已切换到原生对话：${bound.title} (${bound.id})\n工作区：${bound.antigravityWorkspace || config.workspace}${stoppedBg ? '\n（已结束原会话的后台保活）' : ''}`);
         return true;
       }
       const target = resolved.session;
       sharedSessions?.assertIdle(target);
-      chat.currentSessionId = target.id; saveSessions(); await reply(`已切换：${target.title} (${target.id})`); return true;
+      chat.currentSessionId = target.id; saveSessions(); await reply(`已切换：${target.title} (${target.id})${stoppedBg ? '\n（已结束原会话的后台保活）' : ''}`); return true;
     }
     if (command.name === '/rename') {
       if (activeJobs.has(event.chat_id)) { await reply('当前会话正在运行，请等待本轮结束后再重命名。'); return true; }
@@ -680,11 +959,13 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
       const match = command.rest.trim().match(/^(\d+|[a-f0-9-]{12,})\s+(.+)$/i);
       const target = match ? resolveSession(event, match[1]) : currentSession();
       if (!target) throw new Error(`未找到可访问的会话：${match ? match[1] : ''}，请先发送 /list 查看可用序号。`);
-      sharedSessions?.assertIdle(target);
+      if (backgroundSessions.get(event.chat_id)?.session?.id !== target.id) sharedSessions?.assertIdle(target);
       target.title = (match ? match[2] : command.rest.trim()).slice(0, 160); target.userRenamed = true; saveSessions(); await reply(`已重命名：${target.title}`); return true;
     }
     if (['/delete', '/del', '/rm'].includes(command.name)) {
-      if (activeJobs.has(event.chat_id)) { await reply('当前聊天有任务正在运行，请先 /stop 或等待结束后再执行 /delete。'); return true; }
+      if (activeJobs.has(event.chat_id) || backgroundSessions.has(event.chat_id)) {
+        await reply('当前聊天有任务或后台等待唤醒会话正在运行，请先 /stop 或等待结束后再执行 /delete。'); return true;
+      }
       const rawSpec = command.rest.trim();
       if (!rawSpec) {
         await reply('用法：`/delete <序号或ID>`，支持批量与区间（例如 `/delete 1 3-14`、`/delete 2,5-8`）。请先 `/list` 或 `/list all` 查看序号。');
@@ -848,7 +1129,9 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
       return true;
     }
     if (command.name === '/confirm') {
-      if (activeJobs.has(event.chat_id)) { await reply('当前聊天有任务正在运行，请先 /stop 或等待结束后再执行 /delete。'); return true; }
+      if (activeJobs.has(event.chat_id) || backgroundSessions.has(event.chat_id)) {
+        await reply('当前聊天有任务或后台等待唤醒会话正在运行，请先 /stop 或等待结束后再执行 /delete。'); return true;
+      }
       const pending = deleteViews.get(viewKey(event));
       const match = command.rest.trim().match(/^delete\s+(.+)$/i);
       if (!pending || !match || Date.now() > (pending.expiresAt || pending.at + 5 * 60_000)) {
@@ -954,6 +1237,7 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
         `会话：${session.title} (${session.id})`,
         `原生会话：${session.antigravitySessionId || '尚未创建'}`,
         `上下文：${usage ? `${usage.usedTokens} / ${usage.contextWindow || '未知'} tokens` : '等待原生使用量事件'}`,
+        backgroundSessions.has(event.chat_id) ? '后台保活：活跃（等待后台任务/定时器唤醒，结果会自动发到本聊天；可发消息续问或 /stop 停止）' : '',
         queueSummary?.(event.chat_id) || '',
       ].filter(Boolean).join('\n')); return true;
     }
@@ -961,6 +1245,7 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
       const parts = command.rest.trim().split(/\s+/).filter(Boolean);
       if (!parts.length || parts[0] === 'list') { await reply(`当前渠道：${settings(session).provider}\n` + readCatalog(catalogRoot).providers.map((item) => `${item.id} · ${item.name} · ${item.mode}`).join('\n')); return true; }
       if (activeJobs.has(event.chat_id)) throw new Error('当前任务仍在运行，不能切换渠道');
+      await retireBackgroundSession(event.chat_id, 'provider-change', { interrupt: true, flush: true });
       sharedSessions?.assertIdle(session);
       if (parts[0] === 'clear') { delete session.providerOverride; delete session.modelOverride; delete session.reasoningOverride; saveSessions(); await reply('已清除会话渠道覆盖，使用 Bot 默认配置。原生会话仍绑定原渠道。'); return true; }
       if (parts[0] === 'save') { const bot = botConfiguration(); bot.provider = { ...bot.provider, id: settings(session).provider, model: settings(session).model, reasoning: settings(session).reasoning }; atomicJson(config.antigravityBotConfig, bot); await reply('已将当前渠道、模型和强度保存为本 Bot 默认值。'); return true; }
@@ -1015,6 +1300,7 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
         return true;
       }
       if (activeJobs.has(event.chat_id)) throw new Error('当前任务运行中不能切换模型，请等待完成或 /stop 后再执行 /model。');
+      await retireBackgroundSession(event.chat_id, 'model-change', { interrupt: true, flush: true });
       sharedSessions?.assertIdle(session);
       if (['clear', 'default', 'reset'].includes(sub)) {
         delete session.modelOverride; delete session.reasoningOverride; saveSessions();
@@ -1067,6 +1353,7 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
         return true;
       }
       if (activeJobs.has(event.chat_id)) throw new Error('当前任务仍在运行，不能修改思考强度');
+      await retireBackgroundSession(event.chat_id, 'effort-change', { interrupt: true, flush: true });
       sharedSessions?.assertIdle(session);
       if (['clear', 'default', 'reset'].includes(value)) {
         delete session.reasoningOverride;
@@ -1093,6 +1380,7 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
       if (!value) { await reply(`当前权限模式：${settings(session).permissionMode}`); return true; }
       if (!NATIVE_MODES.has(value)) throw new Error('支持 always-proceed、auto、accept-edits、default、plan');
       if (activeJobs.has(event.chat_id)) throw new Error('当前任务仍在运行');
+      await retireBackgroundSession(event.chat_id, 'mode-change', { interrupt: true, flush: true });
       const bot = botConfiguration(); bot.antigravity = { ...bot.antigravity, permissionMode: value }; atomicJson(config.antigravityBotConfig, bot);
       await reply(`已更新权限模式为：${value}（下一轮生效）`); return true;
     }
@@ -1100,9 +1388,15 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
     return false;
   }
   function close() {
+    for (const entry of backgroundSessions.values()) {
+      entry.retired = true;
+      clearBackgroundTimers(entry);
+      releaseEntryLeases(entry);
+    }
+    backgroundSessions.clear();
     for (const client of clients) { client.interrupt(); client.close(); }
     for (const pending of permissions.values()) { clearTimeout(pending.timer); pending.resolve(false); }
     clients.clear(); permissions.clear();
   }
-  return { run, handleCommand, settings, close };
+  return { run, handleCommand, settings, stopBackground, hasBackground, close };
 }

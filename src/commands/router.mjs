@@ -1536,7 +1536,19 @@ export function createCommandRouter(deps = {}) {
     const cleared = clearQueuedWorkForChat(chatId, { all: true });
     const clearedTotal = cleared.removedQueued + cleared.cancelledPreflight + cleared.cancelledPendingSteers;
     const targets = [...activeCodexJobs.entries()];
+    const stoppedBg = CONFIG.engine === "antigravity"
+      ? Number((await antigravityBridge?.stopBackground?.(chatId, { all: true })) || 0)
+      : 0;
     if (!targets.length) {
+      if (stoppedBg > 0) {
+        await sendText(
+          chatId,
+          `已停止 ${stoppedBg} 个后台保活等待唤醒的 Antigravity 会话。已清空全部等待队列：${cleared.removedQueued} 条，取消尚未提交的任务：${cleared.cancelledPreflight} 条，取消尚未发送的补充指令：${cleared.cancelledPendingSteers} 条。`,
+          "stopall-bg",
+          messageId,
+        );
+        return;
+      }
       if (CONFIG.engine === "codex") {
         try {
           await syncChatSessionsWithCodex(chatId);
@@ -1601,6 +1613,16 @@ export function createCommandRouter(deps = {}) {
       : "";
     const job = activeCodexJobs.get(chatId);
     if (!job) {
+      if (CONFIG.engine === "antigravity" && antigravityBridge?.hasBackground?.(chatId)) {
+        await antigravityBridge.stopBackground(chatId);
+        await sendText(
+          chatId,
+          `已停止后台保活等待唤醒的 Antigravity 会话。${clearMode ? `已清理${clearedText}。` : ""}`,
+          "stop-bg",
+          messageId,
+        );
+        return;
+      }
       if (CONFIG.engine === "codex") {
         try {
           await syncChatSessionsWithCodex(chatId);

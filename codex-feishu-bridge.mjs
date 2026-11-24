@@ -1121,6 +1121,9 @@ async function handleEvent(rawEvent, dispatchControl = {}) {
       return;
     }
     stats.failed += 1;
+    if (error && typeof error === "object" && !error.engine && CONFIG.engine) {
+      error.engine = CONFIG.engine;
+    }
     const failure = classifyCodexFailure(error);
     recordFailureStats(failure);
     markRunError(cardState, error);

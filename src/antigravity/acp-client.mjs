@@ -67,7 +67,7 @@ export class AntigravityAcpClient {
     onEvent = () => {}, onPermission = async () => false, onStarted = () => {}, onClosed = () => {} } = {}) {
     Object.assign(this, { command, cwd, geminiDir, appDataDir, logFile, provider, environment, additionalDirectories,
       permissionMode, spawnProcess, requestTimeoutMs, idleTimeoutMs, onEvent, onPermission, onStarted, onClosed });
-    this.pending = new Map(); this.permissions = new Map(); this.nextId = 1;
+    this.pending = new Map(); this.permissions = new Map(); this.pendingTools = new Set(); this.nextId = 1;
     this.lineChunks = []; this.lineByteLength = 0;
     this.maxLineBytes = resolveMaxLineBytes(maxLineBytes);
     this.stderr = ''; this.closed = false; this.stopped = false;
@@ -251,8 +251,18 @@ export class AntigravityAcpClient {
     if (type === 'config_option_update') this.runtime.configOptions = update.configOptions;
     if (type === 'available_commands_update') this.runtime.availableCommands = update.availableCommands;
     if (this.replaying) return;
+    if (type === 'tool_call' && update.toolCallId) {
+      if (['completed', 'failed', 'cancelled'].includes(update.status)) this.pendingTools.delete(update.toolCallId);
+      else this.pendingTools.add(update.toolCallId);
+    } else if (type === 'tool_call_update' && update.toolCallId && ['completed', 'failed', 'cancelled'].includes(update.status)) {
+      this.pendingTools.delete(update.toolCallId);
+    }
     if (type === 'agent_message_chunk' && update.content?.type === 'text') this.text += update.content.text;
     this.onEvent({ type, update, sessionId });
+  }
+
+  hasPendingTools() {
+    return this.pendingTools.size > 0;
   }
 
   supportsResume() {
@@ -370,12 +380,14 @@ export class AntigravityAcpClient {
   fail(error) {
     for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(error); }
     this.pending.clear();
+    this.pendingTools.clear();
     for (const cancel of this.permissions.values()) cancel();
     clearTimeout(this.idleTimer);
   }
 
   close() {
     clearTimeout(this.idleTimer);
+    this.pendingTools.clear();
     for (const cancel of this.permissions.values()) cancel();
     if (!this.child) { this.closed = true; this.resolveClosed(); return this.closedPromise; }
     this.child?.stdin?.end();
