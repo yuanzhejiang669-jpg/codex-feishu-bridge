@@ -154,6 +154,8 @@ const CONFIG = {
   codexTimeoutMs: parseDurationMs(process.env.CODEX_FEISHU_CODEX_TIMEOUT_MS, 0),
   codexIdleTimeoutMs: parseDurationMs(process.env.CODEX_FEISHU_CODEX_IDLE_TIMEOUT_MS, 60 * 60_000),
   appServerIdleTtlMs: parseDurationMs(process.env.CODEX_FEISHU_APP_SERVER_IDLE_TTL_MS, 15 * 60_000),
+  antigravityIdleTtlMs: parseDurationMs(process.env.ANTIGRAVITY_IDLE_TTL_MS, 10 * 60_000),
+  claudeIdleTtlMs: parseDurationMs(process.env.CLAUDE_IDLE_TTL_MS, 10 * 60_000),
   appServerPoolSize: Number(process.env.CODEX_FEISHU_APP_SERVER_POOL_SIZE || process.env.CODEX_FEISHU_MAX_CONCURRENT || "1"),
   disableMcp: (process.env.CODEX_FEISHU_DISABLE_MCP || "0") !== "0",
   maxConcurrent: Number(process.env.CODEX_FEISHU_MAX_CONCURRENT || "1"),
@@ -965,7 +967,15 @@ async function handleEvent(rawEvent, dispatchControl = {}) {
     return;
   }
 
-  let event = prepareCardEvent(await enrichEvent(rawEvent));
+  // Fast path: fresh unqueued plain-text messages already carry full chat/sender/content payload;
+  // skipping the redundant `im +messages-mget` subprocess saves ~1.5-2.5s on every idle turn.
+  const canSkipEnrich = !dispatchControl.wasQueued
+    && rawEvent?.message_type === "text"
+    && Boolean(rawEvent?.chat_id && rawEvent?.chat_type && rawEvent?.sender_id)
+    && typeof rawEvent?.content === "string"
+    && rawEvent.content.trim().length > 0
+    && !/img_|file_key|<card/i.test(rawEvent.content);
+  let event = prepareCardEvent(canSkipEnrich ? rawEvent : await enrichEvent(rawEvent));
   if (event?.recalled || isMessageRecalled(messageId)) {
     rememberRecalledMessage(messageId, { chatId: chatIdOf(event), eventId: eventIdOf(event), reason: event?.recallReason || "preflight" });
     dropPendingAttachmentsForMessage(messageId, chatIdOf(event));
@@ -1149,16 +1159,52 @@ async function handleEvent(rawEvent, dispatchControl = {}) {
     }
   };
 
+  let cardOpenAbandoned = false;
+  const CARD_OPEN_DELIVERY_GRACE_MS = 1500;
+  const awaitCardOpenBounded = async (graceMs = CARD_OPEN_DELIVERY_GRACE_MS) => {
+    if (!CONFIG.useCards || card || cardOpenAbandoned) return card;
+    let timer;
+    const settled = await Promise.race([
+      cardOpenPromise.then(() => true),
+      new Promise((resolve) => {
+        timer = setTimeout(() => resolve(false), graceMs);
+        timer.unref?.();
+      }),
+    ]);
+    clearTimeout(timer);
+    if (!settled && !card) {
+      cardOpenAbandoned = true;
+      log("WARN", "card open still pending after answer ready; delivering fallback markdown immediately", {
+        messageId,
+        graceMs,
+      });
+    }
+    return card;
+  };
+
   const cardOpenPromise = (async () => {
     if (!CONFIG.useCards) return null;
     const cardOpenStartedAt = Date.now();
     try {
-      card = await ManagedCard.open(
+      const opened = await ManagedCard.open(
         chatId,
         CONFIG.replyToMessage || CONFIG.useThreadReply ? messageId : "",
         renderRunCard(cardState),
         messageId,
       );
+      if (cardOpenAbandoned) {
+        log("WARN", "card opened after fallback already delivered; closing late card", {
+          messageId,
+          cardId: opened.cardId,
+          cardOpenMs: Date.now() - cardOpenStartedAt,
+        });
+        try {
+          await opened.flush(renderRunCard(latestCardState));
+        } catch {}
+        opened.close();
+        return null;
+      }
+      card = opened;
       log("INFO", "card opened", {
         messageId,
         cardId: card.cardId,
@@ -1189,7 +1235,7 @@ async function handleEvent(rawEvent, dispatchControl = {}) {
   try {
     appendHistory(session, "user", userContent || `${event.attachments?.length || 0} attachment(s)`);
     const result = await runCodex(event, session, cardState, updateCard);
-    await cardOpenPromise;
+    await awaitCardOpenBounded();
     appendHistory(session, "assistant", result.text);
     stats.answered += 1;
     if (!card || !finalCardFlushOk) {
@@ -1208,7 +1254,7 @@ async function handleEvent(rawEvent, dispatchControl = {}) {
       stoppedJobs.delete(messageId);
       markRunInterrupted(cardState);
       await updateCard(cardState);
-      await cardOpenPromise;
+      await awaitCardOpenBounded();
       log("INFO", "codex job stopped by user", { messageId, chatId });
       return;
     }
@@ -1220,7 +1266,7 @@ async function handleEvent(rawEvent, dispatchControl = {}) {
     recordFailureStats(failure);
     markRunError(cardState, error);
     await updateCard(cardState);
-    await cardOpenPromise;
+    await awaitCardOpenBounded();
     if (card) {
       if (!finalCardFlushOk) {
         await sendMarkdown(
@@ -1258,7 +1304,7 @@ async function handleEvent(rawEvent, dispatchControl = {}) {
     }
     throw error;
   } finally {
-    await cardOpenPromise;
+    if (!cardOpenAbandoned) await awaitCardOpenBounded();
     if (activeRunRecorded) clearActiveRunSafely(messageId, "message-finally");
   }
 }

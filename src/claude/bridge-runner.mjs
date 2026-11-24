@@ -3,12 +3,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { ClaudeCliClient } from './cli-client.mjs';
 import { writeJsonFileAtomicSync } from '../utils/json.mjs';
-import { feishuMcpConfiguration } from './feishu-tools.mjs';
-import { createClaudeSessionDeletion } from './session-deletion.mjs';
+import { feishuMcpConfiguration, updateFeishuToolContext } from './feishu-tools.mjs';
+import { claudeSessionArtifacts, createClaudeSessionDeletion } from './session-deletion.mjs';
 import { createClaudeCommands } from './commands.mjs';
 import { applyCloakBrowserIsolationToMcpConfig, resolveCloakBrowserDirs } from '../config/cloakbrowser.mjs';
 import { buildAccessContext, isOwnerDmContext } from '../sessions/access-control.mjs';
 import { listClaudeNativeSessions } from './native-sessions.mjs';
+import claudeDefaults from './defaults.cjs';
+const { claudeDataRootFromConfig, readClaudeEngineDefaults } = claudeDefaults;
 import {
   STEER_CANCELLED_BY_CLEARQUEUE_REPLY,
   ensureSteerEntry,
@@ -84,6 +86,100 @@ export function createClaudeBridge({ config, getSession, getChatState, getChats,
   const permissionTimers = new Set();
   const commandJobs = new Set();
   const listViews = new Map();
+  const warmSessions = new Map();
+  const IDLE_TTL_MS = config.claudeIdleTtlMs !== undefined
+    ? Math.max(0, Number(config.claudeIdleTtlMs) || 0)
+    : 10 * 60_000;
+
+  function claudeSessionFingerprint(session, selected, nativeHome, workspace, mcpConfigs) {
+    return JSON.stringify([
+      session?.id || '',
+      session?.claudeSessionId || '',
+      selected?.provider || '',
+      selected?.model || '',
+      selected?.reasoning || '',
+      selected?.permissionMode || '',
+      nativeHome || '',
+      workspace || '',
+      config.disableMcp ? '1' : '0',
+      mcpConfigs,
+    ]);
+  }
+
+  function nativeClaudeTranscriptStamp(nativeHome, claudeSessionId) {
+    if (!nativeHome || !claudeSessionId) return 0;
+    let maxMtime = 0;
+    try {
+      for (const file of claudeSessionArtifacts(nativeHome, claudeSessionId)) {
+        if (!file.endsWith('.jsonl')) continue;
+        try {
+          const stat = fs.statSync(file);
+          if (stat.mtimeMs > maxMtime) maxMtime = stat.mtimeMs;
+        } catch {}
+      }
+    } catch {}
+    return maxMtime;
+  }
+
+  async function retireWarmSession(chatId, _reason = 'retired') {
+    const entry = warmSessions.get(chatId);
+    if (!entry) return false;
+    warmSessions.delete(chatId);
+    entry.retired = true;
+    clearTimeout(entry.timer);
+    entry.timer = null;
+    try { await entry.client.close?.(); } catch {}
+    return true;
+  }
+
+  async function retireWarm(chatId, { all = false } = {}) {
+    if (all) {
+      const ids = [...warmSessions.keys()];
+      let count = 0;
+      for (const id of ids) {
+        if (await retireWarmSession(id, 'stop-all')) count += 1;
+      }
+      return count;
+    }
+    return (await retireWarmSession(chatId, 'user-stop')) ? 1 : 0;
+  }
+
+  function hasWarm(chatId) {
+    return warmSessions.has(chatId);
+  }
+
+  function parkWarmSession({ chatId, session, client, fingerprint, nativeStamp }) {
+    const existing = warmSessions.get(chatId);
+    if (existing && existing.client !== client) {
+      void retireWarmSession(chatId, 'replaced');
+    }
+    client.onEvent = () => {};
+    client.onPermission = async () => false;
+    const entry = {
+      chatId,
+      sessionId: session.id,
+      nativeSessionId: session.claudeSessionId,
+      sessionUpdatedAt: session.updatedAt ?? null,
+      nativeStamp,
+      fingerprint,
+      client,
+      timer: null,
+      retired: false,
+    };
+    entry.timer = setTimeout(() => {
+      if (warmSessions.get(chatId) === entry) {
+        void retireWarmSession(chatId, 'idle-ttl');
+      }
+    }, IDLE_TTL_MS);
+    entry.timer.unref?.();
+    warmSessions.set(chatId, entry);
+    client.closedPromise?.then(() => {
+      if (warmSessions.get(chatId) === entry) {
+        void retireWarmSession(chatId, 'process-exited');
+      }
+    });
+    return entry;
+  }
   const viewKey = (event) => JSON.stringify([event.chat_id, event.sender_id || '']);
   const accessContextFor = (event) => (
     sharedSessions?.accessContextForEvent
@@ -130,6 +226,8 @@ export function createClaudeBridge({ config, getSession, getChatState, getChats,
   const sessionDeletion = createClaudeSessionDeletion({ config, getChatState, getChats, saveSessions, activeJobs, sharedSessions, accessContextFor });
   const commands = createClaudeCommands({ config, settings, botConfiguration, providers, saveSessions,
     activeJobs, getChatState, getSession, queueSummary, refreshModels, sharedSessions, resolveSession, accessContextFor,
+    hasWarm,
+    onConfigChange: (chatId, reason) => retireWarmSession(chatId, reason),
     testModel: async (event, session, model) => {
       const selected = settings(session);
       const definition = providers().find((p) => p.id === selected.provider);
@@ -164,11 +262,23 @@ export function createClaudeBridge({ config, getSession, getChatState, getChats,
 
   function settings(session) {
     const bot = botConfiguration();
-    const providerId = session?.providerOverride || bot.provider?.id || config.claudeProviderId;
+    const dataRoot = claudeDataRootFromConfig(config);
+    const engineDefaults = dataRoot ? readClaudeEngineDefaults(dataRoot) : null;
+    const botTs = Date.parse(bot?.configurationChangedAt || '') || 0;
+    const defTs = Date.parse(engineDefaults?.updatedAt || '') || 0;
+    const botNewer = botTs > 0 && defTs > 0 && botTs > defTs;
+    const defaultProviderId = (!botNewer && engineDefaults?.provider)
+      ? engineDefaults.provider
+      : (bot.provider?.id || config.claudeProviderId);
+    const providerId = session?.providerOverride || defaultProviderId;
     const provider = providers().find((item) => item.id === providerId);
     if (!provider) throw new Error(`Claude Provider 未配置：${providerId || '请选择渠道'}`);
-    const model = session?.modelOverride || bot.provider?.model || provider.model;
-    const effort = session?.reasoningOverride || bot.provider?.reasoning || provider.effort || 'high';
+    const modelDefaultsApply = !botNewer && Boolean(engineDefaults?.model)
+      && (!engineDefaults.modelProvider || engineDefaults.modelProvider === provider.id)
+      && (!Array.isArray(provider.models) || !provider.models.length || provider.models.includes(engineDefaults.model));
+    const effortDefaultsApply = !botNewer && Boolean(engineDefaults?.reasoning) && EFFORTS.has(engineDefaults.reasoning);
+    const model = session?.modelOverride || (modelDefaultsApply ? engineDefaults.model : '') || bot.provider?.model || provider.model;
+    const effort = session?.reasoningOverride || (effortDefaultsApply ? engineDefaults.reasoning : '') || bot.provider?.reasoning || provider.effort || 'high';
     if (!EFFORTS.has(effort)) throw new Error('Claude 思考强度无效');
     return { model, provider: provider.id, reasoning: effort, requestedReasoning: effort,
       permissionMode: bot.claude?.permissionMode || config.claudePermissionMode || 'bypassPermissions',
@@ -228,117 +338,174 @@ export function createClaudeBridge({ config, getSession, getChatState, getChats,
     const releaseSession = sharedSessions
       ? (sharedSessions.acquireAsync ? await sharedSessions.acquireAsync(session) : sharedSessions.acquire(session))
       : null;
+    if (config.larkCli && event) {
+      updateFeishuToolContext({ ...config, workspace }, event);
+    }
     let resolveFinished;
     const finished = new Promise((resolve) => { resolveFinished = resolve; });
+    const dispatchCommand = /^\/[\w:-]+(?:\s|$)/u.test(text);
+    const isCompactCommand = dispatchCommand && /^\/compact(?:\s|$)/u.test(text);
+    const desiredFingerprint = claudeSessionFingerprint(session, selected, nativeHome, workspace, mcpConfigs);
     let client;
-    try { client = createClient({ command: config.claudeCli.command, cwd: workspace,
-      home: nativeHome, toolHome: config.claudeHome, provider: { ...definition, model: selected.model, apiKey },
-      sessionId, resume: Boolean(session.claudeSessionId), model: selected.model, effort: selected.reasoning,
-      permissionMode: selected.permissionMode, disableMcp: config.disableMcp,
-      allowedTools: ['Read', 'Glob', 'Grep', 'LS', 'Skill', 'mcp__feishu_bridge__current_conversation'],
-      additionalDirectories: [config.claudeToolsRoot, workspace !== config.workspace ? config.workspace : ''].filter((dir) => dir && fs.existsSync(dir)),
-      mcpConfigs: mcpConfigs.concat(config.larkCli ? [feishuMcpConfiguration({ ...config, workspace }, event)] : []),
-      totalTimeoutMs: config.codexTimeoutMs, idleTimeoutMs: config.codexIdleTimeoutMs,
-      dispatchCommand: /^\/[\w:-]+(?:\s|$)/u.test(text),
-      onSession: (id) => { session.engine = 'claude'; session.claudeSessionId = id; saveSessions(); },
-      onPermission: (request) => (selected.permissionMode === 'bypassPermissions' ? true : requestPermission(event, request)),
-      onStarted: (child) => {
-        if (child?.pid !== undefined) activeChildren.set(child.pid, { child, label: 'Claude Code CLI' });
-        activeJobs.set(event.chat_id, {
-          pid: child?.pid, mode: 'claude', client, startedAt, finished,
-          messageId: event.message_id || event.id, sessionId: session.id,
-          clearGeneration: 0, pendingSteerEntries: [], steerInFlight: null,
+    let reusedWarm = false;
+
+    const turnOnSession = (id) => { session.engine = 'claude'; session.claudeSessionId = id; saveSessions(); };
+    const turnOnPermission = (request) => (selected.permissionMode === 'bypassPermissions' ? true : requestPermission(event, request));
+    const turnOnEvent = (item) => {
+      if (item.type === 'permission_cancelled') {
+        for (const [token, pending] of permissions) if (pending.id === item.id) { pending.resolve(false); permissions.delete(token); }
+      }
+      if (item.type === 'compacted') {
+        session.lastCompactedAt = item.at;
+        session.lastContextUsage = null;
+        if (state) state.meta.contextUsage = null;
+        saveSessions();
+      }
+      if (!state) return;
+      if (item.type === 'api_retry') {
+        state.meta.upstreamRetry = { statusCode: item.statusCode, attempt: item.attempt,
+          maxRetries: item.maxRetries, delayMs: item.delayMs, at: Date.now(), provider: definition.name || selected.provider };
+        markPhase(state, 'reconnecting', { connection: 'connected', retryAttempt: item.attempt, progress: false });
+        log?.('WARN', 'Claude upstream request retry', { provider: selected.provider,
+          statusCode: item.statusCode, attempt: item.attempt, maxRetries: item.maxRetries, delayMs: item.delayMs });
+      } else if (item.type === 'model_progress') {
+        delete state.meta.upstreamRetry;
+        markPhase(state, 'model_thinking', { connection: 'connected' });
+        if (state.activity) state.activity.lastModelEventAt = Date.now();
+      } else if (item.type === 'initialized') {
+        state.threadId = item.sessionId;
+        state.meta.engine = 'claude'; state.meta.model = item.model || selected.model;
+        writeJsonFileAtomicSync(path.join(config.stateDir, 'claude-runtime.json'), {
+          engine: 'claude', pid: client.child?.pid, sessionId: item.sessionId,
+          version: item.version, model: item.model, permissionMode: item.permissionMode,
+          tools: item.tools, mcpServers: item.mcpServers, skills: item.skills,
+          configHome: nativeHome, botConfigHome: config.claudeHome, workspace, observedAt: new Date().toISOString(),
         });
-      },
-      onClosed: (child) => {
-        if (child?.pid !== undefined) activeChildren.delete(child.pid);
-        if (activeJobs.get(event.chat_id)?.client === client) activeJobs.delete(event.chat_id);
-        resolveFinished?.();
-      },
-      onEvent: (item) => {
-        if (item.type === 'permission_cancelled') {
-          for (const [token, pending] of permissions) if (pending.id === item.id) { pending.resolve(false); permissions.delete(token); }
-        }
-        if (item.type === 'compacted') {
-          session.lastCompactedAt = item.at;
-          session.lastContextUsage = null;
-          if (state) state.meta.contextUsage = null;
-          saveSessions();
-        }
-        if (!state) return;
-        if (item.type === 'api_retry') {
-          state.meta.upstreamRetry = { statusCode: item.statusCode, attempt: item.attempt,
-            maxRetries: item.maxRetries, delayMs: item.delayMs, at: Date.now(), provider: definition.name || selected.provider };
-          markPhase(state, 'reconnecting', { connection: 'connected', retryAttempt: item.attempt, progress: false });
-          log?.('WARN', 'Claude upstream request retry', { provider: selected.provider,
-            statusCode: item.statusCode, attempt: item.attempt, maxRetries: item.maxRetries, delayMs: item.delayMs });
-        } else if (item.type === 'model_progress') {
-          delete state.meta.upstreamRetry;
-          markPhase(state, 'model_thinking', { connection: 'connected' });
-          if (state.activity) state.activity.lastModelEventAt = Date.now();
-        } else if (item.type === 'initialized') {
-          state.threadId = item.sessionId;
-          state.meta.engine = 'claude'; state.meta.model = item.model || selected.model;
-          writeJsonFileAtomicSync(path.join(config.stateDir, 'claude-runtime.json'), {
-            engine: 'claude', pid: client.child.pid, sessionId: item.sessionId,
-            version: item.version, model: item.model, permissionMode: item.permissionMode,
-            tools: item.tools, mcpServers: item.mcpServers, skills: item.skills,
-            configHome: nativeHome, botConfigHome: config.claudeHome, workspace, observedAt: new Date().toISOString(),
-          });
-          markPhase(state, 'model_thinking', { connection: 'connected' });
-        } else if (item.type === 'text_delta') {
-          delete state.meta.upstreamRetry;
-          appendText(state, item.text);
-          markPhase(state, 'model_streaming', { connection: 'connected' });
-        } else if (item.type === 'tool_start') {
-          reduceEvent(state, { type: 'item.started', item: { type: 'tool', id: item.id, name: item.name, input: item.input } });
-        } else if (item.type === 'tool_update') {
-          const tool = state.blocks.find((block) => block.tool?.id === item.id)?.tool;
-          if (tool) tool.input = item.input;
-        } else if (item.type === 'tool_end') {
-          reduceEvent(state, { type: 'item.completed', item: { type: 'tool', id: item.id, name: item.name,
-            output: item.output, status: item.error ? 'error' : 'completed' } });
-        } else if (item.type === 'context') {
-          contextTokens = item.usedTokens;
-          session.lastContextUsage = { usedTokens: contextTokens, contextWindow: null, percent: null, updatedAt: Date.now() };
+        markPhase(state, 'model_thinking', { connection: 'connected' });
+      } else if (item.type === 'text_delta') {
+        delete state.meta.upstreamRetry;
+        appendText(state, item.text);
+        markPhase(state, 'model_streaming', { connection: 'connected' });
+      } else if (item.type === 'tool_start') {
+        reduceEvent(state, { type: 'item.started', item: { type: 'tool', id: item.id, name: item.name, input: item.input } });
+      } else if (item.type === 'tool_update') {
+        const tool = state.blocks.find((block) => block.tool?.id === item.id)?.tool;
+        if (tool) tool.input = item.input;
+      } else if (item.type === 'tool_end') {
+        reduceEvent(state, { type: 'item.completed', item: { type: 'tool', id: item.id, name: item.name,
+          output: item.output, status: item.error ? 'error' : 'completed' } });
+      } else if (item.type === 'context') {
+        contextTokens = item.usedTokens;
+        session.lastContextUsage = { usedTokens: contextTokens, contextWindow: null, percent: null, updatedAt: Date.now() };
+        state.meta.contextUsage = session.lastContextUsage;
+      } else if (item.type === 'compacting_started') {
+        markPhase(state, 'compacting', { connection: 'connected' });
+      } else if (item.type === 'compacted') {
+        session.lastCompactedAt = item.at; state.meta.compactedAt = item.at;
+        markPhase(state, 'model_thinking', { connection: 'connected' });
+      } else if (item.type === 'result') {
+        const usage = item.result.usage || {};
+        state.meta.inputTokens = Number(usage.input_tokens || 0) + Number(usage.cache_read_input_tokens || 0)
+          + Number(usage.cache_creation_input_tokens || 0);
+        state.meta.outputTokens = Number(usage.output_tokens || 0);
+        const activeModel = state.meta.model || selected.model;
+        const contextWindow = extractClaudeContextWindow(item.result, activeModel);
+        if (contextTokens !== null || contextWindow !== null) {
+          const usedTokens = Number.isFinite(Number(contextTokens)) ? Number(contextTokens) : state.meta.inputTokens;
+          const percent = contextWindow && Number.isFinite(usedTokens)
+            ? Math.min(100, Math.round((usedTokens / contextWindow) * 1000) / 10)
+            : null;
+          session.lastContextUsage = { usedTokens, contextWindow, percent, updatedAt: Date.now() };
           state.meta.contextUsage = session.lastContextUsage;
-        } else if (item.type === 'compacting_started') {
-          markPhase(state, 'compacting', { connection: 'connected' });
-        } else if (item.type === 'compacted') {
-          session.lastCompactedAt = item.at; state.meta.compactedAt = item.at;
-          markPhase(state, 'model_thinking', { connection: 'connected' });
-        } else if (item.type === 'result') {
-          const usage = item.result.usage || {};
-          state.meta.inputTokens = Number(usage.input_tokens || 0) + Number(usage.cache_read_input_tokens || 0)
-            + Number(usage.cache_creation_input_tokens || 0);
-          state.meta.outputTokens = Number(usage.output_tokens || 0);
-          const activeModel = state.meta.model || selected.model;
-          const contextWindow = extractClaudeContextWindow(item.result, activeModel);
-          if (contextTokens !== null || contextWindow !== null) {
-            const usedTokens = Number.isFinite(Number(contextTokens)) ? Number(contextTokens) : state.meta.inputTokens;
-            const percent = contextWindow && Number.isFinite(usedTokens)
-              ? Math.min(100, Math.round((usedTokens / contextWindow) * 1000) / 10)
-              : null;
-            session.lastContextUsage = { usedTokens, contextWindow, percent, updatedAt: Date.now() };
-            state.meta.contextUsage = session.lastContextUsage;
-          }
-          session.lastTokenUsage = {
-            total: {
-              inputTokens: state.meta.inputTokens,
-              outputTokens: state.meta.outputTokens,
-              totalTokens: state.meta.inputTokens + state.meta.outputTokens,
-            },
-            last: { inputTokens: contextTokens || 0 },
-            modelContextWindow: contextWindow,
-          };
-          saveSessions();
         }
-        schedule();
-      },
-    }); } catch (error) { releaseSession?.(); throw error; }
+        session.lastTokenUsage = {
+          total: {
+            inputTokens: state.meta.inputTokens,
+            outputTokens: state.meta.outputTokens,
+            totalTokens: state.meta.inputTokens + state.meta.outputTokens,
+          },
+          last: { inputTokens: contextTokens || 0 },
+          modelContextWindow: contextWindow,
+        };
+        saveSessions();
+      }
+      schedule();
+    };
+
     try {
-      if (state) { state.meta.engine = 'claude'; markPhase(state, 'model_thinking', { connection: 'starting' }); await flush(); }
-      const result = await client.run(claudeContent(text, event.attachments));
+      const warm = warmSessions.get(event.chat_id);
+      if (warm) {
+        const currentStamp = nativeClaudeTranscriptStamp(nativeHome, session.claudeSessionId);
+        const warmValid = !isCompactCommand
+          && warm.fingerprint === desiredFingerprint
+          && warm.sessionId === session.id
+          && warm.nativeSessionId === session.claudeSessionId
+          && warm.sessionUpdatedAt === (session.updatedAt ?? null)
+          && warm.nativeStamp === currentStamp
+          && !warm.client.closed
+          && !warm.client.stopped;
+        if (warmValid) {
+          warmSessions.delete(event.chat_id);
+          warm.retired = true;
+          clearTimeout(warm.timer);
+          warm.timer = null;
+          client = warm.client;
+          reusedWarm = true;
+          activeJobs.set(event.chat_id, {
+            pid: client.child?.pid, mode: 'claude', client, startedAt, finished,
+            messageId: event.message_id || event.id, sessionId: session.id,
+            clearGeneration: 0, pendingSteerEntries: [], steerInFlight: null,
+          });
+        } else {
+          await retireWarmSession(event.chat_id, 'stale-or-replaced');
+        }
+      }
+
+      if (!reusedWarm) {
+        client = createClient({ command: config.claudeCli.command, cwd: workspace,
+          home: nativeHome, toolHome: config.claudeHome, provider: { ...definition, model: selected.model, apiKey },
+          sessionId, resume: Boolean(session.claudeSessionId), model: selected.model, effort: selected.reasoning,
+          permissionMode: selected.permissionMode, disableMcp: config.disableMcp, keepAlive: IDLE_TTL_MS > 0,
+          allowedTools: ['Read', 'Glob', 'Grep', 'LS', 'Skill', 'mcp__feishu_bridge__current_conversation'],
+          additionalDirectories: [config.claudeToolsRoot, workspace !== config.workspace ? config.workspace : ''].filter((dir) => dir && fs.existsSync(dir)),
+          mcpConfigs: mcpConfigs.concat(config.larkCli ? [feishuMcpConfiguration({ ...config, workspace }, event)] : []),
+          totalTimeoutMs: config.codexTimeoutMs, idleTimeoutMs: config.codexIdleTimeoutMs,
+          dispatchCommand,
+          onSession: turnOnSession,
+          onPermission: turnOnPermission,
+          onStarted: (child) => {
+            if (child?.pid !== undefined) activeChildren.set(child.pid, { child, label: 'Claude Code CLI' });
+            activeJobs.set(event.chat_id, {
+              pid: child?.pid, mode: 'claude', client, startedAt, finished,
+              messageId: event.message_id || event.id, sessionId: session.id,
+              clearGeneration: 0, pendingSteerEntries: [], steerInFlight: null,
+            });
+          },
+          onClosed: (child) => {
+            if (child?.pid !== undefined) activeChildren.delete(child.pid);
+            if (activeJobs.get(event.chat_id)?.client === client) activeJobs.delete(event.chat_id);
+          },
+          onEvent: turnOnEvent,
+        });
+      }
+    } catch (error) { releaseSession?.(); throw error; }
+
+    const supportsWarm = IDLE_TTL_MS > 0 && typeof client.runTurn === 'function' && typeof client.close === 'function';
+    let runSucceeded = false;
+    try {
+      if (state) {
+        state.meta.engine = 'claude';
+        if (reusedWarm && session.claudeSessionId) state.threadId = session.claudeSessionId;
+        markPhase(state, 'model_thinking', { connection: reusedWarm ? 'connected' : 'starting' });
+        await flush();
+      }
+      const payload = claudeContent(text, event.attachments);
+      const result = supportsWarm
+        ? await client.runTurn(payload, { dispatchCommand, onEvent: turnOnEvent, onPermission: turnOnPermission, onSession: turnOnSession })
+        : await client.run(payload);
+      session.updatedAt = Date.now();
+      saveSessions();
+      runSucceeded = true;
       if (state) { ensureDone(state, result.result || ''); state.meta.durationMs = Date.now() - startedAt; await flush(); }
       return { text: result.result || '(Claude 没有返回文字)', durationMs: Date.now() - startedAt,
         tokens: `${state?.meta?.inputTokens || 0}↑ ${state?.meta?.outputTokens || 0}↓` };
@@ -350,9 +517,21 @@ export function createClaudeBridge({ config, getSession, getChatState, getChats,
       clearTimeout(flushTimer);
       if (activeJobs.get(event.chat_id)?.client === client) activeJobs.delete(event.chat_id);
       resolveFinished?.();
+      // Release cross-Bot session lease immediately before parking warm!
       releaseSession?.();
       for (const [token, pending] of permissions) if (pending.sessionId === sessionId) {
         permissions.delete(token); pending.resolve(false);
+      }
+      if (runSucceeded && supportsWarm && !isCompactCommand && !client.closed && !client.stopped && session.claudeSessionId) {
+        parkWarmSession({
+          chatId: event.chat_id,
+          session,
+          client,
+          fingerprint: claudeSessionFingerprint(session, selected, nativeHome, workspace, mcpConfigs),
+          nativeStamp: nativeClaudeTranscriptStamp(nativeHome, session.claudeSessionId),
+        });
+      } else if (supportsWarm && !client.closed) {
+        await client.close();
       }
     }
   }
@@ -363,6 +542,7 @@ export function createClaudeBridge({ config, getSession, getChatState, getChats,
     const accessCtx = accessContextFor(event);
     const reply = (text) => sendMarkdown(chatId, text, `claude-${command.name.slice(1)}`, messageId);
     const chat = getChatState(chatId, accessCtx);
+    if (command.name === '/confirm') await retireWarm(chatId, { all: true });
     if (await sessionDeletion.handle(event, command, reply)) return true;
     if (await commands.handle(event, command, reply)) return true;
     if (['/approve', '/deny'].includes(command.name)) {
@@ -374,6 +554,7 @@ export function createClaudeBridge({ config, getSession, getChatState, getChats,
     }
     if (command.name === '/new') {
       if (activeJobs.has(chatId)) { await reply('当前会话正在执行任务，请等待完成或先发送 /stop 后再执行 /new。'); return true; }
+      await retireWarmSession(chatId, 'new-session');
       const next = resetSession(chatId, command.rest || '新会话', accessCtx);
       await reply(`已创建 Claude 会话：${next.title} (${next.id})`);
       return true;
@@ -421,6 +602,7 @@ export function createClaudeBridge({ config, getSession, getChatState, getChats,
       if (activeJobs.has(chatId)) throw new Error('请在当前任务结束后切换会话');
       const resolved = resolveBridgeOrNativeTarget(event, command.rest.trim());
       if (!resolved) throw new Error(`未找到可访问的会话：${command.rest.trim()}，请先发送 /list 或 /list all 查看可用序号。`);
+      await retireWarmSession(chatId, 'switch-session');
       if (resolved.kind === 'native') {
         const native = resolved.native;
         const seed = {
@@ -448,6 +630,7 @@ export function createClaudeBridge({ config, getSession, getChatState, getChats,
     }
     if (command.name === '/reset') {
       if (activeJobs.has(chatId)) throw new Error('请先停止当前任务');
+      await retireWarmSession(chatId, 'reset-session');
       const session = getSession(chatId, accessCtx);
       const release = sharedSessions
         ? (sharedSessions.acquireAsync ? await sharedSessions.acquireAsync(session, 'reset') : sharedSessions.acquire(session, 'reset'))
@@ -594,6 +777,19 @@ export function createClaudeBridge({ config, getSession, getChatState, getChats,
     return false;
   }
 
-  function close() { listViews.clear(); sessionDeletion.close(); for (const pending of permissions.values()) pending.resolve(false); permissions.clear(); for (const timer of permissionTimers) clearTimeout(timer); }
-  return { run, settings, handleCommand, close };
+  function close() {
+    for (const entry of warmSessions.values()) {
+      entry.retired = true;
+      clearTimeout(entry.timer);
+      entry.timer = null;
+      try { entry.client.close?.(); } catch {}
+    }
+    warmSessions.clear();
+    listViews.clear();
+    sessionDeletion.close();
+    for (const pending of permissions.values()) pending.resolve(false);
+    permissions.clear();
+    for (const timer of permissionTimers) clearTimeout(timer);
+  }
+  return { run, settings, handleCommand, retireWarm, hasWarm, close };
 }

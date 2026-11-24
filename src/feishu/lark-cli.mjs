@@ -203,7 +203,9 @@ export function createLarkClient({
         const result = await runLark([
           "api",
           "GET",
-          `/open-apis/contact/v3/users/${id}?user_id_type=open_id`,
+          `/open-apis/contact/v3/users/${id}`,
+          "--params",
+          JSON.stringify({ user_id_type: "open_id" }),
           "--as",
           "bot",
         ], {

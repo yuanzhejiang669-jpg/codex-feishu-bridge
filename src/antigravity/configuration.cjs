@@ -10,6 +10,66 @@ const CURRENT = Object.freeze({ id: 'official', name: '官方 Google 当前账�
 
 function catalogPath(dataRoot) { return path.join(dataRoot, 'antigravity-providers.json'); }
 function accountCatalogPath(dataRoot) { return path.join(dataRoot, 'antigravity-accounts.json'); }
+function defaultsPath(dataRoot) { return path.join(dataRoot, 'antigravity-defaults.json'); }
+function readEngineDefaults(dataRoot) {
+  if (!dataRoot) return { schemaVersion: 1, provider: '', model: '', modelProvider: '', reasoning: '', updatedAt: '' };
+  const raw = readJson(defaultsPath(dataRoot), {});
+  return {
+    schemaVersion: 1,
+    provider: typeof raw?.provider === 'string' ? raw.provider.trim() : '',
+    model: typeof raw?.model === 'string' ? raw.model.trim() : '',
+    modelProvider: typeof raw?.modelProvider === 'string' ? raw.modelProvider.trim() : '',
+    reasoning: typeof raw?.reasoning === 'string' ? raw.reasoning.trim().toLowerCase() : '',
+    updatedAt: typeof raw?.updatedAt === 'string' ? raw.updatedAt.trim() : '',
+  };
+}
+function writeEngineDefaults(dataRoot, patch = {}, { currentBotConfig = '', propagateManagedBots = true } = {}) {
+  const nowIso = new Date().toISOString();
+  let saved = null;
+  if (dataRoot) {
+    const prev = readEngineDefaults(dataRoot);
+    saved = {
+      schemaVersion: 1,
+      provider: patch.provider !== undefined ? String(patch.provider || '').trim() : prev.provider,
+      model: patch.model !== undefined ? String(patch.model || '').trim() : prev.model,
+      modelProvider: patch.model !== undefined
+        ? String(patch.modelProvider ?? patch.provider ?? prev.modelProvider ?? '').trim()
+        : prev.modelProvider,
+      reasoning: patch.reasoning !== undefined ? String(patch.reasoning || '').trim().toLowerCase() : prev.reasoning,
+      updatedAt: nowIso,
+    };
+    atomicJson(defaultsPath(dataRoot), saved);
+    if (propagateManagedBots) {
+      const managedRoot = path.join(dataRoot, 'managed-bots');
+      if (fs.existsSync(managedRoot)) {
+        const resolvedCurrent = currentBotConfig ? path.resolve(currentBotConfig).toLowerCase() : '';
+        for (const entry of fs.readdirSync(managedRoot, { withFileTypes: true })) {
+          if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+          const file = path.join(managedRoot, entry.name, 'bot.json');
+          if (resolvedCurrent && path.resolve(file).toLowerCase() === resolvedCurrent) continue;
+          try {
+            const bot = readJson(file, null);
+            if (!bot || bot.engine !== 'antigravity') continue;
+            const botProviderId = bot.provider?.id || 'official';
+            const applyModel = patch.model !== undefined
+              && (patch.provider !== undefined || !saved.modelProvider || botProviderId === saved.modelProvider);
+            const applyProvider = patch.provider !== undefined;
+            const applyReasoning = patch.reasoning !== undefined;
+            if (!applyProvider && !applyModel && !applyReasoning) continue;
+            const nextProvider = {
+              ...(bot.provider || { mode: 'antigravity', id: 'official', name: CURRENT.name, accountId: 'current' }),
+              ...(applyProvider ? { id: saved.provider || 'official' } : {}),
+              ...(applyModel ? { model: saved.model } : {}),
+              ...(applyReasoning ? { reasoning: saved.reasoning } : {}),
+            };
+            atomicJson(file, { ...bot, provider: nextProvider, configurationChangedAt: nowIso });
+          } catch {}
+        }
+      }
+    }
+  }
+  return saved;
+}
 function readJson(file, fallback) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '')); }
   catch (error) { if (error.code === 'ENOENT') return structuredClone(fallback); throw error; }
@@ -77,5 +137,5 @@ function prepareNativeProfile(geminiDir, provider = {}, options = {}) {
   if (settings.modelProvider !== 'gemini') atomicJson(file, { ...settings, modelProvider: 'gemini' });
   return appDataDir;
 }
-module.exports = { CURRENT, ID, MODES, EFFORTS, NATIVE_MODES, catalogPath, accountCatalogPath,
-  atomicJson, readJson, readCatalog, normalizeProvider, selectProvider, readAccounts, assertOfficialAccount, prepareNativeProfile };
+module.exports = { CURRENT, ID, MODES, EFFORTS, NATIVE_MODES, catalogPath, accountCatalogPath, defaultsPath,
+  atomicJson, readJson, readCatalog, readEngineDefaults, writeEngineDefaults, normalizeProvider, selectProvider, readAccounts, assertOfficialAccount, prepareNativeProfile };

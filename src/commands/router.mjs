@@ -1560,6 +1560,7 @@ export function createCommandRouter(deps = {}) {
     const cleared = clearQueuedWorkForChat(chatId, { all: true });
     const clearedTotal = cleared.removedQueued + cleared.cancelledPreflight + cleared.cancelledPendingSteers;
     const targets = [...activeCodexJobs.entries()];
+    if (CONFIG.engine === "claude") await claudeBridge?.retireWarm?.(chatId, { all: true });
     const stoppedBg = CONFIG.engine === "antigravity"
       ? Number((await antigravityBridge?.stopBackground?.(chatId, { all: true })) || 0)
       : 0;
@@ -1637,6 +1638,7 @@ export function createCommandRouter(deps = {}) {
       : "";
     const job = activeCodexJobs.get(chatId);
     if (!job) {
+      if (CONFIG.engine === "claude") await claudeBridge?.retireWarm?.(chatId);
       if (CONFIG.engine === "antigravity" && antigravityBridge?.hasBackground?.(chatId)) {
         await antigravityBridge.stopBackground(chatId);
         await sendText(
@@ -1647,6 +1649,7 @@ export function createCommandRouter(deps = {}) {
         );
         return;
       }
+      if (CONFIG.engine === "antigravity") await antigravityBridge?.retireWarm?.(chatId);
       if (CONFIG.engine === "codex") {
         try {
           await syncChatSessionsWithCodex(chatId);

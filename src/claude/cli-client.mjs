@@ -73,12 +73,12 @@ export class ClaudeCliClient {
   constructor({ command, cwd, home, toolHome = home, provider, sessionId = crypto.randomUUID(), resume = false,
     model = provider?.model, effort = 'high', permissionMode = 'manual', mcpConfigs = [],
     disableMcp = false, allowedTools = [], tools, additionalDirectories = [], environment = process.env, spawnProcess = spawn,
-    persistSession = true, dispatchCommand = false, maxLineBytes = undefined,
+    persistSession = true, dispatchCommand = false, keepAlive = false, maxLineBytes = undefined,
     onEvent = () => {}, onPermission = async () => false, onSession = () => {},
     onStarted = () => {}, onClosed = () => {}, totalTimeoutMs = 0, idleTimeoutMs = 60 * 60_000,
     upstreamTimeoutMs = 4 * 60_000, compactionTimeoutMs = 10 * 60_000 }) {
     Object.assign(this, { command, cwd, home, toolHome, provider, sessionId, resume, model, effort, permissionMode,
-      mcpConfigs, disableMcp, allowedTools, tools, additionalDirectories, environment, spawnProcess, persistSession, dispatchCommand, onEvent, onPermission,
+      mcpConfigs, disableMcp, allowedTools, tools, additionalDirectories, environment, spawnProcess, persistSession, dispatchCommand, keepAlive, onEvent, onPermission,
       onSession, onStarted, onClosed, totalTimeoutMs, idleTimeoutMs, upstreamTimeoutMs, compactionTimeoutMs });
     this.maxLineBytes = resolveMaxLineBytes(maxLineBytes);
     this.pendingControls = new Set();
@@ -89,6 +89,21 @@ export class ClaudeCliClient {
     this.messageId = '';
     this.stopped = false;
     this.closed = false;
+    this.turnActive = false;
+    this.turnResolve = null;
+    this.turnReject = null;
+    this.idleTimer = null;
+    this.totalTimer = null;
+    this.closeTimer = null;
+    this.stderr = '';
+    this.streamError = null;
+    this.timedOut = '';
+    this.closedPromise = new Promise((resolve) => { this.resolveClosed = resolve; });
+  }
+
+  redact(text) {
+    const secrets = [this.provider?.apiKey].filter(Boolean);
+    return secrets.reduce((value, secret) => value.replaceAll(secret, '[redacted]'), String(text || ''));
   }
 
   killChildTree(force = true) {
@@ -99,7 +114,7 @@ export class ClaudeCliClient {
 
   waitForUpstream() {
     clearTimeout(this.upstreamTimer);
-    if (!(this.upstreamTimeoutMs > 0) || this.pendingTools.size) return;
+    if (!(this.upstreamTimeoutMs > 0) || this.pendingTools.size || !this.turnActive) return;
     const waitMs = this.compacting ? Math.max(this.compactionTimeoutMs, this.upstreamTimeoutMs) : this.upstreamTimeoutMs;
     this.upstreamTimer = setTimeout(() => {
       this.upstreamTimedOut = true;
@@ -111,6 +126,18 @@ export class ClaudeCliClient {
   }
 
   pauseUpstreamWait() { clearTimeout(this.upstreamTimer); }
+
+  touchTurnIdle() {
+    clearTimeout(this.idleTimer);
+    if (this.idleTimeoutMs > 0 && this.turnActive) {
+      this.idleTimer = setTimeout(() => {
+        this.timedOut = 'Claude Code idle timeout';
+        this.interrupt();
+        this.killChildTree(true);
+      }, this.idleTimeoutMs);
+      this.idleTimer.unref?.();
+    }
+  }
 
   write(message) {
     if (!this.child?.stdin?.writable || this.child.stdin.writableEnded || this.closed) throw new Error('Claude Code 控制通道已关闭');
@@ -126,15 +153,34 @@ export class ClaudeCliClient {
   }
 
   steer(content) {
-    if (!this.initialized || this.result || this.stopped || this.closed) throw new Error('当前 Claude 任务尚未就绪或已结束，请稍后重试');
+    if (!this.initialized || !this.turnActive || this.result || this.stopped || this.closed) throw new Error('当前 Claude 任务尚未就绪或已结束，请稍后重试');
     this.hasSteered = true;
     return this.sendInput(content, { priority: 'next' });
+  }
+
+  buildTurnFailure(status = null) {
+    if (status?.error) return new Error(this.redact(status.error.message));
+    if (this.streamError) return this.streamError;
+    if (this.timedOut) return new Error(this.timedOut);
+    if (this.upstreamTimedOut) return Object.assign(
+      new Error(`上游连续 ${Math.round(this.upstreamTimedOutMs / 1000)} 秒没有产生新响应，本轮等待已结束。`),
+      { code: 'CLAUDE_UPSTREAM_TIMEOUT', engine: 'claude', statusCode: this.lastUpstreamError?.statusCode });
+    if (this.stopped) return Object.assign(new Error('Claude Code 已停止'), { code: 'USER_STOP' });
+    return new Error(this.redact(this.result?.errors?.join('; ') || this.result?.result
+      || this.stderr || `Claude Code 未正常完成（${status?.code ?? status?.signal ?? 'closed'}）`));
   }
 
   interrupt() {
     this.stopped = true;
     try { this.write({ type: 'control_request', request_id: crypto.randomUUID(), request: { subtype: 'interrupt' } }); }
     catch {}
+    if (this.keepAlive && this.turnReject) {
+      const reject = this.turnReject;
+      this.turnResolve = null;
+      this.turnReject = null;
+      reject(Object.assign(new Error('Claude Code 已停止'), { code: 'USER_STOP' }));
+      void this.close();
+    }
   }
 
   async handleControl(message) {
@@ -273,43 +319,36 @@ export class ClaudeCliClient {
       this.pauseUpstreamWait();
       this.result = message;
       this.onEvent({ type: 'result', result: message });
-      this.child.stdin.end();
+      if (this.keepAlive) {
+        if (this.turnResolve) {
+          const resolve = this.turnResolve;
+          this.turnResolve = null;
+          this.turnReject = null;
+          resolve(message);
+        }
+      } else {
+        this.child.stdin.end();
+      }
     }
   }
 
-  async run(content) {
+  ensureStarted() {
+    if (this.child) return;
     const args = claudeArguments(this);
     const env = claudeEnvironment(this.environment, this);
-    const secrets = [this.provider.apiKey].filter(Boolean);
-    const redact = (text) => secrets.reduce((value, secret) => value.replaceAll(secret, '[redacted]'), String(text || ''));
     this.child = this.spawnProcess(this.command, args, { cwd: this.cwd, env,
       ...(process.platform !== 'win32' ? { detached: true } : {}),
       windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
     this.onStarted(this.child);
-    let stderr = '';
-    let streamError;
-    let timedOut = '';
-    let timer;
-    const touch = () => {
-      clearTimeout(timer);
-      if (this.idleTimeoutMs > 0) timer = setTimeout(() => {
-        timedOut = 'Claude Code idle timeout'; this.interrupt();
-        this.killChildTree(true);
-      }, this.idleTimeoutMs);
-      timer?.unref?.();
-    };
-    const total = this.totalTimeoutMs > 0 ? setTimeout(() => {
-      timedOut = 'Claude Code total timeout'; this.interrupt(); this.killChildTree(true);
-    }, this.totalTimeoutMs) : null;
-    total?.unref?.();
-    touch();
-    this.waitForUpstream();
-    this.child.stderr.on('data', (chunk) => { touch(); stderr = (stderr + chunk).slice(-1_048_576); });
+    this.child.stderr.on('data', (chunk) => {
+      if (this.turnActive) this.touchTurnIdle();
+      this.stderr = (this.stderr + chunk).slice(-1_048_576);
+    });
     this.child.stdin.on('error', () => {});
-    const lines = readline.createInterface({ input: this.child.stdout, crlfDelay: Infinity });
-    const stream = (async () => {
-      for await (const line of lines) {
-        touch();
+    this.lines = readline.createInterface({ input: this.child.stdout, crlfDelay: Infinity });
+    this.streamPromise = (async () => {
+      for await (const line of this.lines) {
+        if (this.turnActive) this.touchTurnIdle();
         if (Buffer.byteLength(line, 'utf8') > this.maxLineBytes) {
           throw new Error(`Claude Code 返回的单条事件超过上限 (${this.maxLineBytes} bytes)`);
         }
@@ -317,11 +356,139 @@ export class ClaudeCliClient {
         try { message = JSON.parse(line); } catch { continue; }
         await this.handleEvent(message);
       }
-    })().catch((error) => { streamError = error; this.killChildTree(true); });
-    const closed = new Promise((resolve) => {
-      this.child.once('error', (error) => resolve({ error }));
-      this.child.once('close', (code, signal) => resolve({ code, signal }));
+    })().catch((error) => {
+      this.streamError = error;
+      if (this.turnReject) {
+        const reject = this.turnReject;
+        this.turnResolve = null;
+        this.turnReject = null;
+        reject(error);
+      }
+      this.killChildTree(true);
     });
+
+    const onProcessSettled = (status) => {
+      if (this.closed && this.closeStatus) return;
+      this.closeStatus = status;
+      this.closed = true;
+      clearTimeout(this.idleTimer);
+      clearTimeout(this.totalTimer);
+      clearTimeout(this.closeTimer);
+      this.pauseUpstreamWait();
+      try { this.lines?.close(); } catch {}
+      this.pendingControls.clear();
+      this.pendingTools.clear();
+      if (this.turnReject) {
+        const reject = this.turnReject;
+        this.turnResolve = null;
+        this.turnReject = null;
+        reject(this.buildTurnFailure(status));
+      }
+      this.onClosed(this.child);
+      this.resolveClosed(status);
+    };
+    this.child.once('error', (error) => onProcessSettled({ error }));
+    this.child.once('close', (code, signal) => onProcessSettled({ code, signal }));
+  }
+
+  async runTurn(content, { dispatchCommand = this.dispatchCommand, onEvent, onPermission, onSession } = {}) {
+    this.keepAlive = true;
+    if (this.closed || this.stopped) throw new Error('Claude Code 控制通道已关闭');
+    if (this.turnActive) throw new Error('Claude Code 上一轮尚未结束');
+    if (onEvent) this.onEvent = onEvent;
+    if (onPermission) this.onPermission = onPermission;
+    if (onSession) this.onSession = onSession;
+    this.result = null;
+    this.hasSteered = false;
+    this.pendingInputs.clear();
+    this.seenTools.clear();
+    this.pendingTools.clear();
+    this.streamedMessages.clear();
+    this.lastUpstreamError = null;
+    this.upstreamTimedOut = false;
+    this.upstreamTimedOutMs = 0;
+    this.compacting = false;
+    this.timedOut = '';
+    this.stderr = '';
+    this.ensureStarted();
+    this.turnActive = true;
+    this.touchTurnIdle();
+    if (this.totalTimeoutMs > 0) {
+      this.totalTimer = setTimeout(() => {
+        this.timedOut = 'Claude Code total timeout';
+        this.interrupt();
+        this.killChildTree(true);
+      }, this.totalTimeoutMs);
+      this.totalTimer.unref?.();
+    }
+    this.waitForUpstream();
+    const turnPromise = new Promise((resolve, reject) => {
+      this.turnResolve = resolve;
+      this.turnReject = reject;
+    });
+    try {
+      if (dispatchCommand && /^\/compact(?:\s|$)/.test(typeof content === 'string' ? content : content[0]?.text || '')) {
+        this.compacting = true;
+        this.waitForUpstream();
+      }
+      this.sendInput(content, { nativeCommand: dispatchCommand });
+      const result = await turnPromise;
+      if (this.streamError) throw this.streamError;
+      if (this.timedOut || this.upstreamTimedOut || this.stopped || !result || result.is_error) {
+        throw this.buildTurnFailure(this.closeStatus);
+      }
+      return result;
+    } catch (error) {
+      await this.close();
+      throw error;
+    } finally {
+      this.turnActive = false;
+      this.turnResolve = null;
+      this.turnReject = null;
+      clearTimeout(this.idleTimer);
+      clearTimeout(this.totalTimer);
+      this.pauseUpstreamWait();
+      this.pendingControls.clear();
+      this.pendingTools.clear();
+    }
+  }
+
+  close() {
+    clearTimeout(this.idleTimer);
+    clearTimeout(this.totalTimer);
+    this.pauseUpstreamWait();
+    this.pendingControls.clear();
+    this.pendingTools.clear();
+    if (!this.child) {
+      this.closed = true;
+      this.resolveClosed({ code: 0, signal: null });
+      return this.closedPromise;
+    }
+    try { this.child.stdin?.end(); } catch {}
+    if (!this.closed && !this.closeTimer) {
+      this.closeTimer = setTimeout(() => {
+        if (this.closed) return;
+        this.killChildTree(true);
+      }, 2000);
+      this.closeTimer.unref?.();
+    }
+    return this.closedPromise;
+  }
+
+  async run(content) {
+    this.keepAlive = false;
+    this.ensureStarted();
+    this.turnActive = true;
+    this.touchTurnIdle();
+    if (this.totalTimeoutMs > 0) {
+      this.totalTimer = setTimeout(() => {
+        this.timedOut = 'Claude Code total timeout';
+        this.interrupt();
+        this.killChildTree(true);
+      }, this.totalTimeoutMs);
+      this.totalTimer.unref?.();
+    }
+    this.waitForUpstream();
     try {
       // This is the native CLI's SDK control protocol, not a replacement agent loop.
       if (this.dispatchCommand && /^\/compact(?:\s|$)/.test(typeof content === 'string' ? content : content[0]?.text || '')) {
@@ -329,29 +496,29 @@ export class ClaudeCliClient {
         this.waitForUpstream();
       }
       this.sendInput(content, { nativeCommand: this.dispatchCommand });
-      const status = await closed;
-      await stream;
-      if (status.error) throw new Error(redact(status.error.message));
-      if (streamError) throw streamError;
-      if (timedOut) throw new Error(timedOut);
+      const status = await this.closedPromise;
+      await this.streamPromise;
+      if (status.error) throw new Error(this.redact(status.error.message));
+      if (this.streamError) throw this.streamError;
+      if (this.timedOut) throw new Error(this.timedOut);
       if (this.upstreamTimedOut) throw Object.assign(
         new Error(`上游连续 ${Math.round(this.upstreamTimedOutMs / 1000)} 秒没有产生新响应，本轮等待已结束。`),
         { code: 'CLAUDE_UPSTREAM_TIMEOUT', engine: 'claude', statusCode: this.lastUpstreamError?.statusCode });
       if (this.stopped) throw Object.assign(new Error('Claude Code 已停止'), { code: 'USER_STOP' });
       if (!this.result || this.result.is_error || status.code !== 0) {
-        throw new Error(redact(this.result?.errors?.join('; ') || this.result?.result
-          || stderr || `Claude Code 未正常完成（${status.code ?? status.signal}）`));
+        throw new Error(this.redact(this.result?.errors?.join('; ') || this.result?.result
+          || this.stderr || `Claude Code 未正常完成（${status.code ?? status.signal}）`));
       }
       return this.result;
     } finally {
+      this.turnActive = false;
       this.closed = true;
       if (!this.child.killed && this.child.exitCode === null) this.killChildTree(true);
-      clearTimeout(timer); clearTimeout(total);
+      clearTimeout(this.idleTimer); clearTimeout(this.totalTimer); clearTimeout(this.closeTimer);
       this.pauseUpstreamWait();
-      lines.close();
+      this.lines?.close();
       this.pendingControls.clear();
       this.pendingTools.clear();
-      this.onClosed(this.child);
     }
   }
 }

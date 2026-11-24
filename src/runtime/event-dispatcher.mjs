@@ -85,6 +85,7 @@ export function createEventDispatcher({
       inFlight.add(state);
       activeJobs += 1;
       handleEvent(state.event, {
+        wasQueued: state.wasQueued,
         isCancelled: () => state.cancelled,
         commit: () => {
           if (state.cancelled) return false;

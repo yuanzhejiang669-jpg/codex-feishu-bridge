@@ -40,7 +40,7 @@ export function createManagedCardClass({
         "/open-apis/cardkit/v1/cards",
         "--as",
         "bot",
-      ], { type: "card_json", data: JSON.stringify(initialCard) }, { timeoutMs: 60_000, attempts: 2 });
+      ], { type: "card_json", data: JSON.stringify(initialCard) }, { timeoutMs: 12_000, attempts: 1 });
 
       const cardId = findDeepKey(created, "card_id");
       if (!cardId) {
@@ -66,7 +66,7 @@ export function createManagedCardClass({
         ];
         if (useThreadReply) args.push("--reply-in-thread");
         try {
-          sent = await larkJson(args, { timeoutMs: 60_000, attempts: 2 });
+          sent = await larkJson(args, { timeoutMs: 12_000, attempts: 1 });
         } catch (error) {
           log("WARN", "card reply failed; falling back to chat send", { error: String(error.message || error) });
         }
@@ -86,7 +86,7 @@ export function createManagedCardClass({
           content,
           "--idempotency-key",
           idempotencyKey(idempotencyBase, "card-send"),
-        ], { timeoutMs: 60_000, attempts: 2 });
+        ], { timeoutMs: 12_000, attempts: 1 });
       }
 
       const messageId = findDeepKey(sent, "message_id") || "";

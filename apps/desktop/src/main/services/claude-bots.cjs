@@ -3,17 +3,27 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { readCatalog, EFFORTS } = require('./claude-providers.cjs');
 const { publicPermissionPolicy } = require('./permission-policy.cjs');
+const sourceEngineRoot = process.resourcesPath && fs.existsSync(path.join(process.resourcesPath, 'engine', 'src', 'claude', 'defaults.cjs'))
+  ? path.join(process.resourcesPath, 'engine') : path.resolve(__dirname, '../../../../..');
+const { readClaudeEngineDefaults } = require(path.join(sourceEngineRoot, 'src', 'claude', 'defaults.cjs'));
 
 const NAME = /^[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,62}[A-Za-z0-9])?$/;
 
 function providerReference(raw, options) {
-  const id = String(raw.providerId || raw.provider?.id || '').trim();
+  const defaults = options?.dataRoot ? readClaudeEngineDefaults(options.dataRoot) : {};
+  const id = String(raw.providerId || raw.provider?.id || defaults.provider || '').trim();
   const provider = readCatalog(options.dataRoot).providers.find((item) => item.id === id);
   if (!provider) throw new Error('请选择已保存的 Claude Provider');
   if (!(options.env || process.env)[provider.envKey]) throw new Error(`Claude Provider ${id} 的密钥不可用`);
-  const model = String(raw.model || raw.provider?.model || provider.model);
+  const defaultModel = defaults.model
+    && (!defaults.modelProvider || defaults.modelProvider === provider.id)
+    && provider.models.includes(defaults.model)
+    ? defaults.model
+    : '';
+  const model = String(raw.model || raw.provider?.model || defaultModel || provider.model);
   if (!provider.models.includes(model)) throw new Error('Claude 模型不在该渠道已发现的列表中');
-  const reasoning = String(raw.reasoning || raw.provider?.reasoning || provider.effort || 'high');
+  const defaultReasoning = EFFORTS.has(defaults.reasoning) ? defaults.reasoning : '';
+  const reasoning = String(raw.reasoning || raw.provider?.reasoning || defaultReasoning || provider.effort || 'high');
   if (!EFFORTS.has(reasoning)) throw new Error('Claude 思考强度无效');
   return { mode: 'claude', id, name: provider.name, model, reasoning, envKey: provider.envKey,
     baseUrl: provider.baseUrl, wireApi: 'anthropic-messages' };

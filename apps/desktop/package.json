@@ -1,6 +1,6 @@
 {
   "name": "codex-feishu-bridge-desktop",
-  "version": "0.10.15",
+  "version": "0.10.16",
   "private": true,
   "description": "Windows, macOS, and Linux desktop client for Codex Feishu Bridge",
   "desktopName": "codex-feishu-bridge.desktop",
@@ -42,7 +42,7 @@
     "extends": "electron-builder.yml"
   },
   "dependencies": {
-    "@larksuite/cli": "1.0.69",
+    "@larksuite/cli": "1.0.100",
     "@larksuiteoapi/node-sdk": "1.66.1",
     "electron-updater": "6.8.9",
     "node": "24.18.0",

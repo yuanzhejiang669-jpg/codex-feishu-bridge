@@ -5,12 +5,38 @@ import readline from 'node:readline';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
+export function feishuToolContextPath(stateDir, chatId) {
+  if (!stateDir || !chatId) return '';
+  const hash = crypto.createHash('sha256').update(String(chatId)).digest('hex').slice(0, 16);
+  return path.join(stateDir, `feishu-tool-context-${hash}.json`);
+}
+
+export function updateFeishuToolContext(config, event) {
+  const file = feishuToolContextPath(config?.stateDir, event?.chat_id);
+  if (!file) return '';
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const temp = `${file}.${crypto.randomUUID()}.tmp`;
+    fs.writeFileSync(temp, `${JSON.stringify({
+      chatId: event.chat_id,
+      messageId: event.message_id || event.id || '',
+      workspace: config.workspace || '',
+    })}\n`, 'utf8');
+    fs.renameSync(temp, file);
+    return file;
+  } catch {
+    return '';
+  }
+}
+
 export function feishuMcpConfiguration(config, event) {
+  const contextFile = updateFeishuToolContext(config, event);
   return JSON.stringify({ mcpServers: { feishu_bridge: { command: process.execPath,
     args: [fileURLToPath(import.meta.url)], env: { CFB_FEISHU_TOOL_CONTEXT: JSON.stringify({
       chatId: event.chat_id, messageId: event.message_id || event.id || '', profile: config.larkProfile,
       larkProfileHome: config.larkProfileHome || '',
       workspace: config.workspace, larkCli: config.larkCli, maxBytes: config.maxFileAttachmentBytes || 50 * 1024 * 1024,
+      ...(contextFile ? { contextFile } : {}),
     }) } } } });
 }
 
@@ -62,33 +88,50 @@ function findValue(value, key) {
   return '';
 }
 
+function resolveLiveContext(context) {
+  if (!context?.contextFile) return context;
+  try {
+    const live = JSON.parse(fs.readFileSync(context.contextFile, 'utf8'));
+    if (live && typeof live === 'object') {
+      return {
+        ...context,
+        ...(live.chatId ? { chatId: live.chatId } : {}),
+        ...(live.messageId !== undefined ? { messageId: live.messageId } : {}),
+        ...(live.workspace ? { workspace: live.workspace } : {}),
+      };
+    }
+  } catch {}
+  return context;
+}
+
 export async function callFeishuTool(name, input, context, options = {}) {
-  if (name === 'current_conversation') return { chat_id: context.chatId, message_id: context.messageId,
-    bot_profile: context.profile, workspace: context.workspace, sending_identity: 'bot' };
+  const ctx = resolveLiveContext(context);
+  if (name === 'current_conversation') return { chat_id: ctx.chatId, message_id: ctx.messageId,
+    bot_profile: ctx.profile, workspace: ctx.workspace, sending_identity: 'bot' };
   if (name !== 'send_file') throw new Error('未知飞书工具');
   if (!input || typeof input.file_path !== 'string' || !input.file_path.trim()
       || Object.keys(input).some((key) => key !== 'file_path')) throw new Error('只接受 file_path 参数；接收位置固定为当前对话');
-  if (!/^oc_[A-Za-z0-9]+$/.test(context.chatId || '') || !context.larkCli?.command) throw new Error('当前飞书对话或 CLI 配置无效');
-  const workspace = fs.realpathSync(context.workspace);
+  if (!/^oc_[A-Za-z0-9]+$/.test(ctx.chatId || '') || !ctx.larkCli?.command) throw new Error('当前飞书对话或 CLI 配置无效');
+  const workspace = fs.realpathSync(ctx.workspace);
   const file = fs.realpathSync(path.resolve(workspace, input.file_path));
   const relative = path.relative(workspace, file);
   if (!relative || relative.startsWith(`..${path.sep}`) || relative === '..' || path.isAbsolute(relative)) throw new Error('投递文件必须位于当前工作空间内');
   const stat = fs.statSync(file);
   if (!stat.isFile()) throw new Error('投递路径必须是文件');
-  if (stat.size > context.maxBytes) throw new Error(`文件超过 ${Math.floor(context.maxBytes / 1024 / 1024)} MiB 投递上限`);
-  const digest = crypto.createHash('sha256').update(context.chatId).update(context.messageId || '')
+  if (stat.size > ctx.maxBytes) throw new Error(`文件超过 ${Math.floor(ctx.maxBytes / 1024 / 1024)} MiB 投递上限`);
+  const digest = crypto.createHash('sha256').update(ctx.chatId).update(ctx.messageId || '')
     .update(file).update(fs.readFileSync(file)).digest('hex').slice(0, 36);
-  const args = ['im', '+messages-send', '--as', 'bot', '--chat-id', context.chatId,
+  const args = ['im', '+messages-send', '--as', 'bot', '--chat-id', ctx.chatId,
     '--file', path.basename(file), '--idempotency-key', `cfb-file-${digest}`, '--format', 'json'];
   const reply = await (options.runCli || runCli)(
-    context.larkCli,
+    ctx.larkCli,
     args,
     path.dirname(file),
-    { spawnProcess: options.spawnProcess, larkProfileHome: context.larkProfileHome || '' },
+    { spawnProcess: options.spawnProcess, larkProfileHome: ctx.larkProfileHome || '' },
   );
   const messageId = findValue(reply, 'message_id');
   if (reply.ok === false || (reply.code != null && Number(reply.code) !== 0) || !messageId) throw new Error(`飞书未确认文件投递：${safeError(JSON.stringify(reply))}`);
-  return { delivered: true, chat_id: context.chatId, message_id: messageId, file_name: path.basename(file), bytes: stat.size };
+  return { delivered: true, chat_id: ctx.chatId, message_id: messageId, file_name: path.basename(file), bytes: stat.size };
 }
 
 async function serve() {

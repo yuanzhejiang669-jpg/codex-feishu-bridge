@@ -730,7 +730,7 @@ test("ordinary messages start Codex without awaiting CardKit and use the warm ap
   const activeRunIndex = handlerSource.indexOf("recordActiveRunSafely({", handlerSource.indexOf("const cardState ="));
   const cardPromiseIndex = handlerSource.indexOf("const cardOpenPromise =");
   const runCodexIndex = handlerSource.indexOf("const result = await runCodex(");
-  const awaitCardIndex = handlerSource.indexOf("await cardOpenPromise;", runCodexIndex);
+  const awaitCardIndex = handlerSource.indexOf("await awaitCardOpenBounded(", runCodexIndex);
   const runStart = runnerSource.indexOf("async function runCodexAppServer(");
   const runEnd = runnerSource.indexOf("async function runCodex(", runStart);
   const runSource = runnerSource.slice(runStart, runEnd);
@@ -739,6 +739,7 @@ test("ordinary messages start Codex without awaiting CardKit and use the warm ap
   assert.ok(cardPromiseIndex > activeRunIndex);
   assert.ok(runCodexIndex > cardPromiseIndex);
   assert.ok(awaitCardIndex > runCodexIndex);
+  assert.equal(handlerSource.indexOf("await cardOpenPromise;", runCodexIndex), -1);
   assert.match(runSource, /appServerPool\.acquire/);
   assert.match(runSource, /lease\.ensureInitialized/);
   assert.match(runSource, /lease\.release/);

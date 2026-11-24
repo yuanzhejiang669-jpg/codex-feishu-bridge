@@ -3,7 +3,9 @@ import path from 'node:path';
 import { readJsonFile, writeJsonFileAtomicSync } from '../utils/json.mjs';
 import { claudeSessionArtifacts } from './session-deletion.mjs';
 import nativeLock from '../sessions/native-lock.cjs';
+import claudeDefaults from './defaults.cjs';
 const { lockDirectoryAsync } = nativeLock;
+const { claudeDataRootFromConfig, readClaudeEngineDefaults, writeClaudeEngineDefaults } = claudeDefaults;
 
 export const CLAUDE_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
 const effortOf = (value) => String(value || '').trim().toLowerCase();
@@ -31,13 +33,13 @@ export function claudeHelpMarkdown({ shared = false } = {}) {
     shared ? '`/confirm delete <序号或区间>` — 从所有 Claude Bot 的共享会话库删除；保留工作区文件' : '`/confirm delete <序号或区间>` — 确认删除当前 Bot 的本地会话记录；保留工作区文件',
     '`/reset` — 清空当前会话上下文，保留模型与渠道设置',
     '`/provider` / `/provider list` — 查看当前渠道或全部 Claude 渠道',
-    '`/provider <id>` / `/provider save <id>` / `/provider clear` — 切换渠道、保存为当前 Bot 默认或恢复默认',
+    '`/provider <id>` / `/provider save <id>` / `/provider clear` — 切换渠道、保存为全部 Claude Bot 引擎默认或恢复默认',
     '`/provider shortcuts` — 查看渠道快捷方式',
     '`/model` / `/model list` / `/model capability` — 查看当前模型、刷新渠道模型或查看 CLI 强度选项',
     '`/model <模型ID> [强度]` — 切换当前会话模型和思考强度',
     '`/model effort <强度|clear>` / `/model reasoning <强度|clear>` / `/effort <强度|clear>` — 切换或清除强度覆盖',
-    '`/model save <模型ID> [强度]` / `/model save effort <强度>` — 保存为当前 Bot 默认',
-    '`/model clear` — 恢复当前 Bot 默认模型与强度',
+    '`/model save [模型ID] [强度]` / `/model save effort <强度>` — 保存为全部 Claude Bot 引擎默认',
+    '`/model clear` — 恢复 Claude 引擎默认模型与强度',
     '`/model test <模型ID>` — 独立短请求测活，不续写当前会话',
     '`/compact [保留重点]` — 调用 Claude 原生手动压缩；任务运行中请先等结束或 /stop',
     '`/steer <补充内容>` — 向运行中的同一个 Claude 任务追加指令，在工具调用结束后读取',
@@ -46,7 +48,7 @@ export function claudeHelpMarkdown({ shared = false } = {}) {
     '`/stop all` / `/stopall` — 停止当前任务并清空本 Bot 全部等待队列',
     '`/queue` / `/clearqueue [all]` / `/clearqueueall` — 查看或清空等待队列',
     '`/approve 请求码` / `/deny 请求码` — 回答工具授权请求', '',
-    `强度：low、medium、high、xhigh、max。切换自动保存于当前${shared ? '共享' : ''}会话；save 只修改当前 Bot 默认，下一轮生效。`,
+    `强度：low、medium、high、xhigh、max。切换自动保存于当前${shared ? '共享' : ''}会话；save 同步为全部 Claude Bot 引擎默认，下一轮生效。`,
     shared ? '各 Bot 当前选择独立；同一共享会话同时只允许一个 Bot 执行。' : '',
     '自定义 /技能名 交给 Claude 原生 CLI；普通消息正文原样传递。',
     'Codex 原生 Goal 与 Codex Fast 不适用于 Claude CLI；/goal、/fast 会说明这一限制。',
@@ -55,9 +57,11 @@ export function claudeHelpMarkdown({ shared = false } = {}) {
 
 export function createClaudeCommands({ config, settings, botConfiguration, providers, saveSessions,
   activeJobs, getChatState, getSession, queueSummary = () => '无', testModel,
-  refreshModels = null, now = Date.now, sharedSessions, resolveSession, accessContextFor }) {
+  refreshModels = null, now = Date.now, sharedSessions, resolveSession, accessContextFor,
+  onConfigChange = null, hasWarm = null }) {
+  const dataRoot = claudeDataRootFromConfig(config);
   function currentProvider(session) { return providers().find((p) => p.id === settings(session).provider); }
-  function persistDefaults(patch) {
+  function persistDefaults(patch, { enginePatch = null, providerMeta = null } = {}) {
     if (!config.claudeBotConfig) throw new Error('当前 Bot 没有可写的默认配置路径');
     const bot = botConfiguration();
     const provider = { ...bot.provider, ...patch };
@@ -69,14 +73,22 @@ export function createClaudeCommands({ config, settings, botConfiguration, provi
       native.modelSettings = { ...native.modelSettings,
         [provider.model]: { ...native.modelSettings?.[provider.model], effortLevel: provider.reasoning || 'high' } };
     }
+    const nowIso = new Date(now()).toISOString();
     // The Bot file is authoritative for subsequent launches. Preserve all unrelated settings.
     writeJsonFileAtomicSync(nativePath, native);
-    try { writeJsonFileAtomicSync(config.claudeBotConfig, { ...bot, provider, configurationChangedAt: new Date(now()).toISOString() }); }
+    try { writeJsonFileAtomicSync(config.claudeBotConfig, { ...bot, provider, configurationChangedAt: nowIso }); }
     catch (error) {
       // Roll back this operation's own native-settings write if the authoritative Bot write failed.
       if (originalNative) writeJsonFileAtomicSync(nativePath, originalNative);
       else fs.rmSync(nativePath, { force: true });
       throw error;
+    }
+    if (dataRoot) {
+      writeClaudeEngineDefaults(dataRoot, enginePatch || patch, {
+        currentBotConfig: config.claudeBotConfig,
+        providerMeta,
+        nowIso,
+      });
     }
   }
   function changed(session) { session.updatedAt = now(); saveSessions(); }
@@ -87,18 +99,28 @@ export function createClaudeCommands({ config, settings, botConfiguration, provi
   }
   function modelStatus(session, title = 'Claude 模型设置') {
     const selected = settings(session);
+    const bot = botConfiguration();
+    const engineDefaults = dataRoot ? readClaudeEngineDefaults(dataRoot) : null;
+    const botTs = Date.parse(bot?.configurationChangedAt || '') || 0;
+    const defTs = Date.parse(engineDefaults?.updatedAt || '') || 0;
+    const botNewer = botTs > 0 && defTs > 0 && botTs > defTs;
+    const modelFromEngine = !botNewer && Boolean(engineDefaults?.model)
+      && (!engineDefaults.modelProvider || engineDefaults.modelProvider === selected.provider)
+      && engineDefaults.model === selected.model;
+    const effortFromEngine = !botNewer && Boolean(engineDefaults?.reasoning)
+      && engineDefaults.reasoning === selected.reasoning;
     const permLabel = selected.permissionMode === 'bypassPermissions'
       ? '`完全授权（bypassPermissions）`'
       : `\`${selected.permissionMode}\``;
     return [
       `**${title}**`,
       `当前会话：\`${session?.title || '未命名会话'}\` (${session?.id || '-'})`,
-      `模型：\`${selected.model}\`${session.modelOverride ? '（会话覆盖）' : '（Bot 默认）'}`,
-      `思考强度：\`${selected.reasoning}\`${session.reasoningOverride ? '（会话覆盖）' : '（Bot 默认）'}`,
+      `模型：\`${selected.model}\`${session.modelOverride ? '（会话覆盖）' : modelFromEngine ? '（引擎默认）' : '（Bot 默认）'}`,
+      `思考强度：\`${selected.reasoning}\`${session.reasoningOverride ? '（会话覆盖）' : effortFromEngine ? '（引擎默认）' : '（Bot 默认）'}`,
       `渠道：\`${selected.provider}\``,
       `权限模式：${permLabel}`,
       '',
-      '用法：`/model list`、`/model capability`、`/model test <模型ID>`、`/model <模型ID> [强度]`、`/model effort <强度|clear>`、`/model save <模型ID> [强度]`、`/model clear`',
+      '用法：`/model list`、`/model capability`、`/model test <模型ID>`、`/model <模型ID> [强度]`、`/model effort <强度|clear>`、`/model save [模型ID] [强度]`、`/model clear`',
     ].join('\n');
   }
   async function fetchModels(provider) {
@@ -139,7 +161,7 @@ export function createClaudeCommands({ config, settings, botConfiguration, provi
         ...(sharedSessions ? [`原生会话 Home：\`${sharedSessions.sessionHome(session)}\``, `会话工作区：\`${session.claudeWorkspace || config.workspace}\``] : []),
         `渠道：\`${selected.provider}\``, `模型：\`${selected.model}\``, `思考强度：\`${selected.reasoning}\``,
         `权限模式：${selected.permissionMode === 'bypassPermissions' ? '`完全授权（bypassPermissions）`' : `\`${selected.permissionMode}\``}`,
-        `任务：${job ? '运行中' : '空闲'}`, `队列：${queueSummary(event.chat_id)}`,
+        `任务：${job ? '运行中' : '空闲'}${!job && hasWarm?.(event.chat_id) ? '（温热保活就绪，下轮免冷启动）' : ''}`, `队列：${queueSummary(event.chat_id)}`,
         `当前请求上下文：${session.lastContextUsage?.usedTokens ?? '未知'} tokens`,
         `配置压缩窗口：${compact.window ? `${compact.window.toLocaleString('en-US')} tokens` : '由 Claude Code 决定'}；自动压缩${compact.enabled ? '开启' : '关闭'}`,
         '实际触发时间由原生 CLI 决定，配置窗口不等于固定触发点。',
@@ -177,18 +199,27 @@ export function createClaudeCommands({ config, settings, botConfiguration, provi
       }
       if (activeJobs.has(event.chat_id)) throw new Error('请在当前任务结束后更换渠道');
       if (['clear', 'default', 'reset'].includes(action)) {
+        await onConfigChange?.(event.chat_id, 'provider-change');
         session.providerOverride = ''; session.modelOverride = ''; session.reasoningOverride = '';
-        changed(session); await reply(modelStatus(session, '已恢复当前 Bot 默认渠道、模型与强度')); return true;
+        changed(session); await reply(modelStatus(session, '已恢复 Claude 引擎默认渠道、模型与强度')); return true;
       }
       const persist = action === 'save';
       const id = persist ? args[1] : args[0];
       if (!id || args.length > (persist ? 2 : 1)) throw new Error('用法：/provider <id>；或 /provider save <id>');
       const p = providers().find((item) => item.id === id);
       if (!p || !process.env[p.envKey]) throw new Error('Claude 渠道或密钥不可用，请在客户端配置并应用');
-      if (persist) persistDefaults({ mode: 'claude', id: p.id, name: p.name, baseUrl: p.baseUrl,
-        envKey: p.envKey, wireApi: 'anthropic-messages', model: p.model, reasoning: p.effort || 'high' });
-      session.providerOverride = p.id; session.modelOverride = p.model; session.reasoningOverride = p.effort || 'high';
-      changed(session); await reply(modelStatus(session, persist ? '已切换并保存为当前 Bot 默认渠道' : '已切换当前会话渠道')); return true;
+      await onConfigChange?.(event.chat_id, 'provider-change');
+      if (persist) {
+        persistDefaults(
+          { mode: 'claude', id: p.id, name: p.name, baseUrl: p.baseUrl,
+            envKey: p.envKey, wireApi: 'anthropic-messages', model: p.model, reasoning: p.effort || 'high' },
+          { enginePatch: { provider: p.id, model: p.model, modelProvider: p.id, reasoning: p.effort || 'high' }, providerMeta: p },
+        );
+        session.providerOverride = ''; session.modelOverride = ''; session.reasoningOverride = '';
+      } else {
+        session.providerOverride = p.id; session.modelOverride = p.model; session.reasoningOverride = p.effort || 'high';
+      }
+      changed(session); await reply(modelStatus(session, persist ? '已切换并保存为全部 Claude Bot 引擎默认渠道' : '已切换当前会话渠道')); return true;
     }
     if (!['/model', '/effort'].includes(command.name)) return false;
     if (command.name === '/effort') {
@@ -247,14 +278,29 @@ export function createClaudeCommands({ config, settings, botConfiguration, provi
     }
     if (activeJobs.has(event.chat_id)) throw new Error('当前任务运行中不能切换模型，请等待完成或 /stop 后再执行 /model。');
     if (['clear', 'default', 'reset'].includes(op)) {
+      await onConfigChange?.(event.chat_id, 'model-change');
       session.modelOverride = ''; session.reasoningOverride = ''; changed(session);
-      await reply(modelStatus(session, '已恢复当前 Bot 默认模型与强度')); return true;
+      await reply(modelStatus(session, '已恢复 Claude 引擎默认模型与强度')); return true;
     }
     const persist = op === 'save';
     if (persist) args.shift();
+    if (persist && !args.length) {
+      const current = settings(session);
+      await onConfigChange?.(event.chat_id, 'model-change');
+      persistDefaults(
+        { mode: 'claude', id: provider.id, name: provider.name, baseUrl: provider.baseUrl,
+          envKey: provider.envKey, wireApi: 'anthropic-messages', model: current.model, reasoning: current.reasoning },
+        { enginePatch: { model: current.model, modelProvider: provider.id, reasoning: current.reasoning } },
+      );
+      session.modelOverride = ''; session.reasoningOverride = '';
+      changed(session);
+      await reply(modelStatus(session, '已保存为全部 Claude Bot 引擎默认模型与强度'));
+      return true;
+    }
     const effortOnly = ['effort', 'reasoning'].includes((args[0] || '').toLowerCase());
-    if (!args[0] || args.length > 2) throw new Error('用法：/model <模型ID> [强度]；/model effort <强度|clear>；可加 save 保存为 Bot 默认');
+    if (!args[0] || args.length > 2) throw new Error('用法：/model <模型ID> [强度]；/model effort <强度|clear>；可加 save 保存为引擎默认');
     if (effortOnly && !persist && ['clear', 'default', 'reset'].includes(effortOf(args[1]))) {
+      await onConfigChange?.(event.chat_id, 'effort-change');
       session.reasoningOverride = '';
       changed(session);
       await reply(modelStatus(session, '已清除会话思考强度覆盖，恢复默认'));
@@ -263,13 +309,27 @@ export function createClaudeCommands({ config, settings, botConfiguration, provi
     const model = effortOnly ? settings(session).model : args[0];
     const effort = effortOnly || args[1] ? validEffort(args[1]) : null;
     if (!(provider.models || [provider.model]).includes(model)) throw new Error('模型不在该渠道列表中，请先 /model list');
-    if (persist) persistDefaults(effortOnly ? { reasoning: effort } : {
-      mode: 'claude', id: provider.id, name: provider.name,
-      baseUrl: provider.baseUrl, envKey: provider.envKey, wireApi: 'anthropic-messages',
-      model, reasoning: effort || settings(session).reasoning });
-    if (!effortOnly) session.modelOverride = model;
-    if (effort) session.reasoningOverride = effort;
-    changed(session); await reply(modelStatus(session, persist ? '已切换并保存为当前 Bot 默认' : '已切换当前会话设置；下一轮生效')); return true;
+    await onConfigChange?.(event.chat_id, effortOnly ? 'effort-change' : 'model-change');
+    if (persist) {
+      if (effortOnly) {
+        persistDefaults({ reasoning: effort }, { enginePatch: { reasoning: effort } });
+        session.reasoningOverride = '';
+      } else {
+        const nextEffort = effort || settings(session).reasoning;
+        persistDefaults(
+          { mode: 'claude', id: provider.id, name: provider.name,
+            baseUrl: provider.baseUrl, envKey: provider.envKey, wireApi: 'anthropic-messages',
+            model, reasoning: nextEffort },
+          { enginePatch: { model, modelProvider: provider.id, reasoning: nextEffort } },
+        );
+        session.modelOverride = '';
+        session.reasoningOverride = '';
+      }
+    } else {
+      if (!effortOnly) session.modelOverride = model;
+      if (effort) session.reasoningOverride = effort;
+    }
+    changed(session); await reply(modelStatus(session, persist ? '已切换并保存为全部 Claude Bot 引擎默认' : '已切换当前会话设置；下一轮生效')); return true;
   }
   return { handle };
 }

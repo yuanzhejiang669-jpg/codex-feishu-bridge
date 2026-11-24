@@ -8,7 +8,7 @@ const sourceEngineRoot = process.resourcesPath && fs.existsSync(path.join(proces
   ? path.join(process.resourcesPath, 'engine') : path.resolve(__dirname, '../../../../..');
 const configuration = require(path.join(sourceEngineRoot, 'src', 'antigravity', 'configuration.cjs'));
 const accountLock = require(path.join(sourceEngineRoot, 'src', 'antigravity', 'account-lock.cjs'));
-const { readCatalog, normalizeProvider, atomicJson, selectProvider, readJson, catalogPath, ID, NATIVE_MODES, readAccounts, accountCatalogPath } = configuration;
+const { readCatalog, readEngineDefaults, normalizeProvider, atomicJson, selectProvider, readJson, catalogPath, ID, NATIVE_MODES, readAccounts, accountCatalogPath } = configuration;
 
 async function inspectAntigravityRuntime(options = {}) {
   const home = options.userHome || os.homedir();
@@ -98,9 +98,13 @@ function previewAntigravityBot(raw, options, existing = []) {
 }
 
 function antigravityProviderReference(raw, options) {
-  const id = raw.providerId || raw.provider?.id || 'official'; const provider = selectProvider(options.dataRoot, id);
-  return { mode: 'antigravity', id: provider.id, name: provider.name, model: raw.model || raw.provider?.model || provider.model || '',
-    reasoning: raw.reasoning || raw.provider?.reasoning || provider.effort || '', accountId: provider.accountId || '' };
+  const defaults = options?.dataRoot ? readEngineDefaults(options.dataRoot) : {};
+  const id = raw.providerId || raw.provider?.id || defaults.provider || 'official'; const provider = selectProvider(options.dataRoot, id);
+  const modelDefaultsApply = Boolean(defaults.model) && (!defaults.modelProvider || defaults.modelProvider === provider.id);
+  return { mode: 'antigravity', id: provider.id, name: provider.name,
+    model: raw.model || raw.provider?.model || (modelDefaultsApply ? defaults.model : '') || provider.model || '',
+    reasoning: raw.reasoning || raw.provider?.reasoning || defaults.reasoning || provider.effort || '',
+    accountId: provider.accountId || '' };
 }
 
 function ensureAntigravitySkills(options) {
