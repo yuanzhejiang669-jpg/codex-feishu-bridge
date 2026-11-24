@@ -87,10 +87,19 @@ export function createClaudeCommands({ config, settings, botConfiguration, provi
   }
   function modelStatus(session, title = 'Claude 模型设置') {
     const selected = settings(session);
-    return [`**${title}**`, `模型：${selected.model}${session.modelOverride ? '（会话覆盖）' : '（Bot 默认）'}`,
-      `思考强度：${selected.reasoning}${session.reasoningOverride ? '（会话覆盖）' : '（Bot 默认）'}`,
-      `渠道：${selected.provider}`, '',
-      '用法：`/model list`、`/model capability`、`/model test <模型ID>`、`/model <模型ID> [强度]`、`/model effort <强度>`、`/model save <模型ID> [强度]`、`/model clear`'].join('\n');
+    const permLabel = selected.permissionMode === 'bypassPermissions'
+      ? '`完全授权（bypassPermissions）`'
+      : `\`${selected.permissionMode}\``;
+    return [
+      `**${title}**`,
+      `当前会话：\`${session?.title || '未命名会话'}\` (${session?.id || '-'})`,
+      `模型：\`${selected.model}\`${session.modelOverride ? '（会话覆盖）' : '（Bot 默认）'}`,
+      `思考强度：\`${selected.reasoning}\`${session.reasoningOverride ? '（会话覆盖）' : '（Bot 默认）'}`,
+      `渠道：\`${selected.provider}\``,
+      `权限模式：${permLabel}`,
+      '',
+      '用法：`/model list`、`/model capability`、`/model test <模型ID>`、`/model <模型ID> [强度]`、`/model effort <强度|clear>`、`/model save <模型ID> [强度]`、`/model clear`',
+    ].join('\n');
   }
   async function fetchModels(provider) {
     if (refreshModels) return refreshModels(provider);
@@ -121,21 +130,22 @@ export function createClaudeCommands({ config, settings, botConfiguration, provi
       const compact = claudeCompactionSettings(config);
       const runtime = readJsonFile(path.join(config.stateDir, 'claude-runtime.json')) || {};
       await reply([`**Claude Bot ${command.name === '/context' ? '上下文' : '状态'}**`,
-        '内核：Claude Code CLI', `Bot：${config.larkProfile}`, `工作区：${config.workspace}`,
-        `会话：${session.title} (${session.id})`, `原生会话：${session.claudeSessionId || '尚未创建'}`,
-        `会话索引：${sharedSessions?.catalogFile || path.join(config.stateDir, 'sessions.json')}`,
+        '',
+        '内核：`Claude Code CLI`', `Bot：\`${config.larkProfile}\``, `工作区：\`${config.workspace}\``,
+        `当前会话：\`${session.title || '未命名会话'}\` (${session.id})`, `原生会话：${session.claudeSessionId ? `\`${session.claudeSessionId}\`` : '尚未创建'}`,
+        `会话索引：\`${sharedSessions?.catalogFile || path.join(config.stateDir, 'sessions.json')}\``,
         `会话模式：${sharedSessions ? '全部 Claude Bot 共用；当前选择各自独立' : '当前 Bot 独立'}`,
-        `Claude Home：${config.claudeHome}`,
-        ...(sharedSessions ? [`原生会话 Home：${sharedSessions.sessionHome(session)}`, `会话工作区：${session.claudeWorkspace || config.workspace}`] : []),
-        `Provider：${selected.provider}`, `模型：${selected.model}`, `思考强度：${selected.reasoning}`,
-        `权限模式：${selected.permissionMode === 'bypassPermissions' ? '完全授权（bypassPermissions）' : selected.permissionMode}`,
+        `Claude Home：\`${config.claudeHome}\``,
+        ...(sharedSessions ? [`原生会话 Home：\`${sharedSessions.sessionHome(session)}\``, `会话工作区：\`${session.claudeWorkspace || config.workspace}\``] : []),
+        `渠道：\`${selected.provider}\``, `模型：\`${selected.model}\``, `思考强度：\`${selected.reasoning}\``,
+        `权限模式：${selected.permissionMode === 'bypassPermissions' ? '`完全授权（bypassPermissions）`' : `\`${selected.permissionMode}\``}`,
         `任务：${job ? '运行中' : '空闲'}`, `队列：${queueSummary(event.chat_id)}`,
         `当前请求上下文：${session.lastContextUsage?.usedTokens ?? '未知'} tokens`,
         `配置压缩窗口：${compact.window ? `${compact.window.toLocaleString('en-US')} tokens` : '由 Claude Code 决定'}；自动压缩${compact.enabled ? '开启' : '关闭'}`,
         '实际触发时间由原生 CLI 决定，配置窗口不等于固定触发点。',
         `上次压缩：${session.lastCompactedAt ? new Date(session.lastCompactedAt).toLocaleString('zh-CN') : '未观察到'}`,
-        `MCP：${runtime.mcpServers?.map((m) => `${m.name}（${m.status || '已发现'}）`).join('、') || '尚无本轮发现记录'}`,
-        `Skills：${runtime.skills?.length ?? '未知'} 个；共享工具目录：${config.claudeToolsRoot || '未配置'}`,
+        `MCP：${runtime.mcpServers?.map((m) => `\`${m.name}\`（${m.status || '已发现'}）`).join('、') || '尚无本轮发现记录'}`,
+        `Skills：${runtime.skills?.length ?? '未知'} 个；共享工具目录：${config.claudeToolsRoot ? `\`${config.claudeToolsRoot}\`` : '未配置'}`,
       ].join('\n')); return true;
     }
     if (command.name === '/rename') {
@@ -205,11 +215,25 @@ export function createClaudeCommands({ config, settings, botConfiguration, provi
         }
       } catch (error) { notice = `\n查询失败：${error.message}；以下使用已保存的模型列表。`; }
       const activeModel = settings(session).model;
-      const formatted = models.map((m) => (m === activeModel ? `● ${m} ← 当前` : `  ${m}`));
-      await reply(`当前模型：${activeModel} · 思考强度：${settings(session).reasoning}${notice}\n可选模型：\n${formatted.join('\n')}`); return true;
+      const formatted = models.map((m) => (m === activeModel ? `● \`${m}\` ← 当前` : `  \`${m}\``));
+      await reply([
+        '**Claude 可用模型列表**',
+        `当前模型：\`${activeModel}\` · 思考强度：\`${settings(session).reasoning}\` · 渠道：\`${provider.id}\`${notice}`,
+        '',
+        formatted.join('\n'),
+        '',
+        '切换：`/model <模型ID> [强度]` · 测活：`/model test <模型ID>` · 设为默认：`/model save <模型ID> [强度]`',
+      ].join('\n')); return true;
     }
     if (['capability', 'capabilities'].includes(op)) {
-      await reply(`当前模型：${settings(session).model}\nClaude CLI 接受的强度：low、medium、high、xhigh、max。\n强度原样传给 CLI，渠道实际支持情况以请求结果为准。\n用法：/model effort high；/model <模型ID> high；/model test <模型ID>`); return true;
+      await reply([
+        '**Claude 模型能力说明**',
+        `当前模型：\`${settings(session).model}\` · 思考强度：\`${settings(session).reasoning}\``,
+        'Claude CLI 接受的强度：`low`、`medium`、`high`、`xhigh`、`max`。',
+        '强度原样传给 CLI，渠道实际支持情况以请求结果为准。',
+        '',
+        '用法：`/model effort high`、`/effort high`、`/model <模型ID> high`、`/model test <模型ID>`',
+      ].join('\n')); return true;
     }
     if (op === 'test') {
       const model = args[1] || settings(session).model;

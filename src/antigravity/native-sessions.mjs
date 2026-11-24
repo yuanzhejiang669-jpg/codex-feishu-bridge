@@ -138,6 +138,18 @@ export function isAntigravityConversationBusy({ geminiDir, appDataDir = 'antigra
   return getAntigravityConversationState({ geminiDir, appDataDir, conversationId }).running;
 }
 
+export function isInAntigravityDesktopSidebar({ geminiDir, appDataDir = 'antigravity', conversationId } = {}) {
+  const id = String(conversationId || '').trim();
+  if (!geminiDir || !id || appDataDir !== 'antigravity') return false;
+  const protoPath = path.join(path.resolve(geminiDir), appDataDir, 'agyhub_summaries_proto.pb');
+  if (!fs.existsSync(protoPath)) return true;
+  try {
+    return fs.readFileSync(protoPath).includes(id);
+  } catch {
+    return true;
+  }
+}
+
 export function antigravityNativeArtifacts({ geminiDir, appDataDir = 'antigravity', conversationId } = {}) {
   const id = String(conversationId || '').trim();
   if (!geminiDir || !id || !UUID_RE.test(id)) return [];

@@ -11,6 +11,7 @@ import { createAntigravityBridge } from '../src/antigravity/bridge-runner.mjs';
 import {
   getAntigravityConversationState,
   isAntigravityConversationBusy,
+  isInAntigravityDesktopSidebar,
   listAntigravityNativeConversations,
 } from '../src/antigravity/native-sessions.mjs';
 import { createClaudeBridge } from '../src/claude/bridge-runner.mjs';
@@ -510,4 +511,154 @@ test('Antigravity ACP keepalive: preserves live worker across background tasks, 
   assert.equal(bridge.hasBackground('chat-bg'), false);
   assert.equal(activeFixture.client.closed, true);
   assert.ok(session.messages.some((m) => m.role === 'assistant' && m.content.includes('4090')));
+});
+
+test('Antigravity routes new Feishu sessions to Bridge CLI store, checks agyhub_summaries_proto.pb for true sidebar ownership, and supports unified /model subcommands', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cfb-agy-sidebar-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }));
+
+  const stateDir = path.join(root, 'state');
+  const logDir = path.join(root, 'logs');
+  const agyHome = path.join(root, 'agy-home');
+  const desktopGeminiDir = path.join(root, 'desktop-gemini');
+  const desktopAppDir = path.join(desktopGeminiDir, 'antigravity');
+  const convDir = path.join(desktopAppDir, 'conversations');
+  for (const dir of [stateDir, logDir, agyHome, convDir]) fs.mkdirSync(dir, { recursive: true });
+
+  const realSidebarId = '11111111-1111-4111-8111-111111111111';
+  const legacyFeishuId = '22222222-2222-4222-8222-222222222222';
+  fs.writeFileSync(path.join(convDir, `${realSidebarId}.db`), 'real-sidebar-db');
+  fs.writeFileSync(path.join(convDir, `${legacyFeishuId}.db`), 'legacy-feishu-db');
+  // agyhub_summaries_proto.pb only contains the real Desktop sidebar conversation (just like real Desktop)
+  fs.writeFileSync(path.join(desktopAppDir, 'agyhub_summaries_proto.pb'), `proto-header:${realSidebarId}:tail`);
+
+  const db = new DatabaseSync(path.join(desktopAppDir, 'conversation_summaries.db'));
+  db.exec(`
+    CREATE TABLE conversation_summaries (
+      conversation_id text PRIMARY KEY, title text NOT NULL DEFAULT "", preview text NOT NULL DEFAULT "",
+      step_count integer NOT NULL DEFAULT 0, last_modified_time datetime NOT NULL, workspace_uris text NOT NULL,
+      status text NOT NULL DEFAULT "", not_fully_idle numeric NOT NULL DEFAULT false, killed numeric NOT NULL DEFAULT false,
+      parent_conversation_id text NOT NULL DEFAULT "", app_data_dir text NOT NULL DEFAULT "antigravity"
+    );
+  `);
+  const ins = db.prepare(`INSERT INTO conversation_summaries VALUES (?, ?, '', 5, ?, '', 'CASCADE_RUN_STATUS_IDLE', 0, 0, '', 'antigravity')`);
+  ins.run(realSidebarId, 'Real Desktop Chat', '2026-11-24 02:00:00.000+00:00');
+  ins.run(legacyFeishuId, 'Legacy Feishu In Desktop Dir', '2026-11-24 01:50:00.000+00:00');
+  db.close();
+
+  assert.equal(isInAntigravityDesktopSidebar({ geminiDir: desktopGeminiDir, appDataDir: 'antigravity', conversationId: realSidebarId }), true);
+  assert.equal(isInAntigravityDesktopSidebar({ geminiDir: desktopGeminiDir, appDataDir: 'antigravity', conversationId: legacyFeishuId }), false);
+
+  const botConfigPath = path.join(root, 'bot.json');
+  fs.writeFileSync(botConfigPath, JSON.stringify({ engine: 'antigravity', provider: { id: 'official', model: '', reasoning: '' }, antigravity: { permissionMode: 'always-proceed' } }));
+  fs.writeFileSync(path.join(stateDir, 'antigravity-runtime.json'), JSON.stringify({
+    provider: 'official',
+    models: {
+      currentModelId: 'gemini-4-neon-high',
+      availableModels: [
+        { modelId: 'gemini-4-neon-low' }, { modelId: 'gemini-4-neon-high' }, { modelId: 'gemini-4-neon-xhigh' },
+      ],
+    },
+    configOptions: [
+      { id: 'model', currentValue: 'gemini-4-neon', options: [{ value: 'gemini-4-neon', name: 'Gemini 4 Neon' }] },
+      { id: 'thought_level', currentValue: 'high', options: [{ value: 'low' }, { value: 'high' }, { value: 'xhigh' }] },
+    ],
+  }));
+
+  const legacySession = {
+    id: 'leg01', title: 'Legacy Feishu In Desktop Dir', engine: 'antigravity',
+    antigravitySessionId: legacyFeishuId, antigravityHome: desktopGeminiDir, antigravityAppDataDir: 'antigravity',
+    antigravityOriginBot: 'antigravity-5', createdAt: Date.now(), updatedAt: Date.now(), messages: [],
+  };
+  const freshSession = { id: 'new01', title: 'Fresh Chat', engine: 'antigravity', createdAt: Date.now(), updatedAt: Date.now(), messages: [], antigravitySessionId: '' };
+  const chat = { currentSessionId: 'leg01', sessions: [legacySession] };
+  const replies = [];
+  let createdClientOpts = null;
+
+  const bridge = createAntigravityBridge({
+    config: {
+      stateDir, logDir, workspace: root, antigravityDataRoot: root, antigravityHome: agyHome,
+      antigravityDesktopGeminiDir: desktopGeminiDir, antigravityBotConfig: botConfigPath,
+      ownerOpenId: 'ou_owner', antigravityCli: { command: 'fixture' },
+    },
+    getSession: () => chat.sessions.find((s) => s.id === chat.currentSessionId) || freshSession,
+    getChatState: () => chat,
+    getChats: () => ({ dm: chat }),
+    resetSession: () => freshSession,
+    saveSessions: () => {},
+    userText: (c) => String(c || ''),
+    sendMarkdown: async (_c, text) => { replies.push(text); },
+    activeChildren: new Map(),
+    activeJobs: new Map(),
+    appendText: () => {}, reduceEvent: () => {}, markPhase: () => {}, ensureDone: () => {}, markInterrupted: () => {}, markError: () => {},
+    createClient: (opts) => {
+      createdClientOpts = opts;
+      const f = fixture((req, send) => {
+        if (req.method === 'session/new') {
+          send({
+            id: req.id,
+            result: {
+              sessionId: '33333333-3333-4333-8333-333333333333',
+              models: { currentModelId: 'gemini-4-neon-high', availableModels: [{ modelId: 'gemini-4-neon-low' }, { modelId: 'gemini-4-neon-high' }, { modelId: 'gemini-4-neon-xhigh' }] },
+              configOptions: [
+                { id: 'model', currentValue: 'gemini-4-neon', options: [{ value: 'gemini-4-neon', name: 'Gemini 4 Neon' }] },
+                { id: 'thought_level', currentValue: 'high', options: [{ value: 'low' }, { value: 'high' }, { value: 'xhigh' }] },
+              ],
+            },
+          });
+          return true;
+        }
+        if (req.method === 'session/prompt') {
+          send({ id: req.id, result: { stopReason: 'end_turn' } });
+          return true;
+        }
+        return false;
+      }, opts);
+      return f.client;
+    },
+  });
+  t.after(() => bridge.close());
+
+  const dmEvt = { chat_id: 'dm', chat_type: 'p2p', sender_id: 'ou_owner', message_id: 'm1' };
+
+  // 1) /list all does NOT falsely label legacySession as 客户端侧边栏, while realSidebarId IS labeled 客户端侧边栏
+  await bridge.handleCommand(dmEvt, { name: '/list', rest: 'all' });
+  const listOut = replies.at(-1);
+  assert.doesNotMatch(listOut, /Legacy Feishu In Desktop Dir.*客户端侧边栏/);
+  assert.match(listOut, /Real Desktop Chat.*客户端侧边栏/);
+
+  // 2) /delete 1 deletes legacySession cleanly (including its .db file), while /delete 2 protects realSidebarId
+  await bridge.handleCommand(dmEvt, { name: '/delete', rest: '1' });
+  assert.match(replies.at(-1), /\/confirm delete 1/);
+  await bridge.handleCommand(dmEvt, { name: '/confirm', rest: 'delete 1' });
+  assert.equal(fs.existsSync(path.join(convDir, `${legacyFeishuId}.db`)), false);
+  assert.equal(fs.existsSync(path.join(convDir, `${realSidebarId}.db`)), true);
+
+  // 3) New Feishu session runs in isolated Bridge antigravity-cli store (NOT Desktop antigravity store)
+  chat.sessions = [freshSession];
+  chat.currentSessionId = 'new01';
+  await bridge.run({ ...dmEvt, content: 'hello new' }, freshSession);
+  assert.equal(createdClientOpts.appDataDir, 'antigravity-cli');
+  assert.equal(path.resolve(createdClientOpts.geminiDir), path.resolve(agyHome));
+
+  // 4) Unified Codex-style /model, /model capability, /model effort, /model save <model> <effort>, /help
+  await bridge.handleCommand(dmEvt, { name: '/model', rest: '' });
+  assert.match(replies.at(-1), /当前会话：`Fresh Chat`/);
+  assert.match(replies.at(-1), /模型：`gemini-4-neon`/);
+
+  await bridge.handleCommand(dmEvt, { name: '/model', rest: 'capability' });
+  assert.match(replies.at(-1), /支持档位：.*`xhigh`/);
+
+  await bridge.handleCommand(dmEvt, { name: '/model', rest: 'effort xhigh' });
+  assert.equal(freshSession.reasoningOverride, 'xhigh');
+  assert.match(replies.at(-1), /思考强度：`xhigh`/);
+
+  await bridge.handleCommand(dmEvt, { name: '/model', rest: 'save gemini-4-neon low' });
+  const savedBot = JSON.parse(fs.readFileSync(botConfigPath, 'utf8'));
+  assert.equal(savedBot.provider.model, 'gemini-4-neon');
+  assert.equal(savedBot.provider.reasoning, 'low');
+
+  await bridge.handleCommand(dmEvt, { name: '/help', rest: '' });
+  assert.match(replies.at(-1), /\*\*Antigravity Bot 命令\*\*/);
+  assert.match(replies.at(-1), /`\/model effort <强度\|clear>`/);
 });

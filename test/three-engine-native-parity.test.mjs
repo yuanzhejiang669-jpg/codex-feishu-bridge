@@ -436,7 +436,7 @@ test('Claude defaults to bypassPermissions, raises line limit to >=128MiB, fixes
 
   // /model list highlights current model
   await bridge.handleCommand(ownerDm, { name: '/model', rest: 'list' });
-  assert.match(replies.at(-1), /● claude-opus-5-5 ← 当前/);
+  assert.match(replies.at(-1), /● `claude-opus-5-5` ← 当前/);
 
   // /list hints native CLI; /list all lists native CLI for owner DM only; /switch binds cleanly
   await bridge.handleCommand(ownerDm, { name: '/list', rest: '' });
