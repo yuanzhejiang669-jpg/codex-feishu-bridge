@@ -23,7 +23,8 @@ function writeRecoveryMarker(dataRoot, names, targetVersion) {
 
 function readRecoveryMarker(dataRoot) {
   try {
-    const value = JSON.parse(fs.readFileSync(markerPath(dataRoot), "utf8"));
+    const raw = fs.readFileSync(markerPath(dataRoot), "utf8").replace(/^\uFEFF/, "");
+    const value = JSON.parse(raw);
     if (value?.schemaVersion !== 1 || !Array.isArray(value.botNames)) return null;
     return value;
   } catch {

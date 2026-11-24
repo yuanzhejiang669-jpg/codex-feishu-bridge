@@ -146,7 +146,10 @@ export function runActivityView(state, now = Date.now(), formatToolName = toolDi
   return {
     healthLabel: healthLabel(activity, silenceMs, effectivePhase),
     phaseLabel: effectivePhase === 'initializing' && state?.meta?.engine === 'claude'
-      ? '正在初始化 Claude Code' : PHASE_LABELS[effectivePhase] || "正在处理",
+      ? '正在初始化 Claude Code'
+      : effectivePhase === 'initializing' && state?.meta?.engine === 'antigravity'
+        ? '正在初始化 Antigravity'
+        : PHASE_LABELS[effectivePhase] || "正在处理",
     currentTool: effectivePhase === "tool_running" ? formatToolName(currentTool) : "",
     statusNote: [unresolvedTools.length ? `${unresolvedTools.length} 个较早工具尚未收到结束状态` : '',
       effectivePhase === 'reconnecting' ? upstreamRetryNote(state.meta?.upstreamRetry, timestamp) : ''].filter(Boolean).join('；'),

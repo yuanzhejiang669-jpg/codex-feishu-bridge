@@ -271,12 +271,14 @@ test('ENG-AGY-002: /model status uses zero subprocesses, /model list uses zero-M
   assert.equal(fs.readFileSync(runtimePath, 'utf8'), originalRuntime);
   assert.match(replies.at(-1), /gemini-4-neon/);
 
-  // 3) Second /model list within 5 min hits cache (zero new subprocess); /model refresh forces new probe
+  // 3) Both /model list and /model refresh perform live read-only probes (no stale cache); /model status still uses 0 subprocesses
   await bridge.handleCommand(event, { name: '/model', rest: 'list' });
-  assert.equal(createClientCalls, 1);
-  assert.match(replies.at(-1), /缓存/);
-  await bridge.handleCommand(event, { name: '/model', rest: 'refresh' });
   assert.equal(createClientCalls, 2);
+  assert.match(replies.at(-1), /实时只读探针/);
+  await bridge.handleCommand(event, { name: '/model', rest: 'refresh' });
+  assert.equal(createClientCalls, 3);
+  await bridge.handleCommand(event, { name: '/model', rest: 'status' });
+  assert.equal(createClientCalls, 3);
 
   // 4) /effort rejects option outside cached thought_level; /effort clear restores default
   await assert.rejects(bridge.handleCommand(event, { name: '/effort', rest: 'max' }), /可用选项/);

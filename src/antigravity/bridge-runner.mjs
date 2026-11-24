@@ -27,6 +27,51 @@ import {
 const { readCatalog, readJson, atomicJson, readEngineDefaults, writeEngineDefaults, selectProvider, assertOfficialAccount, EFFORTS, NATIVE_MODES } = configuration;
 const EFFORT_ORDER = ['low', 'medium', 'high', 'xhigh', 'max'];
 const EFFORT_SUFFIX_RE = /-(low|medium|high|xhigh|max)$/i;
+const ANTIGRAVITY_RESULT_ERROR_RE = /^\s*⚠\s*(?:agent executor error:|UNAUTHENTICATED\b|PERMISSION_DENIED\b|RESOURCE_EXHAUSTED\b|INTERNAL\b|UNAVAILABLE\b|DEADLINE_EXCEEDED\b|INVALID_ARGUMENT\b|FAILED_PRECONDITION\b|CANCELLED\b|UNKNOWN\b|ABORTED\b|DATA_LOSS\b|[^\n]{0,80}\(code\s*(?:4\d\d|5\d\d)\))/iu;
+const ANTIGRAVITY_TRAILING_ERROR_LINE_RE = /^\s*⚠\s*(?:agent executor error:|(?:UNAUTHENTICATED|PERMISSION_DENIED|RESOURCE_EXHAUSTED|INTERNAL|UNAVAILABLE|DEADLINE_EXCEEDED|INVALID_ARGUMENT|FAILED_PRECONDITION)\s*(?:\(code\s*(?:4\d\d|5\d\d)\))?\s*:)/iu;
+const ANTIGRAVITY_AUTH_401_RE = /UNAUTHENTICATED|\(code\s*401\)|invalid authentication credentials/i;
+
+export function detectAntigravityResultError(text) {
+  const trimmed = String(text || '').trim();
+  if (!trimmed) return null;
+  if (ANTIGRAVITY_RESULT_ERROR_RE.test(trimmed)) {
+    return {
+      message: trimmed,
+      isAuth401: ANTIGRAVITY_AUTH_401_RE.test(trimmed),
+    };
+  }
+  const lines = trimmed.split(/\r?\n/);
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    if (ANTIGRAVITY_TRAILING_ERROR_LINE_RE.test(line)) {
+      return {
+        message: line,
+        isAuth401: ANTIGRAVITY_AUTH_401_RE.test(line),
+      };
+    }
+    break;
+  }
+  return null;
+}
+
+function stripTrailingAntigravityErrorBlock(state) {
+  if (!Array.isArray(state?.blocks) || !state.blocks.length) return;
+  const last = state.blocks[state.blocks.length - 1];
+  if (last?.kind !== 'text' || typeof last.content !== 'string') return;
+  if (ANTIGRAVITY_RESULT_ERROR_RE.test(last.content.trim())) {
+    state.blocks.pop();
+    return;
+  }
+  const lines = last.content.split(/\r?\n/);
+  while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
+  if (lines.length && ANTIGRAVITY_TRAILING_ERROR_LINE_RE.test(lines[lines.length - 1])) {
+    lines.pop();
+    const cleaned = lines.join('\n').trimEnd();
+    if (cleaned) last.content = cleaned;
+    else state.blocks.pop();
+  }
+}
 
 function samePath(a, b) {
   if (!a || !b) return false;
@@ -752,6 +797,7 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
     const flush = () => { clearTimeout(flushTimer); flushTimer = null; flushing = flushing.then(() => onState?.(state)); return flushing; };
     const schedule = () => { if (!flushTimer) flushTimer = setTimeout(() => { void flush().catch(() => {}); }, 150); };
     let initialized = reusedClient;
+    let attemptToolCalls = 0;
     const foregroundOnEvent = (item) => {
       const update = item.update;
       if (item.type === 'session_info_update' && update.title && !session.userRenamed) { session.title = update.title; saveSessions(); }
@@ -761,6 +807,7 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
         if (state) state.meta.contextUsage = session.lastContextUsage;
         saveSessions();
       }
+      if (item.type === 'tool_call') attemptToolCalls += 1;
       if (!state) return;
       if (item.type === 'agent_message_chunk' && update.content?.type === 'text') { appendText(state, update.content.text); markPhase(state, 'model_streaming', { connection: 'connected' }); }
       else if (item.type === 'agent_thought_chunk') markPhase(state, 'model_thinking', { connection: 'connected' });
@@ -796,46 +843,94 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
       if (session.antigravitySourceId && session.antigravitySourceId !== selected.provider) {
         throw new Error('此原生会话已绑定另一渠道。请切回原渠道继续，或 /new 创建新会话后使用新渠道。');
       }
-      if (!reusedClient) {
-        const opened = await client.openSession({
-          sessionId: session.antigravitySessionId || '',
-          mcpServers: nativeMcpServers({ ...config, workspace: session.antigravityWorkspace || config.workspace }, event),
-          model: selected.model,
-          effort: selected.reasoning,
-          mode: selected.permissionMode,
-        });
-        initialized = true;
-        const effectiveAppDataDir = client.appDataDir || target.appDataDir || 'antigravity-cli';
-        target.appDataDir = effectiveAppDataDir;
-        session.engine = 'antigravity';
-        session.antigravitySessionId = opened.sessionId;
-        session.antigravitySourceId = selected.provider;
-        session.antigravityHome = target.geminiDir || session.antigravityHome || config.antigravityHome;
-        session.antigravityAppDataDir = effectiveAppDataDir;
-        session.antigravityWorkspace ||= config.workspace;
-        saveSessions();
-        const observedCatalog = extractAntigravityModelCatalog(opened.models, opened.configOptions);
-        atomicJson(runtimePath, { engine: 'antigravity', version: client.runtime.agentInfo?.version,
-          sessionId: opened.sessionId, pid: client.child?.pid, provider: selected.provider,
-          accountId: selected.accountAlias, models: opened.models, configOptions: opened.configOptions,
-          modes: opened.modes, observedAt: new Date().toISOString(), geminiDir: target.geminiDir, appDataDir: effectiveAppDataDir });
-        Object.assign(job, { pid: client.child.pid, threadId: opened.sessionId });
-        if (state) {
-          state.threadId = opened.sessionId;
-          const resolvedModel = observedCatalog.currentBaseModel || selected.model || observedCatalog.currentModelId;
-          const resolvedEffort = observedCatalog.currentEffort || selected.reasoning;
-          if (resolvedModel) state.meta.model = resolvedEffort ? `${resolvedModel} (${resolvedEffort})` : resolvedModel;
-          markPhase(state, 'model_thinking', { connection: 'connected' });
+      let result = null;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        if (!reusedClient) {
+          const opened = await client.openSession({
+            sessionId: session.antigravitySessionId || '',
+            mcpServers: nativeMcpServers({ ...config, workspace: session.antigravityWorkspace || config.workspace }, event),
+            model: selected.model,
+            effort: selected.reasoning,
+            mode: selected.permissionMode,
+          });
+          initialized = true;
+          const effectiveAppDataDir = client.appDataDir || target.appDataDir || 'antigravity-cli';
+          target.appDataDir = effectiveAppDataDir;
+          session.engine = 'antigravity';
+          session.antigravitySessionId = opened.sessionId;
+          session.antigravitySourceId = selected.provider;
+          session.antigravityHome = target.geminiDir || session.antigravityHome || config.antigravityHome;
+          session.antigravityAppDataDir = effectiveAppDataDir;
+          session.antigravityWorkspace ||= config.workspace;
+          saveSessions();
+          const observedCatalog = extractAntigravityModelCatalog(opened.models, opened.configOptions);
+          atomicJson(runtimePath, { engine: 'antigravity', version: client.runtime.agentInfo?.version,
+            sessionId: opened.sessionId, pid: client.child?.pid, provider: selected.provider,
+            accountId: selected.accountAlias, models: opened.models, configOptions: opened.configOptions,
+            modes: opened.modes, observedAt: new Date().toISOString(), geminiDir: target.geminiDir, appDataDir: effectiveAppDataDir });
+          Object.assign(job, { pid: client.child?.pid, threadId: opened.sessionId });
+          if (state) {
+            state.threadId = opened.sessionId;
+            const resolvedModel = observedCatalog.currentBaseModel || selected.model || observedCatalog.currentModelId;
+            const resolvedEffort = observedCatalog.currentEffort || selected.reasoning;
+            if (resolvedModel) state.meta.model = resolvedEffort ? `${resolvedModel} (${resolvedEffort})` : resolvedModel;
+            markPhase(state, 'model_thinking', { connection: 'connected' });
+            await flush();
+          }
+        } else if (state) {
+          state.threadId = session.antigravitySessionId || client.sessionId;
+          const info = displayModelInfo(session);
+          if (info.effectiveModel) state.meta.model = info.effectiveEffort ? `${info.effectiveModel} (${info.effectiveEffort})` : info.effectiveModel;
           await flush();
         }
-      } else if (state) {
-        state.threadId = session.antigravitySessionId || client.sessionId;
-        const info = displayModelInfo(session);
-        if (info.effectiveModel) state.meta.model = info.effectiveEffort ? `${info.effectiveModel} (${info.effectiveEffort})` : info.effectiveModel;
-        await flush();
+        const promptInput = attempt === 1 && attemptToolCalls > 0 && session.antigravitySessionId
+          ? antigravityContent('上一轮因认证凭证刷新中断（HTTP 401），已自动重连。请基于上述已完成的步骤继续回复用户，不要重复执行已完成的操作。', [])
+          : antigravityContent(contentOverride ?? userText(event.content), event.attachments);
+        const turnResult = await client.prompt(promptInput);
+        const resultErr = detectAntigravityResultError(turnResult?.text);
+        if (!resultErr) {
+          if (state?.meta?.upstreamRetry) delete state.meta.upstreamRetry;
+          result = turnResult;
+          break;
+        }
+        const canAutoRetry401 = resultErr.isAuth401
+          && attempt === 0
+          && !client.stopped
+          && (attemptToolCalls === 0 || Boolean(session.antigravitySessionId));
+        if (canAutoRetry401) {
+          clients.delete(client);
+          try { await client.close(); } catch {}
+          reusedClient = false;
+          initialized = false;
+          if (state) {
+            stripTrailingAntigravityErrorBlock(state);
+            state.meta.upstreamRetry = {
+              provider: 'Antigravity',
+              statusCode: 401,
+              attempt: 1,
+              maxRetries: 1,
+              at: Date.now(),
+              delayMs: 0,
+            };
+            markPhase(state, 'reconnecting', { connection: 'recovering', retryAttempt: 1 });
+            await flush();
+          }
+          client = newClient(session, event, foregroundOnEvent, target);
+          client.onPermission = foregroundOnPermission;
+          clients.add(client);
+          job.client = client;
+          continue;
+        }
+        if (state) {
+          if (state.meta?.upstreamRetry) delete state.meta.upstreamRetry;
+          stripTrailingAntigravityErrorBlock(state);
+        }
+        throw Object.assign(new Error(resultErr.message), {
+          engine: 'antigravity',
+          code: resultErr.isAuth401 ? 'ANTIGRAVITY_AUTH_401' : 'ANTIGRAVITY_EXECUTOR_ERROR',
+          retried401: attempt > 0,
+        });
       }
-      const result = await client.prompt(antigravityContent(contentOverride ?? userText(event.content), event.attachments));
-      if (/^\s*⚠\s*agent executor error:/u.test(result.text)) throw new Error(result.text.trim());
       const usage = result.usage || {};
       session.lastTokenUsage = { total: { inputTokens: usage.inputTokens || 0, outputTokens: usage.outputTokens || 0,
         totalTokens: usage.totalTokens || 0 }, modelContextWindow: session.lastContextUsage?.contextWindow || null };
@@ -1642,12 +1737,10 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
         return true;
       }
       if (['list', 'refresh'].includes(sub)) {
-        const result = await probeModelsReadOnly(session, event, { forceRefresh: sub === 'refresh' });
+        const result = await probeModelsReadOnly(session, event, { forceRefresh: true });
         const catalog = result.catalog || extractAntigravityModelCatalog(result.models, result.configOptions);
         const info = displayModelInfo(session, catalog);
-        const cacheNote = result.fromCache
-          ? '（来自 5 分钟内缓存，发送 `/model refresh` 强刷）'
-          : '（实时只读探针，已缓存 5 分钟）';
+        const cacheNote = '（实时只读探针）';
         const lines = catalog.baseModels.map((item) => {
           const isCurrent = Boolean(info.effectiveModel && item.id === info.effectiveModel);
           const prefix = isCurrent ? '● ' : '  ';

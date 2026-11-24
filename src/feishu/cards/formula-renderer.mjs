@@ -301,18 +301,10 @@ export function createFormulaImageService({
     }
   }
 
-  async function enrichBlocks(blocks) {
-    if (!enabled) {
-      return {
-        blocks,
-        sources: [],
-        stats: { enabled: false, browser: Boolean(resolvedBrowser), planned: 0, rendered: 0, failed: 0 },
-      };
-    }
-
+  function planBlocks(blocks) {
     const blockPlans = [];
     let plannedCount = 0;
-    for (const block of blocks) {
+    for (const block of Array.isArray(blocks) ? blocks : []) {
       if (block?.kind !== "text" || !String(block.content || "").trim()) {
         blockPlans.push([{ ...block }]);
         continue;
@@ -325,6 +317,24 @@ export function createFormulaImageService({
       plannedCount += plans.filter((plan) => plan.kind === "image").length;
       blockPlans.push(plans);
     }
+    return { blockPlans, plannedCount };
+  }
+
+  function hasPlannedFormulas(blocks) {
+    if (!enabled) return false;
+    return planBlocks(blocks).plannedCount > 0;
+  }
+
+  async function enrichBlocks(blocks) {
+    if (!enabled) {
+      return {
+        blocks,
+        sources: [],
+        stats: { enabled: false, browser: Boolean(resolvedBrowser), planned: 0, rendered: 0, failed: 0 },
+      };
+    }
+
+    const { blockPlans, plannedCount } = planBlocks(blocks);
     if (plannedCount === 0) {
       return { blocks, sources: [], stats: { enabled: true, browser: Boolean(resolvedBrowser), planned: 0, rendered: 0, failed: 0 } };
     }
@@ -447,6 +457,7 @@ export function createFormulaImageService({
     browserExecutable: resolvedBrowser,
     close,
     enrichBlocks,
+    hasPlannedFormulas,
     warmup,
     isBrowserActive: () => Boolean(activeBrowser),
   };

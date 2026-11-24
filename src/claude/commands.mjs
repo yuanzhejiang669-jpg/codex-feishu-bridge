@@ -120,7 +120,7 @@ export function createClaudeCommands({ config, settings, botConfiguration, provi
       `渠道：\`${selected.provider}\``,
       `权限模式：${permLabel}`,
       '',
-      '用法：`/model list`、`/model capability`、`/model test <模型ID>`、`/model <模型ID> [强度]`、`/model effort <强度|clear>`、`/model save [模型ID] [强度]`、`/model clear`',
+      '用法：`/model list`、`/model refresh`、`/model capability`、`/model test <模型ID>`、`/model <模型ID> [强度]`、`/model effort <强度|clear>`、`/model save [模型ID] [强度]`、`/model clear`',
     ].join('\n');
   }
   async function fetchModels(provider) {
@@ -230,7 +230,7 @@ export function createClaudeCommands({ config, settings, botConfiguration, provi
     const op = (args[0] || '').toLowerCase();
     if (!op || ['status', 'view'].includes(op)) { await reply(modelStatus(session)); return true; }
     const provider = currentProvider(session);
-    if (op === 'list') {
+    if (['list', 'refresh'].includes(op)) {
       let models = provider.models || [provider.model]; let notice = '';
       try {
         models = await fetchModels(provider);

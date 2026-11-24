@@ -88,6 +88,7 @@ export function httpStatusFromText(text) {
   const value = String(text || "");
   const match = value.match(/httpStatusCode["']?\s*[:=]\s*(\d{3})/i)
     || value.match(/(?:API Error:|\bHTTP)\s*(\d{3})\b/i)
+    || value.match(/\(code\s*(\d{3})\)/i)
     || value.match(/\b(\d{3})\s+(?:Unauthorized|Too Many Requests|Forbidden|Payment Required)\b/i);
   return match ? Number(match[1]) : null;
 }
@@ -113,6 +114,18 @@ export function classifyCodexFailure(value, fallback = "Codex 运行失败") {
     return { ...base, kind: 'upstream_timeout', label: '上游响应超时',
       message: 'Claude Code 等待上游响应超过连续无进展时限，本轮已结束。',
       suggestion: '原会话和工作区已保留。服务恢复后可继续；本轮不会无限等待或自动重放已执行的工具。' };
+  }
+
+  if (errorCode === 'ANTIGRAVITY_AUTH_401' || (value?.engine === 'antigravity' && (httpStatus === 401 || lower.includes('unauthenticated')))) {
+    return {
+      ...base,
+      kind: 'auth',
+      label: 'Antigravity 鉴权失败（HTTP 401）',
+      message: value?.retried401
+        ? 'Antigravity 官方登录凭证过期或失效（HTTP 401），Bridge 已重建进程自动重试一次但仍未通过。'
+        : 'Antigravity 官方登录凭证过期或失效（HTTP 401）。',
+      suggestion: '请检查 Antigravity 桌面端或客户端“渠道与账号”中的官方登录状态，重新登录后再继续；原会话已保留。',
+    };
   }
 
   if (errorCode === 'ANTIGRAVITY_DESKTOP_BUSY' || /正在\s*Antigravity\s*客户端中运行/.test(detail)) {

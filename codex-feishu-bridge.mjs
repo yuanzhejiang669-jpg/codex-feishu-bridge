@@ -163,6 +163,7 @@ const CONFIG = {
   listLimit: Number(process.env.CODEX_FEISHU_LIST_LIMIT || "100"),
   useCards: (process.env.CODEX_FEISHU_CARD_MODE || "1") !== "0",
   cardThrottleMs: Number(process.env.CODEX_FEISHU_CARD_THROTTLE_MS || "400"),
+  cardHeartbeatMs: parseDurationMs(process.env.CODEX_FEISHU_CARD_HEARTBEAT_MS, 8_000),
   debugCards: (process.env.CODEX_FEISHU_CARD_DEBUG || "0") === "1",
   showFinalSteps: (process.env.CODEX_FEISHU_SHOW_FINAL_STEPS || "1") === "1",
   maxRunningToolDetails: Number(process.env.CODEX_FEISHU_CARD_MAX_RUNNING_TOOL_DETAILS || "20"),
@@ -1119,44 +1120,74 @@ async function handleEvent(rawEvent, dispatchControl = {}) {
   }, "message-start");
   let finalCardFlushOk = true;
   let latestCardState = cardState;
+  let lastCardTickAt = Date.now();
   const updateCard = async (state) => {
     latestCardState = state;
     if (!card) return;
     if (activeRunRecorded && state.terminal === "running") touchActiveRunSafely(messageId);
-    if (state.terminal === "done" && !state.formulaRenderComplete) {
-      if (!state.formulaRenderPromise) {
-        state.formulaRenderPromise = (async () => {
-          const formulaStartedAt = Date.now();
-          const result = await formulaImageService.enrichBlocks(state.blocks);
-          state.blocks = result.blocks;
-          state.formulaSources = result.sources;
-          state.formulaRenderStats = result.stats;
-          state.formulaRenderComplete = true;
-          log("INFO", "formula rendering completed", {
-            messageId,
-            durationMs: Date.now() - formulaStartedAt,
-            ...result.stats,
-          });
-        })().catch((error) => {
-          state.formulaRenderComplete = true;
-          state.formulaRenderStats = { failed: true };
-          log("WARN", "formula rendering pipeline failed; preserving original markdown", {
-            messageId,
-            error: String(error?.message || error).slice(0, 1200),
-          });
-        });
-      }
-      await state.formulaRenderPromise;
-    }
     if (card.closed) return;
+    if (state.terminal === "done" && state.formulaRenderPromise && !state.formulaRenderComplete) {
+      return;
+    }
     const rendered = renderRunCard(state);
     if (state.terminal === "running") {
+      lastCardTickAt = Date.now();
       card.update(rendered);
-    } else {
+      return;
+    }
+    if (state.terminal === "done") {
+      const shouldRenderFormulas = !state.formulaRenderComplete
+        && !state.formulaRenderPromise
+        && Boolean(formulaImageService.hasPlannedFormulas?.(state.blocks));
       const ok = await card.flush(rendered);
       finalCardFlushOk = ok !== false;
-      card.close();
+      if (shouldRenderFormulas && finalCardFlushOk && !card.closed) {
+        const targetCard = card;
+        const snapshotBlocks = state.blocks.map((block) => ({ ...block }));
+        state.formulaRenderPromise = (async () => {
+          const formulaStartedAt = Date.now();
+          try {
+            const result = await formulaImageService.enrichBlocks(snapshotBlocks);
+            state.blocks = result.blocks;
+            state.formulaSources = result.sources;
+            state.formulaRenderStats = result.stats;
+            state.formulaRenderComplete = true;
+            log("INFO", "formula rendering completed", {
+              messageId,
+              async: true,
+              durationMs: Date.now() - formulaStartedAt,
+              ...result.stats,
+            });
+            if (!targetCard.closed && Number(result.stats?.rendered || 0) > 0) {
+              const upgradedOk = await targetCard.flush(renderRunCard(state));
+              log("INFO", "formula card upgraded asynchronously", {
+                messageId,
+                ok: upgradedOk !== false,
+                rendered: result.stats.rendered,
+                durationMs: Date.now() - formulaStartedAt,
+              });
+            }
+          } catch (error) {
+            state.formulaRenderComplete = true;
+            state.formulaRenderStats = { failed: true };
+            log("WARN", "formula rendering pipeline failed; preserving original markdown", {
+              messageId,
+              async: true,
+              error: String(error?.message || error).slice(0, 1200),
+            });
+          } finally {
+            targetCard.close();
+          }
+        })();
+      } else {
+        state.formulaRenderComplete = true;
+        card.close();
+      }
+      return;
     }
+    const ok = await card.flush(rendered);
+    finalCardFlushOk = ok !== false;
+    card.close();
   };
 
   let cardOpenAbandoned = false;
@@ -1232,6 +1263,16 @@ async function handleEvent(rawEvent, dispatchControl = {}) {
     }
   })();
 
+  const heartbeatMs = Number(CONFIG.cardHeartbeatMs || 0);
+  const heartbeatTimer = heartbeatMs > 0
+    ? setInterval(() => {
+      if (!card || card.closed || latestCardState.terminal !== "running") return;
+      if (Date.now() - lastCardTickAt < heartbeatMs - 500) return;
+      void updateCard(latestCardState).catch(() => {});
+    }, Math.min(4_000, Math.max(1_000, Math.floor(heartbeatMs / 2))))
+    : null;
+  heartbeatTimer?.unref?.();
+
   try {
     appendHistory(session, "user", userContent || `${event.attachments?.length || 0} attachment(s)`);
     const result = await runCodex(event, session, cardState, updateCard);
@@ -1304,6 +1345,7 @@ async function handleEvent(rawEvent, dispatchControl = {}) {
     }
     throw error;
   } finally {
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
     if (!cardOpenAbandoned) await awaitCardOpenBounded();
     if (activeRunRecorded) clearActiveRunSafely(messageId, "message-finally");
   }
