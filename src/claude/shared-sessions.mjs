@@ -6,7 +6,7 @@ import nativeLock from '../sessions/native-lock.cjs';
 import {
   buildAccessContext,
   canAccessSession,
-  readOrBindPrimaryOwner,
+  readOrBindPrimaryOwnerIdentity,
 } from '../sessions/access-control.mjs';
 const { lockDirectory, lockDirectoryAsync } = nativeLock;
 
@@ -49,38 +49,56 @@ export function createSharedClaudeSessionStore({ config, sessionsPath, createSes
 
   function resolveAccessContext(chatId, accessCtx = null) {
     const id = String(chatId || accessCtx?.chatId || '').trim();
+    const configuredOwnerOpenId = config.ownerOpenId ?? process.env.CODEX_FEISHU_OWNER_OPEN_ID ?? '';
+    const configuredOwnerUnionId = config.ownerUnionId ?? process.env.CODEX_FEISHU_OWNER_UNION_ID ?? '';
     if (accessCtx && typeof accessCtx === 'object') {
       const eventLike = {
         chat_id: accessCtx.chatId || accessCtx.chat_id || id,
         chat_type: accessCtx.chatType ?? accessCtx.chat_type ?? '',
         sender_id: accessCtx.senderId ?? accessCtx.sender_id ?? '',
+        sender_union_id: accessCtx.senderUnionId ?? accessCtx.sender_union_id ?? '',
       };
-      const primaryOwnerOpenId = accessCtx.primaryOwnerOpenId || readOrBindPrimaryOwner({
-        ownerFile,
-        configuredOwnerOpenId: config.ownerOpenId ?? process.env.CODEX_FEISHU_OWNER_OPEN_ID ?? '',
-        event: eventLike,
-      });
+      const fileBound = accessCtx.primaryOwnerUnionId
+        ? { primaryOwnerOpenId: '', primaryOwnerUnionId: '' }
+        : readOrBindPrimaryOwnerIdentity({
+            ownerFile,
+            configuredOwnerOpenId,
+            configuredOwnerUnionId,
+            event: eventLike,
+          });
       const resolved = {
         chatId: eventLike.chat_id,
         chatType: String(eventLike.chat_type || '').trim().toLowerCase(),
         senderId: String(eventLike.sender_id || '').trim(),
+        senderUnionId: String(eventLike.sender_union_id || '').trim(),
         scopeType: String(eventLike.chat_type || '').trim().toLowerCase() === 'p2p' ? 'dm' : eventLike.chat_type ? 'group' : '',
-        primaryOwnerOpenId,
+        primaryOwnerOpenId: String(accessCtx.primaryOwnerOpenId || fileBound.primaryOwnerOpenId || '').trim(),
+        primaryOwnerUnionId: String(accessCtx.primaryOwnerUnionId || fileBound.primaryOwnerUnionId || '').trim(),
       };
       if (id) chatContexts.set(id, resolved);
       return resolved;
     }
-    const primaryOwnerOpenId = readOrBindPrimaryOwner({
+    const bound = readOrBindPrimaryOwnerIdentity({
       ownerFile,
-      configuredOwnerOpenId: config.ownerOpenId ?? process.env.CODEX_FEISHU_OWNER_OPEN_ID ?? '',
+      configuredOwnerOpenId,
+      configuredOwnerUnionId,
     });
-    return { chatId: id, chatType: '', senderId: '', scopeType: '', primaryOwnerOpenId };
+    return {
+      chatId: id,
+      chatType: '',
+      senderId: '',
+      senderUnionId: '',
+      scopeType: '',
+      primaryOwnerOpenId: bound.primaryOwnerOpenId,
+      primaryOwnerUnionId: bound.primaryOwnerUnionId,
+    };
   }
 
   function accessContextForEvent(event) {
     return buildAccessContext(event, {
       ownerFile,
       configuredOwnerOpenId: config.ownerOpenId ?? process.env.CODEX_FEISHU_OWNER_OPEN_ID ?? '',
+      configuredOwnerUnionId: config.ownerUnionId ?? process.env.CODEX_FEISHU_OWNER_UNION_ID ?? '',
     });
   }
 
@@ -136,12 +154,15 @@ export function createSharedClaudeSessionStore({ config, sessionsPath, createSes
   }
   function normalized(session, origin = source, scope = null) {
     const base = { ...normalizeSessionData(session) };
-    const scopeType = base.scopeType || (scope?.chatType ? (scope.chatType === 'p2p' ? 'dm' : 'group') : 'dm');
-    const ownerOpenId = String(base.ownerOpenId ?? (scope?.senderId || ''));
-    const originChatId = String(base.originChatId ?? (scope?.chatId || ''));
+    const rawScopeType = String(base.scopeType || session?.scopeType || '').trim();
+    const scopeType = rawScopeType || (scope?.chatType ? (scope.chatType === 'p2p' ? 'dm' : 'group') : 'dm');
+    const ownerOpenId = String(base.ownerOpenId || session?.ownerOpenId || scope?.senderId || '').trim();
+    const ownerUnionId = String(base.ownerUnionId || session?.ownerUnionId || scope?.senderUnionId || '').trim();
+    const originChatId = String(base.originChatId || session?.originChatId || scope?.chatId || '').trim();
     return { ...base, engine,
       scopeType,
       ownerOpenId,
+      ownerUnionId,
       originChatId,
       [homeField]: session[homeField] || origin.home,
       [workspaceField]: session[workspaceField] || origin.workspace,
@@ -208,7 +229,7 @@ export function createSharedClaudeSessionStore({ config, sessionsPath, createSes
           && delta[homeField]
           && allowedHomes.has(homeKey(delta[homeField]));
         // Ownership and access-control scope are fixed at creation; selecting a session never migrates them.
-        for (const key of ['id', 'scopeType', 'ownerOpenId', 'originChatId', workspaceField, originField]) delete delta[key];
+        for (const key of ['id', 'scopeType', 'ownerOpenId', 'ownerUnionId', 'originChatId', workspaceField, originField]) delete delta[key];
         if (!allowInitialHomeBind) delete delta[homeField];
         Object.assign(current.sessions[item.id], delta);
       }

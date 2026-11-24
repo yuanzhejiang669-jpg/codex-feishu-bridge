@@ -248,8 +248,10 @@ function runtimeLocalAppData() {
 function readAutoBoundOwnerOpenId(filePath) {
   try {
     const raw = JSON.parse(fs.readFileSync(filePath, "utf8").replace(/^\uFEFF/, ""));
-    const value = String(raw?.primaryOwnerOpenId || raw?.ownerOpenId || "").trim();
-    return /^ou_[A-Za-z0-9]+$/.test(value) ? value : "";
+    const unionId = String(raw?.primaryOwnerUnionId || "").trim();
+    if (/^on_[A-Za-z0-9]+$/.test(unionId)) return unionId;
+    const openId = String(raw?.primaryOwnerOpenId || raw?.ownerOpenId || "").trim();
+    return /^ou_[A-Za-z0-9]+$/.test(openId) ? openId : "";
   } catch {
     return "";
   }
@@ -260,10 +262,16 @@ function inspectDesktopSettings() {
   const saved = readDesktopSettings(root);
   const login = desktopStartup.inspect();
   const autoBoundOwnerOpenIds = {
+    codex: readAutoBoundOwnerOpenId(path.join(root, "codex-shared-sessions", "owner.json")),
     claude: readAutoBoundOwnerOpenId(path.join(root, "claude-shared-sessions", "owner.json")),
     antigravity: readAutoBoundOwnerOpenId(path.join(root, "antigravity-shared-sessions", "owner.json")),
   };
-  const autoBoundOwnerOpenId = autoBoundOwnerOpenIds.antigravity || autoBoundOwnerOpenIds.claude || "";
+  const candidates = [
+    autoBoundOwnerOpenIds.antigravity,
+    autoBoundOwnerOpenIds.claude,
+    autoBoundOwnerOpenIds.codex,
+  ].filter(Boolean);
+  const autoBoundOwnerOpenId = candidates.find((id) => /^on_/.test(id)) || candidates[0] || "";
   return {
     ...saved,
     autoBoundOwnerOpenId,

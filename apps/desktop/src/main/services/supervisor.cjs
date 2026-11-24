@@ -225,6 +225,7 @@ function processEnvironment(options, bot = null) {
     path.dirname(options.larkCliPath),
     ...macosToolDirs,
   ])];
+  const configuredOwnerId = String(options.ownerOpenId || (options.dataRoot ? readDesktopSettings(options.dataRoot).ownerOpenId : "") || "").trim();
   const environment = {
     ...process.env,
     LOCALAPPDATA: options.localAppData,
@@ -232,7 +233,8 @@ function processEnvironment(options, bot = null) {
     CODEX_FEISHU_OPENAI_ACCOUNTS_ROOT: path.join(options.defaultCodexHome || path.join(os.homedir(), ".codex"), "bridge-openai-accounts"),
     CODEX_FEISHU_OPENAI_DEFAULT_ACCOUNT: bot?.openaiAccount || "",
     LARK_CLI_BIN: options.larkCliPath,
-    ...(String(options.ownerOpenId || (options.dataRoot ? readDesktopSettings(options.dataRoot).ownerOpenId : "") || "").trim() ? { CODEX_FEISHU_OWNER_OPEN_ID: String(options.ownerOpenId || readDesktopSettings(options.dataRoot).ownerOpenId || "").trim() } : {}),
+    ...(configuredOwnerId ? { CODEX_FEISHU_OWNER_OPEN_ID: configuredOwnerId } : {}),
+    ...(/^on_[A-Za-z0-9]+$/.test(configuredOwnerId) ? { CODEX_FEISHU_OWNER_UNION_ID: configuredOwnerId } : {}),
     PATH: [...toolDirs, process.env.PATH || ""].join(path.delimiter),
   };
   if (bot?.name) {
@@ -256,6 +258,9 @@ function processEnvironment(options, bot = null) {
   if (options.codexPath) environment.CODEX_CLI_BIN = options.codexPath;
   if (options.codexSource) environment.CODEX_BRIDGE_RUNTIME_SOURCE = options.codexSource;
   environment.CODEX_FEISHU_ENGINE = normalizeEngine(bot?.engine);
+  if (environment.CODEX_FEISHU_ENGINE === 'codex' && options.dataRoot) {
+    environment.CODEX_FEISHU_OWNER_FILE = path.join(options.dataRoot, 'codex-shared-sessions', 'owner.json');
+  }
   if (normalizeEngine(bot?.engine) === 'antigravity') {
     environment.ANTIGRAVITY_CLI_BIN = options.antigravityPath || '';
     environment.ANTIGRAVITY_CONFIG_DIR = bot.antigravityHome;

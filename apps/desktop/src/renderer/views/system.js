@@ -47,8 +47,8 @@ export function renderSystemView(container, actions = {}) {
           ? `更新失败：${update.error}`
           : (update.message || update.status || "未检查");
   const ownerHintText = !settings.ownerOpenId && settings.autoBoundOwnerOpenId
-    ? `已通过首次私聊自动绑定：${settings.autoBoundOwnerOpenId}（留空将继续沿用自动绑定；如需覆盖或显式指定请在上方填写并保存）。`
-    : "留空则按最小权限拒绝跨 Bot 私聊共享访问；保存后同步写入共享库 owner.json 并入队重载空闲 Bot。";
+    ? `已通过首次私聊自动绑定：${settings.autoBoundOwnerOpenId}${/^on_/.test(settings.autoBoundOwnerOpenId) ? "（跨 Bot 统一 Union ID）" : ""}（留空将继续沿用自动绑定；如需显式指定请填写 on_ 开头的 Union ID）。`
+    : "留空则自动通过首次私聊绑定跨 Bot 统一 Union ID；如需手动覆盖建议填写 on_ 开头的 Union ID（全引擎通用），保存后同步至所有共享库并重载空闲 Bot。";
 
   container.innerHTML = `
     <div class="two-col">
@@ -102,15 +102,15 @@ export function renderSystemView(container, actions = {}) {
           </label>
 
           <form id="sys-owner-form" class="field">
-            <label for="input-owner-open-id">主用户飞书 Open ID（跨 Bot 私聊共享归属）</label>
+            <label for="input-owner-open-id">主用户飞书 Union ID / Open ID（跨 Bot 私聊共享归属）</label>
             <div class="inline-actions">
               <input
                 class="input mono"
                 id="input-owner-open-id"
                 name="ownerOpenId"
                 value="${escapeHtml(settings.ownerOpenId || "")}"
-                pattern="^$|^ou_[A-Za-z0-9]+$"
-                placeholder="ou_xxxxxxxxxxxxxxxx"
+                pattern="^$|^(?:on|ou)_[A-Za-z0-9]+$"
+                placeholder="on_xxxxxxxxxxxxxxxx（推荐全 Bot 通用）"
               />
               <button class="btn btn-primary btn-sm" type="submit" id="btn-save-owner-open-id">保存归属 ID</button>
             </div>
@@ -234,7 +234,7 @@ export function renderSystemView(container, actions = {}) {
     }
     try {
       await api.setOwnerOpenId({ ownerOpenId });
-      showToast(ownerOpenId ? "主用户 Open ID 已保存并同步至共享会话库" : "已清空主用户 Open ID", "ok");
+      showToast(ownerOpenId ? "主用户归属 ID 已保存并同步至全部引擎共享库" : "已清空主用户归属 ID", "ok");
       await actions.onRefresh?.({ force: true });
     } catch (error) {
       showToast(formatIpcError(error), "error");

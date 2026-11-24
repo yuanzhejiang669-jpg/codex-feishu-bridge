@@ -150,7 +150,26 @@ test("setOwnerOpenId validates format, updates desktop-settings and shared owner
   assert.equal(readDesktopSettings(root).ownerOpenId, "ou_owner999");
   assert.equal(JSON.parse(fs.readFileSync(path.join(root, "claude-shared-sessions", "owner.json"), "utf8")).primaryOwnerOpenId, "ou_owner999");
   assert.equal(JSON.parse(fs.readFileSync(path.join(root, "antigravity-shared-sessions", "owner.json"), "utf8")).primaryOwnerOpenId, "ou_owner999");
+  assert.equal(JSON.parse(fs.readFileSync(path.join(root, "codex-shared-sessions", "owner.json"), "utf8")).primaryOwnerOpenId, "ou_owner999");
   assert.deepEqual(res.queuedBots, { codex: ["codex-1"], claude: ["claude-1"], antigravity: ["agy-1"] });
+
+  // Union ID (on_...) writes schemaVersion 2 primaryOwnerUnionId across all 3 engines
+  const resUnion = setOwnerOpenId(
+    { ownerOpenId: "on_unionCrossBot888" },
+    {
+      dataRoot: root,
+      readManagedBots: () => bots,
+      queueClaude: (_r, names, engine) => queued.push({ engine, names }),
+      queueCodexBotReload: (_r, names) => queued.push({ engine: "codex", names }),
+    },
+  );
+  assert.equal(resUnion.ok, true);
+  assert.equal(resUnion.ownerOpenId, "on_unionCrossBot888");
+  for (const dir of ["claude-shared-sessions", "antigravity-shared-sessions", "codex-shared-sessions"]) {
+    const parsed = JSON.parse(fs.readFileSync(path.join(root, dir, "owner.json"), "utf8"));
+    assert.equal(parsed.schemaVersion, 2);
+    assert.equal(parsed.primaryOwnerUnionId, "on_unionCrossBot888");
+  }
 });
 
 test("preload/index.cjs and main/index.cjs expose all 6 V2 §5.4 IPC channels cleanly", () => {

@@ -62,9 +62,13 @@ import {
 import { createSessionStore } from "./src/sessions/store.mjs";
 import { createSharedClaudeSessionStore } from "./src/claude/shared-sessions.mjs";
 import {
+  OWNER_OPEN_ID_PATTERN,
+  OWNER_UNION_ID_PATTERN,
   buildAccessContext,
   extractScopeFromEvent,
   isOwnerDmContext,
+  readPrimaryOwnerRecord,
+  upgradePrimaryOwnerUnionId,
 } from "./src/sessions/access-control.mjs";
 import { findDeepKey } from "./src/utils/json.mjs";
 import {
@@ -139,6 +143,8 @@ const CONFIG = {
   larkProfile: LARK_PROFILE,
   larkProfileHome: LARK_PROFILE_HOME,
   ownerOpenId: String(process.env.CODEX_FEISHU_OWNER_OPEN_ID || "").trim(),
+  ownerUnionId: String(process.env.CODEX_FEISHU_OWNER_UNION_ID || "").trim(),
+  ownerFile: String(process.env.CODEX_FEISHU_OWNER_FILE || "").trim(),
   larkCli: withLarkProfile(parseToolEnv("LARK_CLI_BIN", DEFAULT_TOOLS.larkCli), LARK_PROFILE),
   codexCli: parseToolEnv("CODEX_CLI_BIN", DEFAULT_TOOLS.codexCli),
   runMode: normalizeRunMode(process.env.CODEX_FEISHU_RUN_MODE || "app-server"),
@@ -375,6 +381,7 @@ const {
   larkJson,
   larkJsonWithData,
   replyFallback,
+  resolveUserUnionId,
   runLark,
   sendMarkdown,
   sendText,
@@ -510,14 +517,70 @@ const {
 } = sessionStore;
 const chatEventContexts = new Map();
 
+function activeOwnerFile() {
+  return sessionStore.shared?.ownerFile || CONFIG.ownerFile || path.join(CONFIG.stateDir, "owner.json");
+}
+
 function eventAccessContext(event, fallbackChatId = "") {
   const chatId = String(event?.chat_id || fallbackChatId || "").trim();
   const baseEvent = event ? { ...event, chat_id: chatId } : { chat_id: chatId };
   return buildAccessContext(baseEvent, {
     configuredOwnerOpenId: CONFIG.ownerOpenId,
-    ownerFile: sessionStore.shared?.ownerFile || path.join(CONFIG.stateDir, "owner.json"),
+    configuredOwnerUnionId: CONFIG.ownerUnionId,
+    ownerFile: activeOwnerFile(),
     log,
   });
+}
+
+async function attachSenderUnionId(event) {
+  if (!event || typeof event !== "object") return event;
+  const scope = extractScopeFromEvent(event);
+  if (scope.senderUnionId) {
+    return event.sender_union_id === scope.senderUnionId
+      ? event
+      : { ...event, sender_union_id: scope.senderUnionId };
+  }
+  if (!OWNER_OPEN_ID_PATTERN.test(scope.senderId)) return event;
+  const unionId = await resolveUserUnionId(scope.senderId);
+  if (!OWNER_UNION_ID_PATTERN.test(unionId)) return event;
+  return { ...event, sender_union_id: unionId };
+}
+
+async function hydrateOwnerUnionIdOnStartup() {
+  const ownerFile = activeOwnerFile();
+  const record = readPrimaryOwnerRecord(ownerFile);
+  if (record.primaryOwnerOpenId && !record.primaryOwnerUnionId) {
+    const unionId = await resolveUserUnionId(record.primaryOwnerOpenId);
+    if (OWNER_UNION_ID_PATTERN.test(unionId)) {
+      upgradePrimaryOwnerUnionId(ownerFile, {
+        primaryOwnerOpenId: record.primaryOwnerOpenId,
+        primaryOwnerUnionId: unionId,
+        log,
+      });
+    }
+  }
+  const legacyStateOwnerFile = path.join(CONFIG.stateDir, "owner.json");
+  if (!sessionStore.shared && CONFIG.ownerFile && path.resolve(CONFIG.ownerFile) !== path.resolve(legacyStateOwnerFile)) {
+    const sharedRecord = readPrimaryOwnerRecord(CONFIG.ownerFile);
+    if (!sharedRecord.primaryOwnerUnionId) {
+      const legacyRecord = readPrimaryOwnerRecord(legacyStateOwnerFile);
+      const unionId = legacyRecord.primaryOwnerUnionId
+        || (legacyRecord.primaryOwnerOpenId ? await resolveUserUnionId(legacyRecord.primaryOwnerOpenId) : "");
+      if (OWNER_UNION_ID_PATTERN.test(unionId)) {
+        if (legacyRecord.primaryOwnerOpenId && !legacyRecord.primaryOwnerUnionId) {
+          upgradePrimaryOwnerUnionId(legacyStateOwnerFile, {
+            primaryOwnerOpenId: legacyRecord.primaryOwnerOpenId,
+            primaryOwnerUnionId: unionId,
+            log,
+          });
+        }
+        upgradePrimaryOwnerUnionId(CONFIG.ownerFile, {
+          primaryOwnerUnionId: unionId,
+          log,
+        });
+      }
+    }
+  }
 }
 
 function recordChatScope(chatId, event) {
@@ -530,6 +593,9 @@ function recordChatScope(chatId, event) {
     chatState.chatType = scope.chatType;
     if (scope.chatType === "p2p" && scope.senderId) {
       chatState.ownerOpenId = scope.senderId;
+    }
+    if (scope.chatType === "p2p" && scope.senderUnionId) {
+      chatState.ownerUnionId = scope.senderUnionId;
     }
   }
   return ctx;
@@ -548,6 +614,7 @@ function isOwnerDm(chatId, event = null) {
     chat_id: chatId,
     chat_type: chatState.chatType,
     sender_id: chatState.ownerOpenId || "",
+    sender_union_id: chatState.ownerUnionId || "",
   }, chatId);
   return isOwnerDmContext(ctx);
 }
@@ -845,6 +912,7 @@ async function handleOutOfBandCommand(rawEvent, command) {
     log("WARN", "out-of-band command missing chat_id", event);
     return;
   }
+  event = await attachSenderUnionId(event);
 
   stats.events += 1;
   stats.commands += 1;
@@ -897,7 +965,7 @@ async function handleEvent(rawEvent, dispatchControl = {}) {
     return;
   }
 
-  const event = prepareCardEvent(await enrichEvent(rawEvent));
+  let event = prepareCardEvent(await enrichEvent(rawEvent));
   if (event?.recalled || isMessageRecalled(messageId)) {
     rememberRecalledMessage(messageId, { chatId: chatIdOf(event), eventId: eventIdOf(event), reason: event?.recallReason || "preflight" });
     dropPendingAttachmentsForMessage(messageId, chatIdOf(event));
@@ -913,6 +981,7 @@ async function handleEvent(rawEvent, dispatchControl = {}) {
     log("WARN", "event missing chat_id", event);
     return;
   }
+  event = await attachSenderUnionId(event);
 
   const userContent = userTextFromContent(event.content);
   const command = parseEventCommand(event, parseCommand);
@@ -1237,4 +1306,9 @@ process.on("exit", () => {
 
 repairStaleActiveRunsOnStartup()
   .catch((error) => log("WARN", "stale active run repair failed", { error: String(error.stack || error) }))
-  .finally(() => startConsumer());
+  .finally(() => {
+    void hydrateOwnerUnionIdOnStartup().catch((error) => {
+      log("WARN", "owner union_id startup hydration failed", { error: String(error?.stack || error) });
+    });
+    startConsumer();
+  });

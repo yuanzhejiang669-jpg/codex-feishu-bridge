@@ -11,10 +11,14 @@ import {
   canAccessSession,
   isOwnerDmContext,
   readOrBindPrimaryOwner,
+  readPrimaryOwnerRecord,
+  upgradePrimaryOwnerUnionId,
 } from '../src/sessions/access-control.mjs';
 import { createSharedClaudeSessionStore } from '../src/claude/shared-sessions.mjs';
 import { createClaudeBridge } from '../src/claude/bridge-runner.mjs';
 import { createAntigravityBridge } from '../src/antigravity/bridge-runner.mjs';
+import { createLarkClient } from '../src/feishu/lark-cli.mjs';
+import { createSessionInventory } from '../src/sessions/inventory.mjs';
 
 const require = createRequire(import.meta.url);
 const { readDesktopSettings, writeDesktopSettings } = require('../apps/desktop/src/main/services/desktop-settings.cjs');
@@ -280,4 +284,208 @@ test('desktop settings validate ownerOpenId and supervisor injects CODEX_FEISHU_
     platform: 'win32',
   }, { name: 'codex-1', engine: 'codex', profile: 'codex-1' });
   assert.equal(env.CODEX_FEISHU_OWNER_OPEN_ID, 'ou_owner123');
+  assert.equal(env.CODEX_FEISHU_OWNER_FILE, path.join(root, 'codex-shared-sessions', 'owner.json'));
+
+  const savedUnion = writeDesktopSettings(root, { ownerOpenId: 'on_union987654' });
+  assert.equal(savedUnion.ownerOpenId, 'on_union987654');
+  const envUnion = processEnvironment({
+    dataRoot: root,
+    localAppData: path.join(root, 'runtime'),
+    nodePath: process.execPath,
+    larkCliPath: 'lark',
+    platform: 'win32',
+  }, { name: 'codex-1', engine: 'codex', profile: 'codex-1' });
+  assert.equal(envUnion.CODEX_FEISHU_OWNER_OPEN_ID, 'on_union987654');
+  assert.equal(envUnion.CODEX_FEISHU_OWNER_UNION_ID, 'on_union987654');
+});
+
+test('Scenario 7: cross-Bot Feishu union_id allows same owner with different per-App open_ids to list, switch, and share while blocking strangers and groups (with real normalizeSessionData)', async (t) => {
+  for (const engine of ['claude', 'antigravity']) {
+    const f = createFixture(t, engine, '');
+    const realInv = createSessionInventory({ CONFIG: f.configs[0] });
+    const sources = f.configs.map((c) => ({
+      bot: c.larkProfile,
+      home: engine === 'antigravity' ? c.antigravityHome : c.claudeHome,
+      workspace: c.workspace,
+      stateFile: path.join(c.stateDir, 'sessions.json'),
+    }));
+    const makeRealStore = (index) => createSharedClaudeSessionStore({
+      config: f.configs[index],
+      sessionsPath: sources[index].stateFile,
+      sources,
+      createSessionData: (title) => realInv.createSessionData(title),
+      normalizeSessionData: (s) => realInv.normalizeSessionData(s),
+    });
+    const store1 = makeRealStore(0);
+    const store2 = makeRealStore(1);
+    const bot1 = f.makeBridge(0, store1);
+    const bot2 = f.makeBridge(1, store2);
+
+    // Same human user has DIFFERENT open_ids across Bot 1 and Bot 2, but the SAME union_id
+    const ownerOnBot1 = { chat_id: 'oc_dm_bot1', chat_type: 'p2p', sender_id: 'ou_bot1OwnerAAA', sender_union_id: 'on_sameHuman001' };
+    const ownerOnBot2 = { chat_id: 'oc_dm_bot2', chat_type: 'p2p', sender_id: 'ou_bot2OwnerBBB', sender_union_id: 'on_sameHuman001' };
+    const strangerOnBot2 = { chat_id: 'oc_dm_stranger', chat_type: 'p2p', sender_id: 'ou_bot2Stranger', sender_union_id: 'on_otherHuman999' };
+    const ownerInGroup = { chat_id: 'oc_group_shared', chat_type: 'group', sender_id: 'ou_bot2OwnerBBB', sender_union_id: 'on_sameHuman001' };
+
+    // Bot 1 binds owner.json with both open_id and union_id and creates a DM session
+    await bot1.send(ownerOnBot1, '/new', 'Bot1 Task');
+    const s1 = store1.getSession('oc_dm_bot1', store1.shared.accessContextForEvent(ownerOnBot1));
+    assert.equal(s1.scopeType, 'dm');
+    assert.equal(s1.ownerOpenId, 'ou_bot1OwnerAAA');
+    assert.equal(s1.ownerUnionId, 'on_sameHuman001');
+    assert.equal(s1.originChatId, 'oc_dm_bot1');
+
+    // Bot 2 (different open_id, same union_id) sees Bot 1's session and can /switch to it
+    await bot2.send(ownerOnBot2, '/list', 'all');
+    assert.match(bot2.replies.at(-1), new RegExp(s1.id));
+    await bot2.send(ownerOnBot2, '/switch', s1.id);
+    assert.equal(store2.getSession('oc_dm_bot2', store2.shared.accessContextForEvent(ownerOnBot2)).id, s1.id);
+    assert.equal(isOwnerDmContext(store2.shared.accessContextForEvent(ownerOnBot2)), true);
+
+    // Bot 2 creates a new session; Bot 1 sees it immediately and can /switch to it
+    await bot2.send(ownerOnBot2, '/new', 'Bot2 Task');
+    const s2 = store2.getSession('oc_dm_bot2', store2.shared.accessContextForEvent(ownerOnBot2));
+    assert.equal(s2.ownerUnionId, 'on_sameHuman001');
+    await bot1.send(ownerOnBot1, '/list', 'all');
+    assert.match(bot1.replies.at(-1), new RegExp(s2.id));
+    await bot1.send(ownerOnBot1, '/switch', s2.id);
+    assert.equal(store1.getSession('oc_dm_bot1', store1.shared.accessContextForEvent(ownerOnBot1)).id, s2.id);
+
+    // Stranger DM on Bot 2 sees ZERO of owner's sessions and cannot /switch
+    await bot2.send(strangerOnBot2, '/list', 'all');
+    assert.doesNotMatch(bot2.replies.at(-1), new RegExp(s1.id));
+    assert.doesNotMatch(bot2.replies.at(-1), new RegExp(s2.id));
+    assert.equal(isOwnerDmContext(store2.shared.accessContextForEvent(strangerOnBot2)), false);
+
+    // Owner inside a group chat sees ZERO DM sessions; group session preserves scopeType=group through saveSessions()
+    await bot2.send(ownerInGroup, '/list', 'all');
+    assert.doesNotMatch(bot2.replies.at(-1), new RegExp(s1.id));
+    await bot2.send(ownerInGroup, '/new', 'Group Only Topic');
+    const sGroup = store2.getSession('oc_group_shared', store2.shared.accessContextForEvent(ownerInGroup));
+    assert.equal(sGroup.scopeType, 'group');
+    assert.equal(sGroup.originChatId, 'oc_group_shared');
+    const persisted = JSON.parse(fs.readFileSync(store2.shared.catalogFile, 'utf8'));
+    assert.equal(persisted.sessions[sGroup.id].scopeType, 'group');
+    assert.equal(persisted.sessions[sGroup.id].originChatId, 'oc_group_shared');
+    // Owner DM still does not see the group session
+    assert.equal(store1.getChatState('oc_dm_bot1', store1.shared.accessContextForEvent(ownerOnBot1)).sessions.some((s) => s.id === sGroup.id), false);
+  }
+});
+
+test('Scenario 8: legacy v1 owner.json upgrades with primaryOwnerUnionId and unlocks pre-upgrade owner sessions across Bots', (t) => {
+  const f = createFixture(t, 'antigravity', '');
+  const sharedDir = path.join(f.root, 'shared');
+  fs.mkdirSync(sharedDir, { recursive: true });
+  const ownerFile = path.join(sharedDir, 'owner.json');
+  fs.writeFileSync(ownerFile, JSON.stringify({
+    schemaVersion: 1,
+    primaryOwnerOpenId: 'ou_bot5Legacy',
+    boundAt: '2026-11-23T11:46:29.034Z',
+  }));
+  fs.writeFileSync(path.join(sharedDir, 'sessions.json'), JSON.stringify({
+    schemaVersion: 2,
+    sessions: {
+      legacyEmpty: {
+        id: 'legacyEmpty',
+        engine: 'antigravity',
+        title: 'User Identity Inquiry',
+        scopeType: 'dm',
+        ownerOpenId: '',
+        originChatId: '',
+        antigravityHome: f.configs[0].antigravityHome,
+        antigravityWorkspace: f.configs[0].workspace,
+        antigravityOriginBot: 'antigravity-5',
+        createdAt: 100,
+        updatedAt: 100,
+      },
+      preUnionBot5: {
+        id: 'preUnionBot5',
+        engine: 'antigravity',
+        title: 'Pre Union Bot5 Chat',
+        scopeType: 'dm',
+        ownerOpenId: 'ou_bot5Legacy',
+        originChatId: 'oc_dm_bot5',
+        antigravityHome: f.configs[0].antigravityHome,
+        antigravityWorkspace: f.configs[0].workspace,
+        antigravityOriginBot: 'antigravity-5',
+        createdAt: 200,
+        updatedAt: 200,
+      },
+      strangerSession: {
+        id: 'strangerSession',
+        engine: 'antigravity',
+        title: 'Other Person Chat',
+        scopeType: 'dm',
+        ownerOpenId: 'ou_otherPerson',
+        originChatId: 'oc_dm_other',
+        antigravityHome: f.configs[0].antigravityHome,
+        antigravityWorkspace: f.configs[0].workspace,
+        antigravityOriginBot: 'antigravity-4',
+        createdAt: 300,
+        updatedAt: 300,
+      },
+    },
+    deleted: {},
+  }));
+
+  const store4 = f.makeStore(1);
+  const bot4Owner = { chat_id: 'oc_dm_bot4', chat_type: 'p2p', sender_id: 'ou_bot4Owner', sender_union_id: 'on_realOwner777' };
+  const bot4Stranger = { chat_id: 'oc_dm_stranger', chat_type: 'p2p', sender_id: 'ou_bot4Stranger', sender_union_id: 'on_stranger888' };
+
+  // Before union_id upgrade, bot4 fails closed
+  assert.deepEqual(store4.getChatState('oc_dm_bot4', store4.shared.accessContextForEvent(bot4Owner)).sessions, []);
+
+  // Startup hydration or Bot 5 DM upgrades owner.json with primaryOwnerUnionId
+  assert.equal(upgradePrimaryOwnerUnionId(ownerFile, {
+    primaryOwnerOpenId: 'ou_bot5Legacy',
+    primaryOwnerUnionId: 'on_realOwner777',
+  }), true);
+  assert.equal(readPrimaryOwnerRecord(ownerFile).primaryOwnerUnionId, 'on_realOwner777');
+
+  // Now Bot 4 immediately sees both legacyEmpty and preUnionBot5, but NEVER strangerSession
+  const visibleIds = store4.getChatState('oc_dm_bot4', store4.shared.accessContextForEvent(bot4Owner)).sessions.map((s) => s.id).sort();
+  assert.deepEqual(visibleIds, ['legacyEmpty', 'preUnionBot5']);
+  assert.equal(isOwnerDmContext(store4.shared.accessContextForEvent(bot4Owner)), true);
+
+  // Stranger still sees nothing
+  assert.deepEqual(store4.getChatState('oc_dm_stranger', store4.shared.accessContextForEvent(bot4Stranger)).sessions, []);
+});
+
+test('createLarkClient.resolveUserUnionId resolves, caches, deduplicates, and fails gracefully', async () => {
+  const calls = [];
+  const client = createLarkClient({
+    larkCli: 'lark',
+    runTool: async (_cmd, args) => {
+      calls.push(args);
+      await new Promise((r) => setTimeout(r, 10));
+      if (args[2].includes('ou_goodUser1')) {
+        return { code: 0, stdout: JSON.stringify({ code: 0, data: { user: { open_id: 'ou_goodUser1', union_id: 'on_cachedUnion1' } } }), stderr: '' };
+      }
+      return { code: 1, stdout: '', stderr: 'HTTP 403 forbidden' };
+    },
+    delay: async () => {},
+    splitText: (s) => [s],
+    idempotencyKey: () => 'k',
+  });
+
+  // Concurrent calls deduplicate to a single lark-cli invocation
+  const [u1, u2] = await Promise.all([
+    client.resolveUserUnionId('ou_goodUser1'),
+    client.resolveUserUnionId('ou_goodUser1'),
+  ]);
+  assert.equal(u1, 'on_cachedUnion1');
+  assert.equal(u2, 'on_cachedUnion1');
+  assert.equal(calls.length, 1);
+
+  // Cached hit makes zero extra calls
+  assert.equal(await client.resolveUserUnionId('ou_goodUser1'), 'on_cachedUnion1');
+  assert.equal(calls.length, 1);
+
+  // Invalid open_id rejected without calling lark-cli
+  assert.equal(await client.resolveUserUnionId('../bad'), '');
+  assert.equal(calls.length, 1);
+
+  // Failed API call degrades cleanly to empty string
+  assert.equal(await client.resolveUserUnionId('ou_noPerm2'), '');
+  assert.equal(calls.length, 2);
 });

@@ -181,11 +181,74 @@ export function createLarkClient({
     return dataFile;
   }
 
+  const unionIdCache = new Map();
+  const unionIdInFlight = new Map();
+  const UNION_ID_POSITIVE_TTL_MS = 24 * 60 * 60_000;
+  const UNION_ID_NEGATIVE_TTL_MS = 60_000;
+  const UNION_ID_CACHE_MAX = 2000;
+
+  async function resolveUserUnionId(openId, options = {}) {
+    const id = String(openId || "").trim();
+    if (!/^ou_[A-Za-z0-9]+$/.test(id)) return "";
+    const now = Date.now();
+    const cached = unionIdCache.get(id);
+    if (cached && cached.expiresAt > now) {
+      return cached.unionId;
+    }
+    const existing = unionIdInFlight.get(id);
+    if (existing) return existing;
+
+    const pending = (async () => {
+      try {
+        const result = await runLark([
+          "api",
+          "GET",
+          `/open-apis/contact/v3/users/${id}?user_id_type=open_id`,
+          "--as",
+          "bot",
+        ], {
+          timeoutMs: options.timeoutMs || 10_000,
+          attempts: options.attempts ?? 1,
+        });
+        if (result.code === 0) {
+          const parsed = parseJsonLoose(result.stdout) || {};
+          const candidate = String(
+            parsed?.data?.user?.union_id
+            || parsed?.user?.union_id
+            || "",
+          ).trim();
+          if (/^on_[A-Za-z0-9]+$/.test(candidate)) {
+            if (unionIdCache.size >= UNION_ID_CACHE_MAX) {
+              const oldestKey = unionIdCache.keys().next().value;
+              if (oldestKey) unionIdCache.delete(oldestKey);
+            }
+            unionIdCache.set(id, { unionId: candidate, expiresAt: Date.now() + UNION_ID_POSITIVE_TTL_MS });
+            return candidate;
+          }
+        }
+        unionIdCache.set(id, { unionId: "", expiresAt: Date.now() + UNION_ID_NEGATIVE_TTL_MS });
+        return "";
+      } catch (error) {
+        log("WARN", "failed to resolve Feishu user union_id", {
+          openId: id,
+          error: String(error?.message || error).slice(0, 500),
+        });
+        unionIdCache.set(id, { unionId: "", expiresAt: Date.now() + UNION_ID_NEGATIVE_TTL_MS });
+        return "";
+      } finally {
+        unionIdInFlight.delete(id);
+      }
+    })();
+    unionIdInFlight.set(id, pending);
+    return pending;
+  }
+
   return {
     larkJson,
     larkJsonWithData,
     parseJsonLoose,
     replyFallback,
+    resolveUserUnionId,
     runLark,
     sendMarkdown,
     sendText,

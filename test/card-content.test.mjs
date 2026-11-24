@@ -85,7 +85,7 @@ function handlerHarness(enrich = async (event) => event) {
     parseCommand: (content) => parseCommand(JSON.parse(content).text),
     userTextFromContent: (content) => JSON.parse(content).text,
     isMessageRecalled: () => false, rememberEvent: () => false,
-    enrichEvent: enrich, log: () => {}, stats: { events: 0, commands: 0 },
+    enrichEvent: enrich, attachSenderUnionId: async (event) => event, log: () => {}, stats: { events: 0, commands: 0 },
     sendText: async (...args) => calls.sent.push(args),
     downloadImageAttachments: async () => { calls.downloads++; return []; },
     downloadFileAttachments: async () => { calls.downloads++; return []; },

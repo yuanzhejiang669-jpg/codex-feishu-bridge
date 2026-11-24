@@ -80,6 +80,7 @@ export function createAttachmentManager(deps = {}) {
         content: msg.content ?? event.content,
         message_type: msg.msg_type || event.message_type,
         sender_id: msg.sender?.id || event.sender_id,
+        sender_union_id: msg.sender?.union_id || event.sender_union_id || event.event?.sender?.sender_id?.union_id || "",
       };
     } catch (error) {
       log("WARN", "message mget parse failed", { messageId, error: String(error) });

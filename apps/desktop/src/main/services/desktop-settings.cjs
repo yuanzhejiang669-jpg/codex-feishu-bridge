@@ -8,7 +8,8 @@ const DEFAULT_SETTINGS = Object.freeze({
   ownerOpenId: "",
 });
 
-const OWNER_OPEN_ID_PATTERN = /^(?:|ou_[A-Za-z0-9]+)$/;
+const OWNER_OPEN_ID_PATTERN = /^(?:|(?:ou|on)_[A-Za-z0-9]+)$/;
+const OWNER_UNION_ID_PATTERN = /^on_[A-Za-z0-9]+$/;
 
 function settingsPath(dataRoot) {
   return path.join(dataRoot, "desktop-settings.json");
@@ -39,7 +40,7 @@ function writeDesktopSettings(dataRoot, patch = {}) {
   if (patch && Object.prototype.hasOwnProperty.call(patch, "ownerOpenId")) {
     const candidate = String(patch.ownerOpenId || "").trim();
     if (!OWNER_OPEN_ID_PATTERN.test(candidate)) {
-      throw new Error("主用户 Open ID 格式无效（需为空或 ou_ 开头）");
+      throw new Error("主用户飞书 Union ID / Open ID 格式无效（需为空，或 on_ / ou_ 开头）");
     }
   }
   const next = normalizeSettings({ ...current, ...patch });
@@ -76,21 +77,29 @@ function setOwnerOpenId(input = {}, options = {}) {
   const dataRoot = options.dataRoot;
   const ownerOpenId = String(input?.ownerOpenId ?? "").trim();
   if (!OWNER_OPEN_ID_PATTERN.test(ownerOpenId)) {
-    throw new Error("主用户 Open ID 格式无效（需为空或 ou_ 开头）");
+    throw new Error("主用户飞书 Union ID / Open ID 格式无效（需为空，或 on_ / ou_ 开头）");
   }
   const settings = writeDesktopSettings(dataRoot, { ownerOpenId });
   const ownerDirs = [
     path.join(dataRoot, "claude-shared-sessions"),
     path.join(dataRoot, "antigravity-shared-sessions"),
+    path.join(dataRoot, "codex-shared-sessions"),
   ];
+  const isUnionId = OWNER_UNION_ID_PATTERN.test(ownerOpenId);
   for (const dir of ownerDirs) {
     const ownerFile = path.join(dir, "owner.json");
     if (ownerOpenId) {
-      writeAtomicJsonFile(ownerFile, {
-        schemaVersion: 1,
-        primaryOwnerOpenId: ownerOpenId,
-        boundAt: new Date().toISOString(),
-      });
+      writeAtomicJsonFile(ownerFile, isUnionId
+        ? {
+            schemaVersion: 2,
+            primaryOwnerUnionId: ownerOpenId,
+            boundAt: new Date().toISOString(),
+          }
+        : {
+            schemaVersion: 1,
+            primaryOwnerOpenId: ownerOpenId,
+            boundAt: new Date().toISOString(),
+          });
     } else if (fs.existsSync(ownerFile)) {
       fs.rmSync(ownerFile, { force: true });
     }
