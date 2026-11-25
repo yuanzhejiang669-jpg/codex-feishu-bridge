@@ -395,9 +395,16 @@ export function createClaudeBridge({ config, getSession, getChatState, getChats,
         reduceEvent(state, { type: 'item.completed', item: { type: 'tool', id: item.id, name: item.name,
           output: item.output, status: item.error ? 'error' : 'completed' } });
       } else if (item.type === 'context') {
-        contextTokens = item.usedTokens;
-        session.lastContextUsage = { usedTokens: contextTokens, contextWindow: null, percent: null, updatedAt: Date.now() };
-        state.meta.contextUsage = session.lastContextUsage;
+        const used = Number(item.usedTokens);
+        if (Number.isFinite(used) && used > 0) {
+          contextTokens = used;
+          const existingWindow = Number(session.lastContextUsage?.contextWindow || 0) || null;
+          const percent = existingWindow
+            ? Math.min(100, Math.round((contextTokens / existingWindow) * 1000) / 10)
+            : null;
+          session.lastContextUsage = { usedTokens: contextTokens, contextWindow: existingWindow, percent, updatedAt: Date.now() };
+          state.meta.contextUsage = session.lastContextUsage;
+        }
       } else if (item.type === 'compacting_started') {
         markPhase(state, 'compacting', { connection: 'connected' });
       } else if (item.type === 'compacted') {
@@ -410,9 +417,11 @@ export function createClaudeBridge({ config, getSession, getChatState, getChats,
         state.meta.outputTokens = Number(usage.output_tokens || 0);
         const activeModel = state.meta.model || selected.model;
         const contextWindow = extractClaudeContextWindow(item.result, activeModel);
-        if (contextTokens !== null || contextWindow !== null) {
-          const usedTokens = Number.isFinite(Number(contextTokens)) ? Number(contextTokens) : state.meta.inputTokens;
-          const percent = contextWindow && Number.isFinite(usedTokens)
+        const usedTokens = Number.isFinite(Number(contextTokens)) && Number(contextTokens) > 0
+          ? Number(contextTokens)
+          : (state.meta.inputTokens > 0 ? state.meta.inputTokens : null);
+        if (usedTokens !== null || contextWindow !== null) {
+          const percent = contextWindow && usedTokens !== null
             ? Math.min(100, Math.round((usedTokens / contextWindow) * 1000) / 10)
             : null;
           session.lastContextUsage = { usedTokens, contextWindow, percent, updatedAt: Date.now() };
@@ -424,7 +433,7 @@ export function createClaudeBridge({ config, getSession, getChatState, getChats,
             outputTokens: state.meta.outputTokens,
             totalTokens: state.meta.inputTokens + state.meta.outputTokens,
           },
-          last: { inputTokens: contextTokens || 0 },
+          last: { inputTokens: usedTokens || 0 },
           modelContextWindow: contextWindow,
         };
         saveSessions();

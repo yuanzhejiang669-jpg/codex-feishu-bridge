@@ -14,6 +14,14 @@ function resolveMaxLineBytes(value) {
   return Math.min(MAX_ALLOWED_LINE_BYTES, Math.max(64 * 1024, Math.floor(candidate)));
 }
 
+function extractUsageInputTokens(usage) {
+  if (!usage || typeof usage !== 'object') return null;
+  const total = Number(usage.input_tokens || 0)
+    + Number(usage.cache_creation_input_tokens || 0)
+    + Number(usage.cache_read_input_tokens || 0);
+  return Number.isFinite(total) && total > 0 ? total : null;
+}
+
 export function claudeEnvironment(environment, { home, provider, toolHome = home }) {
   const env = { ...environment };
   for (const key of Object.keys(env)) {
@@ -260,9 +268,8 @@ export class ClaudeCliClient {
         this.waitForUpstream();
         this.onEvent({ type: 'model_progress' });
         this.messageId = event.message?.id || crypto.randomUUID();
-        const usage = event.message?.usage;
-        if (usage) this.onEvent({ type: 'context', usedTokens: Number(usage.input_tokens || 0)
-          + Number(usage.cache_creation_input_tokens || 0) + Number(usage.cache_read_input_tokens || 0) });
+        const usedTokens = extractUsageInputTokens(event.message?.usage);
+        if (usedTokens !== null) this.onEvent({ type: 'context', usedTokens });
       } else if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
         this.waitForUpstream();
         this.streamedMessages.add(this.messageId);
@@ -285,6 +292,8 @@ export class ClaudeCliClient {
         return;
       }
       this.waitForUpstream();
+      const assistantUsedTokens = extractUsageInputTokens(message.message?.usage);
+      if (assistantUsedTokens !== null) this.onEvent({ type: 'context', usedTokens: assistantUsedTokens });
       for (const block of message.message?.content || []) {
         if (block.type === 'text' && !this.streamedMessages.has(message.message?.id)) {
           this.onEvent({ type: 'text_delta', text: block.text || '' });

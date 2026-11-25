@@ -932,6 +932,12 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
         });
       }
       const usage = result.usage || {};
+      const rawPromptText = String(contentOverride ?? userText(event.content) ?? '');
+      if (/^\s*\/compact(?:\s|$)/i.test(rawPromptText)) {
+        const compactedAt = Date.now();
+        session.lastCompactedAt = compactedAt;
+        if (state) state.meta.compactedAt = compactedAt;
+      }
       session.lastTokenUsage = { total: { inputTokens: usage.inputTokens || 0, outputTokens: usage.outputTokens || 0,
         totalTokens: usage.totalTokens || 0 }, modelContextWindow: session.lastContextUsage?.contextWindow || null };
       session.updatedAt = Date.now();
@@ -1572,7 +1578,7 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
         '用法：`/model list`、`/model refresh`、`/model capability`、`/model <模型ID> [强度]`、`/model effort <强度|clear>`、`/model save [模型ID] [强度]`、`/model clear`',
       ].join('\n');
     };
-    const modelCapabilityMarkdown = (targetSession, explicitCatalog = null) => {
+    const modelCapabilityMarkdown = (targetSession, explicitCatalog = null, { sourceNote = '' } = {}) => {
       const info = displayModelInfo(targetSession, explicitCatalog);
       const activeBase = info.catalog?.baseModels?.find((m) => m.id === info.effectiveModel);
       const options = activeBase?.efforts?.length
@@ -1584,6 +1590,7 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
         `当前模型：\`${info.effectiveModel || '官方默认'}\`（${info.modelSource}）`,
         `当前思考强度：\`${info.effectiveEffort || '官方默认'}\`（${info.effortSource}）`,
         `支持档位：${options.map((e) => `\`${e}\``).join('、')}`,
+        ...(sourceNote ? [`来源：${sourceNote}`] : []),
         '',
         `用法：\`/effort ${options.join('|')}|clear\`、\`/model effort <强度|clear>\`、\`/model save effort <强度>\``,
       ].join('\n');
@@ -1729,7 +1736,20 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
         return true;
       }
       if (['capability', 'capabilities'].includes(sub)) {
-        await reply(modelCapabilityMarkdown(session));
+        let liveCatalog = null;
+        let sourceNote = '本地已观测目录';
+        if (!activeJobs.has(event.chat_id)) {
+          try {
+            const probed = await probeModelsReadOnly(session, event, { forceRefresh: true });
+            liveCatalog = probed.catalog || extractAntigravityModelCatalog(probed.models, probed.configOptions);
+            sourceNote = '实时只读探针';
+          } catch (error) {
+            sourceNote = `本地缓存（实时探针暂不可用：${String(error?.message || error).slice(0, 120)}）`;
+          }
+        } else {
+          sourceNote = '本地缓存（当前会话任务运行中，跳过子进程探针）';
+        }
+        await reply(modelCapabilityMarkdown(session, liveCatalog, { sourceNote }));
         return true;
       }
       if (sub === 'test' || sub === 'check') {

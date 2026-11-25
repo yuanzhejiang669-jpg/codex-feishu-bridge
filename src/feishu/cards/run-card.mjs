@@ -1314,9 +1314,15 @@ export function createRunCardRenderer(deps = {}) {
 
   function renderDoneMeta(state) {
     if (state.meta.engine === 'claude') {
-      const used = state.meta.contextUsage?.usedTokens;
+      const context = state.meta.contextUsage;
+      const compactLabel = state.meta.compactedAt ? `上次压缩 ${formatTime(state.meta.compactedAt)}` : '未观察到压缩';
+      if (Number(context?.contextWindow || 0) > 0) {
+        const renderedContext = renderContextUsage(context, '当前窗口');
+        return [renderedContext || '当前上下文未知', compactLabel].join(' · ');
+      }
+      const used = context?.usedTokens;
       return [used == null ? '当前上下文未知' : `当前请求上下文 ${formatNumber(used)} tokens`,
-        '容量未提供', state.meta.compactedAt ? `上次压缩 ${formatTime(state.meta.compactedAt)}` : '未观察到压缩'].join(' · ');
+        '容量未提供', compactLabel].join(' · ');
     }
     const parts = [];
     const context = renderContextUsage(state.meta.contextUsage, "当前窗口");

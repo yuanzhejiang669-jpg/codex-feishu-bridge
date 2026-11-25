@@ -162,7 +162,14 @@ export function createClaudeCommands({ config, settings, botConfiguration, provi
         `渠道：\`${selected.provider}\``, `模型：\`${selected.model}\``, `思考强度：\`${selected.reasoning}\``,
         `权限模式：${selected.permissionMode === 'bypassPermissions' ? '`完全授权（bypassPermissions）`' : `\`${selected.permissionMode}\``}`,
         `任务：${job ? '运行中' : '空闲'}${!job && hasWarm?.(event.chat_id) ? '（温热保活就绪，下轮免冷启动）' : ''}`, `队列：${queueSummary(event.chat_id)}`,
-        `当前请求上下文：${session.lastContextUsage?.usedTokens ?? '未知'} tokens`,
+        (() => {
+          const cu = session.lastContextUsage;
+          if (cu?.usedTokens != null && Number(cu?.contextWindow || 0) > 0) {
+            const pct = cu.percent != null ? `${cu.percent}% / ` : '';
+            return `当前窗口：${pct}${Number(cu.usedTokens).toLocaleString('en-US')} / ${Number(cu.contextWindow).toLocaleString('en-US')} tokens`;
+          }
+          return `当前请求上下文：${cu?.usedTokens != null ? `${Number(cu.usedTokens).toLocaleString('en-US')} tokens（容量未提供）` : '未知'}`;
+        })(),
         `配置压缩窗口：${compact.window ? `${compact.window.toLocaleString('en-US')} tokens` : '由 Claude Code 决定'}；自动压缩${compact.enabled ? '开启' : '关闭'}`,
         '实际触发时间由原生 CLI 决定，配置窗口不等于固定触发点。',
         `上次压缩：${session.lastCompactedAt ? new Date(session.lastCompactedAt).toLocaleString('zh-CN') : '未观察到'}`,
@@ -260,11 +267,22 @@ export function createClaudeCommands({ config, settings, botConfiguration, provi
       ].join('\n')); return true;
     }
     if (['capability', 'capabilities'].includes(op)) {
+      const activeModel = settings(session).model;
+      let liveLine = '';
+      try {
+        const liveModels = await fetchModels(provider);
+        liveLine = liveModels.includes(activeModel)
+          ? `渠道实时核验：\`${activeModel}\` 在 \`${provider.id}\` 实时目录中可见（共 ${liveModels.length} 个模型）`
+          : `渠道实时核验：⚠️ \`${activeModel}\` 当前不在 \`${provider.id}\` 实时 \`/v1/models\` 目录中（共 ${liveModels.length} 个模型）`;
+      } catch (error) {
+        liveLine = `渠道实时核验：暂不可用（${error.message}）`;
+      }
       await reply([
         '**Claude 模型能力说明**',
-        `当前模型：\`${settings(session).model}\` · 思考强度：\`${settings(session).reasoning}\``,
+        `当前模型：\`${activeModel}\` · 思考强度：\`${settings(session).reasoning}\` · 渠道：\`${provider.id}\``,
+        liveLine,
         'Claude CLI 接受的强度：`low`、`medium`、`high`、`xhigh`、`max`。',
-        '强度原样传给 CLI，渠道实际支持情况以请求结果为准。',
+        '注：Anthropic / 第三方 `/v1/models` 接口不返回思考强度元数据，强度原样透传给 CLI，实际支持情况以渠道响应为准。',
         '',
         '用法：`/model effort high`、`/effort high`、`/model <模型ID> high`、`/model test <模型ID>`',
       ].join('\n')); return true;

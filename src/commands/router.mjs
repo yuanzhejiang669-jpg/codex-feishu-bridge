@@ -1100,7 +1100,24 @@ export function createCommandRouter(deps = {}) {
     }
 
     if (action === "capability" || action === "capabilities") {
-      await sendMarkdown(chatId, modelCapabilityMarkdown(session), "model-capability", messageId);
+      let liveLookup = null;
+      try {
+        const listed = await listCurrentProviderModels(session);
+        const activeModel = effectiveSessionSettings(session).model;
+        const matched = (listed.models || []).find((item) => (item.id || item.model) === activeModel) || null;
+        liveLookup = {
+          ok: true,
+          source: listed.source,
+          totalModels: (listed.models || []).length,
+          matched,
+        };
+      } catch (error) {
+        liveLookup = {
+          ok: false,
+          error: String(error?.message || error).slice(0, 160),
+        };
+      }
+      await sendMarkdown(chatId, modelCapabilityMarkdown(session, { liveLookup }), "model-capability", messageId);
       return;
     }
 
@@ -1254,7 +1271,7 @@ export function createCommandRouter(deps = {}) {
     ].join("\n");
   }
 
-  function modelCapabilityMarkdown(session, { includeUsage = false } = {}) {
+  function modelCapabilityMarkdown(session, { includeUsage = false, liveLookup = null } = {}) {
     const settings = effectiveSessionSettings(session);
     const mapping = settings.reasoningMapping;
     const capability = mapping.capability;
@@ -1265,11 +1282,34 @@ export function createCommandRouter(deps = {}) {
       model: settings.model,
       currentEffort: settings.requestedReasoning,
     }, MODEL_REASONING_REGISTRY);
+    const liveLines = [];
+    if (liveLookup?.ok && liveLookup.matched) {
+      const liveEfforts = Array.isArray(liveLookup.matched.supportedReasoningEfforts)
+        ? liveLookup.matched.supportedReasoningEfforts
+          .map((item) => (typeof item === "string" ? item : item?.reasoningEffort))
+          .filter(Boolean)
+        : [];
+      const liveTiers = Array.isArray(liveLookup.matched.serviceTiers)
+        ? liveLookup.matched.serviceTiers.map((tier) => `${tier.name || tier.id}(${tier.id})`).filter(Boolean)
+        : [];
+      if (liveEfforts.length) {
+        const srcLabel = liveLookup.source === "openai-account" ? "官方账号实时查询" : "Codex app-server 实时查询";
+        liveLines.push(`实时上游支持档位：${liveEfforts.map((effort) => `\`${effort}\``).join("、")}（来源：${srcLabel}）`);
+        if (liveTiers.length) liveLines.push(`实时速度档：${liveTiers.join("、")}`);
+      } else {
+        liveLines.push(`实时渠道核验：\`${settings.model}\` 在当前渠道实时目录中可见（共 ${liveLookup.totalModels} 个模型；接口未返回档位元数据，下方使用本地规则表）`);
+      }
+    } else if (liveLookup?.ok && !liveLookup.matched && settings.model) {
+      liveLines.push(`实时渠道核验：⚠️ \`${settings.model}\` 未出现在当前实时目录中（共 ${liveLookup.totalModels} 个模型）`);
+    } else if (liveLookup && !liveLookup.ok) {
+      liveLines.push(`实时核验：暂不可用（${liveLookup.error}），以下展示本地规则表`);
+    }
     const lines = [
       "**当前模型推理能力**",
       "",
       `provider：\`${settings.provider || "默认"}\``,
       `模型：\`${settings.model || "默认"}\``,
+      ...liveLines,
       `规则：\`${capability.name}\` (${capability.id})`,
       `状态：${capability.known ? `${review.stale ? "待复核" : "已收录"} · 核验 ${capability.verifiedAt} · 下次 ${review.reviewDueAt}` : "未收录 · 通用透传"}`,
       `可接受请求值：${supported.map((effort) => `\`${effort}\``).join("、")}`,
