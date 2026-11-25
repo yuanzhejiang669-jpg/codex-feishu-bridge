@@ -306,7 +306,7 @@ export function createClaudeBridge({ config, getSession, getChatState, getChats,
     try {
       await sendMarkdown(event.chat_id, `Claude Code 申请调用 **${request.toolName}**\n\n`
         + `参数：\n\`\`\`json\n${JSON.stringify(request.input, null, 2).slice(0, 5000)}\n\`\`\`\n\n`
-        + `允许本次调用：\`/approve ${token}\`\n拒绝：\`/deny ${token}\``, 'claude-permission', event.message_id);
+        + `允许本次调用：\`/approve ${token}\`\n拒绝：\`/deny ${token}\``, `claude-permission-${token}`, event.message_id);
       return await answer;
     } finally {
       clearTimeout(timer); permissionTimers.delete(timer); permissions.delete(token);

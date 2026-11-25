@@ -507,7 +507,7 @@ test('Antigravity ACP keepalive: preserves live worker across background tasks, 
     await new Promise((r) => setTimeout(r, 30));
   }
   assert.equal(sentMessages.length, 1);
-  assert.equal(sentMessages[0].kind, 'antigravity-background-wakeup');
+  assert.equal(sentMessages[0].kind, 'antigravity-background-wakeup-1');
   assert.match(sentMessages[0].text, /Antigravity 后台任务进展/);
   assert.match(sentMessages[0].text, /已启动两张 4090 训练/);
   assert.equal(bridge.hasBackground('chat-bg'), false);

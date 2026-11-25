@@ -409,7 +409,7 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
       const tool = request.toolCall || {};
       await sendMarkdown(event.chat_id, `Antigravity 申请执行 **${tool.title || tool.name || tool.kind || '工具'}**\n\n`
         + `\`\`\`json\n${JSON.stringify(tool.rawInput || tool.args || {}, null, 2).slice(0, 4500)}\n\`\`\`\n\n`
-        + `允许一次：\`/approve ${token}\`\n拒绝：\`/deny ${token}\``, 'antigravity-permission', event.message_id);
+        + `允许一次：\`/approve ${token}\`\n拒绝：\`/deny ${token}\``, `antigravity-permission-${token}`, event.message_id);
       return await answer;
     } finally { clearTimeout(timer); permissions.delete(token); }
   }
@@ -463,6 +463,8 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
     }
     entry.outOfTurnText = '';
     if (entry.client && !entry.client.turnActive) entry.client.text = '';
+    entry.flushSeq = (entry.flushSeq || 0) + 1;
+    const flushSeq = entry.flushSeq;
     entry.flushChain = entry.flushChain.catch(() => {}).then(async () => {
       try {
         entry.session.messages ||= [];
@@ -473,7 +475,7 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
         await sendMarkdown(
           entry.chatId,
           `**Antigravity 后台任务进展**\n\n${text}`,
-          'antigravity-background-wakeup',
+          `antigravity-background-wakeup-${flushSeq}`,
           entry.replyMessageId,
         );
       } catch {}
@@ -528,6 +530,7 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
       replyMessageId,
       event,
       outOfTurnText: '',
+      flushSeq: 0,
       flushChain: Promise.resolve(),
       flushTimer: null,
       pollTimer: null,
