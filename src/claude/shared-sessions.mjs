@@ -179,6 +179,10 @@ export function createSharedClaudeSessionStore({ config, sessionsPath, createSes
     for (const [key, value] of Object.entries(after)) if (!same(before?.[key], value)) delta[key] = value;
     return delta;
   }
+  function hasVerifiedCallerScope(accessCtx) {
+    return Boolean(accessCtx && accessCtx.chatType && (accessCtx.senderId || accessCtx.senderUnionId));
+  }
+
   function refresh(chat, pool, accessCtx = null) {
     const existing = new Map((chat.sessions || []).map((s) => [s.id, s]));
     const visible = Object.values(pool.sessions)
@@ -193,7 +197,18 @@ export function createSharedClaudeSessionStore({ config, sessionsPath, createSes
       baselines.set(item, clone(value));
       return item;
     });
-    if (!chat.sessions.some((s) => s.id === chat.currentSessionId)) chat.currentSessionId = chat.sessions[0]?.id || '';
+    if (!chat.sessions.some((s) => s.id === chat.currentSessionId)) {
+      const keepUnverifiedCrossBotSelection = Boolean(
+        accessCtx
+        && !hasVerifiedCallerScope(accessCtx)
+        && chat.currentSessionId
+        && pool.sessions[chat.currentSessionId]
+        && !pool.deleted?.[chat.currentSessionId],
+      );
+      if (!keepUnverifiedCrossBotSelection) {
+        chat.currentSessionId = chat.sessions[0]?.id || '';
+      }
+    }
     return chat;
   }
 
