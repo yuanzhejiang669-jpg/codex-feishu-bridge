@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { AntigravityAcpClient, antigravityContent } from './acp-client.mjs';
+import { formatAttachmentFailurePromptNote } from '../attachments/vision-guard.mjs';
 import configuration from './configuration.cjs';
 import accountLock from './account-lock.cjs';
 import { feishuMcpConfiguration, updateFeishuToolContext } from '../claude/feishu-tools.mjs';
@@ -883,9 +884,12 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
           if (info.effectiveModel) state.meta.model = info.effectiveEffort ? `${info.effectiveModel} (${info.effectiveEffort})` : info.effectiveModel;
           await flush();
         }
+        const baseUserText = contentOverride ?? userText(event.content);
+        const failurePromptNote = formatAttachmentFailurePromptNote(event.attachmentFailures, config.maxFileAttachmentBytes);
+        const fullUserText = [baseUserText, failurePromptNote].filter(Boolean).join('\n\n');
         const promptInput = attempt === 1 && attemptToolCalls > 0 && session.antigravitySessionId
           ? antigravityContent('上一轮因认证凭证刷新中断（HTTP 401），已自动重连。请基于上述已完成的步骤继续回复用户，不要重复执行已完成的操作。', [])
-          : antigravityContent(contentOverride ?? userText(event.content), event.attachments);
+          : antigravityContent(fullUserText, event.attachments);
         const turnResult = await client.prompt(promptInput);
         const resultErr = detectAntigravityResultError(turnResult?.text);
         if (!resultErr) {

@@ -6,6 +6,7 @@ import readline from "node:readline";
 import { hasDuration } from "../config/env.mjs";
 import { sameResolvedPath } from "../config/paths.mjs";
 import { codexCloakBrowserArgs } from "../config/cloakbrowser.mjs";
+import { partitionVisionAttachments } from "../attachments/vision-guard.mjs";
 import {
   markdown,
   truncateCardText,
@@ -1603,10 +1604,9 @@ export function createCodexRunner(deps = {}) {
     if (settings.provider) args.push("-c", `model_provider="${settings.provider}"`);
     if (settings.reasoning) args.push("-c", `model_reasoning_effort="${settings.reasoning}"`);
     if (serviceTier) args.push("-c", `service_tier="${serviceTier}"`);
-    for (const attachment of Array.isArray(event.attachments) ? event.attachments : []) {
-      if (attachment?.type === "image" && attachment.path && fs.existsSync(attachment.path)) {
-        args.push("--image", attachment.path);
-      }
+    const { inlineImages } = partitionVisionAttachments(event.attachments);
+    for (const { attachment } of inlineImages) {
+      args.push("--image", attachment.path);
     }
     if (CONFIG.disableMcp) args.push("-c", "mcp_servers={}");
     else args.push(...codexCloakBrowserArgs(codexProviderConfig.readCodexConfigText(), CONFIG, process.env));

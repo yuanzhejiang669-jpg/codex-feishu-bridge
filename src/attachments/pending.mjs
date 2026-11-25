@@ -1,5 +1,5 @@
 export function createPendingAttachmentStore({
-  maxPendingAttachments = 12,
+  maxPendingAttachments = 50,
   pendingTtlMs = 30 * 60_000,
 } = {}) {
   const pendingAttachmentsByChat = new Map();
@@ -26,17 +26,22 @@ export function createPendingAttachmentStore({
   }
 
   function add(chatId, attachments) {
-    if (!chatId || !Array.isArray(attachments) || !attachments.length) return;
+    if (!chatId || !Array.isArray(attachments) || !attachments.length) {
+      return { total: pendingAttachmentsByChat.get(chatId) || [], droppedCount: 0, droppedItems: [] };
+    }
     cleanup(chatId);
     const current = pendingAttachmentsByChat.get(chatId) || [];
     const byIdentity = new Map();
     for (const item of [...current, ...attachments]) {
       byIdentity.set(attachmentIdentity(item), item);
     }
-    const next = [...byIdentity.values()]
-      .sort((a, b) => Number(a?.receivedAt || 0) - Number(b?.receivedAt || 0))
-      .slice(-maxPendingAttachments);
+    const sorted = [...byIdentity.values()]
+      .sort((a, b) => Number(a?.receivedAt || 0) - Number(b?.receivedAt || 0));
+    const droppedCount = Math.max(0, sorted.length - maxPendingAttachments);
+    const droppedItems = droppedCount > 0 ? sorted.slice(0, droppedCount) : [];
+    const next = droppedCount > 0 ? sorted.slice(-maxPendingAttachments) : sorted;
     pendingAttachmentsByChat.set(chatId, next);
+    return { total: next, droppedCount, droppedItems };
   }
 
   function cleanup(chatId) {

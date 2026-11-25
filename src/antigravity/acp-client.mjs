@@ -4,6 +4,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import configuration from './configuration.cjs';
 import { terminateProcessTree } from '../runtime/process-runner.mjs';
+import { formatDemotedVisionNotice, partitionVisionAttachments } from '../attachments/vision-guard.mjs';
 
 export const DEFAULT_MAX_LINE_BYTES = 128 * 1024 * 1024;
 export const MAX_ALLOWED_LINE_BYTES = 450 * 1024 * 1024;
@@ -36,19 +37,16 @@ export function antigravityEnvironment(environment, provider = {}) {
   return env;
 }
 
-export function antigravityContent(text, attachments = []) {
-  const content = text ? [{ type: 'text', text }] : [];
-  for (const attachment of attachments) {
-    if (!attachment.path) continue;
-    const filename = attachment.name || path.basename(attachment.path);
-    if (attachment.type === 'image') {
-      const mimeType = ({ '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif' })[path.extname(attachment.path).toLowerCase()];
-      if (mimeType && fs.existsSync(attachment.path)) {
-        if (fs.statSync(attachment.path).size > 20 * 1024 * 1024) throw new Error('图片超过 20 MiB，请缩小后重试');
-        content.push({ type: 'image', mimeType, data: fs.readFileSync(attachment.path).toString('base64') });
-        continue;
-      }
-    }
+export function antigravityContent(text, attachments = [], options = {}) {
+  const { inlineImages, demotedImages, files, limits } = partitionVisionAttachments(attachments, options);
+  const demotedNotice = formatDemotedVisionNotice(demotedImages, limits);
+  const combinedText = [text, demotedNotice].filter(Boolean).join('\n\n');
+  const content = combinedText ? [{ type: 'text', text: combinedText }] : [];
+  for (const { attachment, mimeType } of inlineImages) {
+    content.push({ type: 'image', mimeType, data: fs.readFileSync(attachment.path).toString('base64') });
+  }
+  for (const { attachment } of files) {
+    const filename = attachment.fileName || attachment.name || path.basename(attachment.path);
     content.push({ type: 'resource_link', uri: pathToFileURL(path.resolve(attachment.path)).href, name: filename });
   }
   return content.length ? content : [{ type: 'text', text: '(attachment only)' }];

@@ -2,6 +2,11 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { ClaudeCliClient } from './cli-client.mjs';
+import {
+  formatAttachmentFailurePromptNote,
+  formatDemotedVisionNotice,
+  partitionVisionAttachments,
+} from '../attachments/vision-guard.mjs';
 import { writeJsonFileAtomicSync } from '../utils/json.mjs';
 import { feishuMcpConfiguration, updateFeishuToolContext } from './feishu-tools.mjs';
 import { claudeSessionArtifacts, createClaudeSessionDeletion } from './session-deletion.mjs';
@@ -47,19 +52,24 @@ export function extractClaudeContextWindow(result, activeModel = '') {
   return null;
 }
 
-export function claudeContent(text, attachments = []) {
+export function claudeContent(text, attachments = [], options = {}) {
+  const { inlineImages, demotedImages, limits } = partitionVisionAttachments(attachments, options);
+  const demotedByPath = new Map(demotedImages.map((entry) => [entry.attachment?.path, entry.reason]));
   const content = [];
   if (text) content.push({ type: 'text', text });
-  if (attachments.length) content.push({ type: 'text', text: '[附件信息]\n' + JSON.stringify(attachments.map((item) => ({
-    name: item.name || item.file_name || path.basename(item.path || ''), type: item.type, path: item.path,
-  })), null, 2) });
-  for (const attachment of attachments) {
-    if (attachment.type !== 'image' || !attachment.path || !fs.existsSync(attachment.path)) continue;
-    const mediaType = ({ '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
-      '.webp': 'image/webp', '.gif': 'image/gif' })[path.extname(attachment.path).toLowerCase()];
-    if (!mediaType) continue;
-    if (fs.statSync(attachment.path).size > 20 * 1024 * 1024) throw new Error('Claude 图片附件超过 20 MiB，请使用较小图片');
-    content.push({ type: 'image', source: { type: 'base64', media_type: mediaType,
+  if (attachments.length) content.push({ type: 'text', text: '[附件信息]\n' + JSON.stringify(attachments.map((item) => {
+    const demotedReason = demotedByPath.get(item.path);
+    return {
+      name: item.fileName || item.name || item.file_name || path.basename(item.path || ''),
+      type: demotedReason ? 'file' : item.type,
+      path: item.path,
+      ...(demotedReason ? { inlineVision: false, demotedReason } : {}),
+    };
+  }), null, 2) });
+  const demotedNotice = formatDemotedVisionNotice(demotedImages, limits);
+  if (demotedNotice) content.push({ type: 'text', text: demotedNotice });
+  for (const { attachment, mimeType } of inlineImages) {
+    content.push({ type: 'image', source: { type: 'base64', media_type: mimeType,
       data: fs.readFileSync(attachment.path).toString('base64') } });
   }
   return content.length ? content : [{ type: 'text', text: '(attachment only)' }];
@@ -508,7 +518,9 @@ export function createClaudeBridge({ config, getSession, getChatState, getChats,
         markPhase(state, 'model_thinking', { connection: reusedWarm ? 'connected' : 'starting' });
         await flush();
       }
-      const payload = claudeContent(text, event.attachments);
+      const failurePromptNote = formatAttachmentFailurePromptNote(event.attachmentFailures, config.maxFileAttachmentBytes);
+      const fullText = [text, failurePromptNote].filter(Boolean).join('\n\n');
+      const payload = claudeContent(fullText, event.attachments);
       const result = supportsWarm
         ? await client.runTurn(payload, { dispatchCommand, onEvent: turnOnEvent, onPermission: turnOnPermission, onSession: turnOnSession })
         : await client.run(payload);

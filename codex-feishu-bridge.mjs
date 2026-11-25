@@ -184,8 +184,9 @@ const CONFIG = {
     ".codex-feishu-attachments",
   ),
   attachmentPendingTtlMs: Number(process.env.CODEX_FEISHU_ATTACHMENT_PENDING_TTL_MS || `${30 * 60_000}`),
-  maxPendingAttachments: Number(process.env.CODEX_FEISHU_MAX_PENDING_ATTACHMENTS || "12"),
+  maxPendingAttachments: Number(process.env.CODEX_FEISHU_MAX_PENDING_ATTACHMENTS || "50"),
   maxFileAttachmentBytes: Number(process.env.CODEX_FEISHU_MAX_FILE_ATTACHMENT_BYTES || `${50 * 1024 * 1024}`),
+  attachmentDownloadConcurrency: Number(process.env.CODEX_FEISHU_ATTACHMENT_DOWNLOAD_CONCURRENCY || "6"),
   recalledMessageTtlMs: parseDurationMs(process.env.CODEX_FEISHU_RECALLED_MESSAGE_TTL_MS, 24 * 60 * 60_000),
   eventReplayGraceMs: parseDurationMs(process.env.CODEX_FEISHU_EVENT_REPLAY_GRACE_MS, 2 * 60_000),
   deleteConfirmTtlMs: Number(process.env.CODEX_FEISHU_DELETE_CONFIRM_TTL_MS || `${5 * 60_000}`),
@@ -707,8 +708,8 @@ const bridgeRuntime = {
 const attachments = createAttachmentManager(bridgeRuntime);
 Object.assign(bridgeRuntime, attachments);
 const {
-  enrichEvent, userTextFromContent, downloadImageAttachments, downloadFileAttachments,
-  formatAttachmentCounts, prepareCommandAttachments, formatBytes, parseCommand, attachmentPromptBlock,
+  enrichEvent, userTextFromContent, downloadImageAttachments, downloadFileAttachments, downloadAllAttachments,
+  formatAttachmentCounts, formatAttachmentFailureNotice, prepareCommandAttachments, formatBytes, parseCommand, attachmentPromptBlock,
 } = attachments;
 
 const sidebarSync = createCodexSidebarSync(bridgeRuntime);
@@ -1032,10 +1033,8 @@ async function handleEvent(rawEvent, dispatchControl = {}) {
     return;
   }
 
-  const downloadedAttachments = event.cardReference ? [] : [
-    ...(await downloadImageAttachments(event)),
-    ...(await downloadFileAttachments(event)),
-  ];
+  const downloadedAttachments = event.cardReference ? [] : await downloadAllAttachments(event);
+  const attachmentFailures = Array.isArray(event.attachmentFailures) ? event.attachmentFailures : [];
   if (dispatchControl.commit && !dispatchControl.commit()) {
     cleanupClearedDownloads(downloadedAttachments);
     log("INFO", "queued message cleared before execution", { messageId, chatId });
@@ -1052,46 +1051,89 @@ async function handleEvent(rawEvent, dispatchControl = {}) {
     contentPreview: userContent.slice(0, 120),
   });
 
+  const formatPendingAck = (total, droppedCount, failures = []) => {
+    const parts = [`已收到 ${formatAttachmentCounts(total)}`];
+    if (droppedCount > 0) {
+      parts.push(`（超出暂存上限 ${CONFIG.maxPendingAttachments} 个，已丢弃最早的 ${droppedCount} 个）`);
+    }
+    parts.push("，请继续发送文字消息来触发处理。");
+    const failureLine = formatAttachmentFailureNotice(failures, { partial: total.length > 0 });
+    return failureLine ? `${parts.join("")}\n${failureLine}` : parts.join("");
+  };
+
   if (event.message_type === "image" && !userContent) {
     const imageAttachments = downloadedAttachments.filter((item) => item?.type === "image");
     if (!imageAttachments.length) {
-      await sendText(chatId, "收到图片消息，但图片下载失败；我还拿不到图片本体。", "image-download-failed", messageId);
+      await sendText(
+        chatId,
+        formatAttachmentFailureNotice(attachmentFailures) || "收到图片消息，但图片下载失败；我还拿不到图片本体。",
+        "image-download-failed",
+        messageId,
+      );
       return;
     }
-    const total = await withAttachmentLock(chatId, () => {
-      addPendingAttachments(chatId, downloadedAttachments);
-      return cleanupPendingAttachments(chatId);
+    const { total, droppedCount } = await withAttachmentLock(chatId, () => {
+      const added = addPendingAttachments(chatId, downloadedAttachments);
+      return { total: cleanupPendingAttachments(chatId), droppedCount: added?.droppedCount || 0 };
     });
-    await sendText(chatId, `已收到 ${formatAttachmentCounts(total)}，请继续发送文字消息来触发处理。`, "attachment-received", messageId);
+    await sendText(chatId, formatPendingAck(total, droppedCount, attachmentFailures), "attachment-received", messageId);
     return;
   }
 
   if (event.message_type === "file" && !userContent) {
-    const fileAttachments = downloadedAttachments.filter((item) => item?.type === "file");
+    const fileAttachments = downloadedAttachments.filter((item) => item?.sourceKind === "file" || item?.type === "file");
     if (!fileAttachments.length) {
       await sendText(
         chatId,
-        `收到文件消息，但文件下载失败或超过 ${formatBytes(CONFIG.maxFileAttachmentBytes)} 限制；我还拿不到文件本体。`,
+        formatAttachmentFailureNotice(attachmentFailures)
+          || `收到文件消息，但文件下载失败或超过 ${formatBytes(CONFIG.maxFileAttachmentBytes)} 限制；我还拿不到文件本体。`,
         "file-download-failed",
         messageId,
       );
       return;
     }
-    const total = await withAttachmentLock(chatId, () => {
-      addPendingAttachments(chatId, downloadedAttachments);
-      return cleanupPendingAttachments(chatId);
+    const { total, droppedCount } = await withAttachmentLock(chatId, () => {
+      const added = addPendingAttachments(chatId, downloadedAttachments);
+      return { total: cleanupPendingAttachments(chatId), droppedCount: added?.droppedCount || 0 };
     });
-    await sendText(chatId, `已收到 ${formatAttachmentCounts(total)}，请继续发送文字消息来触发处理。`, "attachment-received", messageId);
+    await sendText(chatId, formatPendingAck(total, droppedCount, attachmentFailures), "attachment-received", messageId);
     return;
   }
 
-  if (downloadedAttachments.length && !userContent) {
-    const total = await withAttachmentLock(chatId, () => {
-      addPendingAttachments(chatId, downloadedAttachments);
-      return cleanupPendingAttachments(chatId);
+  if ((downloadedAttachments.length || attachmentFailures.length) && !userContent) {
+    if (!downloadedAttachments.length) {
+      await sendText(
+        chatId,
+        formatAttachmentFailureNotice(attachmentFailures) || "收到附件消息，但附件下载失败；请稍后重发。",
+        "attachment-download-failed",
+        messageId,
+      );
+      return;
+    }
+    const { total, droppedCount } = await withAttachmentLock(chatId, () => {
+      const added = addPendingAttachments(chatId, downloadedAttachments);
+      return { total: cleanupPendingAttachments(chatId), droppedCount: added?.droppedCount || 0 };
     });
-    await sendText(chatId, `已收到 ${formatAttachmentCounts(total)}，请继续发送文字消息来触发处理。`, "attachment-received", messageId);
+    await sendText(chatId, formatPendingAck(total, droppedCount, attachmentFailures), "attachment-received", messageId);
     return;
+  }
+
+  if (attachmentFailures.length && userContent) {
+    await sendText(
+      chatId,
+      formatAttachmentFailureNotice(attachmentFailures, {
+        partial: downloadedAttachments.length > 0,
+        withText: true,
+      }),
+      "attachment-failure-notice",
+      messageId,
+    ).catch((error) => {
+      log("WARN", "failed to send attachment failure notice", {
+        messageId,
+        chatId,
+        error: String(error?.message || error).slice(0, 500),
+      });
+    });
   }
 
   const pendingAttachments = await withAttachmentLock(chatId, () => takePendingAttachments(chatId));

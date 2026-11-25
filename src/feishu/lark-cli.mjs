@@ -261,7 +261,7 @@ export function createLarkClient({
 export function isTransientLarkError(result) {
   const text = `${result?.stderr || ""}\n${result?.stdout || ""}`;
   if (/\bHTTP\s*4(?:00|01|03|04|09|22)\b/i.test(text)) return false;
-  return /connectex|ECONN(?:RESET|REFUSED|ABORTED)|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|TLS|HTTP\s*(?:429|50[234])|tenant_access_token|cardid is invalid|ErrCode:\s*11310/i.test(text);
+  return /connectex|ECONN(?:RESET|REFUSED|ABORTED)|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|TLS|\b(?:unexpected\s+)?EOF\b|i\/o timeout|connection reset|broken pipe|HTTP\s*(?:429|50[234])|tenant_access_token|cardid is invalid|ErrCode:\s*11310/i.test(text);
 }
 
 function findNestedValue(value, key) {
