@@ -531,27 +531,51 @@ function validFormulaCandidate(text, start, end, latex, display) {
   return true;
 }
 
+function parseFenceStart(line) {
+  const clean = String(line || "").replace(/[\r\n]+$/, "");
+  const match = clean.match(/^[ \t]*(?:>[ \t]*)*(`{3,}|~{3,})(.*)$/);
+  if (!match) return null;
+  const marker = match[1];
+  const info = match[2] || "";
+  if (marker[0] === "`" && info.includes("`")) return null;
+  return { char: marker[0], len: marker.length };
+}
+
+function isFenceEnd(line, fence) {
+  const clean = String(line || "").replace(/[\r\n]+$/, "");
+  const stripped = clean.replace(/^[ \t]*(?:>[ \t]*)*[ \t]*/, "").trimEnd();
+  if (!stripped.startsWith(fence.char.repeat(fence.len))) return false;
+  for (let i = 0; i < stripped.length; i += 1) {
+    if (stripped[i] !== fence.char) return false;
+  }
+  return true;
+}
+
 function splitProtectedMarkdown(text) {
   const lines = String(text || "").split(/(?<=\n)/);
   const chunks = [];
-  let protectedMode = false;
+  let activeFence = null;
   let buffer = "";
   const flush = () => {
-    if (buffer) chunks.push({ protected: protectedMode, content: buffer });
+    if (buffer) chunks.push({ protected: Boolean(activeFence), content: buffer });
     buffer = "";
   };
   for (const line of lines) {
-    const fence = /^\s*(```|~~~)/.test(line);
-    if (fence && !protectedMode) {
-      flush();
-      protectedMode = true;
-      buffer = line;
+    if (!activeFence) {
+      const open = parseFenceStart(line);
+      if (open) {
+        flush();
+        activeFence = open;
+        buffer = line;
+        continue;
+      }
+      buffer += line;
       continue;
     }
     buffer += line;
-    if (fence && protectedMode) {
+    if (isFenceEnd(line, activeFence)) {
       flush();
-      protectedMode = false;
+      activeFence = null;
     }
   }
   flush();
@@ -662,6 +686,11 @@ body{font-family:"Microsoft YaHei","PingFang SC","Segoe UI",sans-serif;color:#1f
 .cf-formula-card{box-sizing:border-box;width:100%;padding:${compact ? "16px 24px" : "24px"};background:#fff;border:1px solid #d9e2ff;border-left:5px solid #4e83fd;border-radius:14px;font-size:${compact ? "28px" : "23px"};line-height:1.8}
 .cf-formula-block{display:flex;align-items:center;justify-content:center}
 .cf-formula-paragraph{white-space:normal;overflow-wrap:anywhere}
+.cf-formula-paragraph p{margin:.25em 0}.cf-formula-paragraph p:first-child{margin-top:0}.cf-formula-paragraph p:last-child{margin-bottom:0}
+.cf-formula-paragraph ul,.cf-formula-paragraph ol{margin:.3em 0;padding-left:1.35em}
+.cf-formula-paragraph code{padding:1px 5px;border-radius:4px;background:#eef3ff;font-family:Consolas,monospace;font-size:.9em}
+.cf-formula-paragraph pre{margin:.4em 0;padding:8px 10px;border-radius:6px;background:#f4f6fb;overflow-x:auto}
+.cf-formula-paragraph blockquote{margin:.4em 0;padding:.2em .7em;border-left:3px solid #b8c7e8;color:#4e5969}
 .cf-formula-paragraph strong{font-weight:700}
 .cf-formula-paragraph h1,.cf-formula-paragraph h2,.cf-formula-paragraph h3{margin:.35em 0 .25em;font-weight:700;line-height:1.35}
 .cf-formula-paragraph h1{font-size:1.28em}.cf-formula-paragraph h2{font-size:1.18em}.cf-formula-paragraph h3{font-size:1.1em}
@@ -732,7 +761,7 @@ export function renderMixedHtml(content, katex, markdown) {
   }
   protectedMarkdown += content.slice(cursor);
 
-  let html = containsMarkdownTable(protectedMarkdown) && markdown
+  let html = markdown
     ? markdown.render(protectedMarkdown)
     : basicMarkdownHtml(protectedMarkdown);
   for (const [index, rendered] of renderedFormulas.entries()) {
@@ -785,8 +814,27 @@ function formulaSources(plan) {
 }
 
 function formulaFallbackText(plan) {
-  const label = plan?.mode === "block" ? "独立公式" : "含公式段落";
-  return `\n\n【${label}暂时无法渲染；LaTeX 源码已保存在下方“公式源码”中】\n\n`;
+  if (plan?.mode === "block") {
+    return "\n\n【独立公式暂时无法渲染；LaTeX 源码已保存在下方“公式源码”中】\n\n";
+  }
+  const source = String(plan?.content || "");
+  if (!source.trim()) {
+    return "\n\n【含公式段落暂时无法渲染；LaTeX 源码已保存在下方“公式源码”中】\n\n";
+  }
+  const formulas = scanLatexFormulas(source);
+  if (!formulas.length) {
+    return `${source}\n\n（以上部分复杂公式暂时无法渲染；LaTeX 源码已保存在下方“公式源码”中）\n\n`;
+  }
+  let readable = "";
+  let cursor = 0;
+  for (const formula of formulas) {
+    readable += source.slice(cursor, formula.start);
+    const simplified = simplifyInlineLatex(formula.latex);
+    readable += simplified ?? (formula.display ? "[独立公式]" : "[公式]");
+    cursor = formula.end;
+  }
+  readable += source.slice(cursor);
+  return `${readable.trim()}\n\n（以上部分复杂公式暂时无法渲染；LaTeX 源码已保存在下方“公式源码”中）\n\n`;
 }
 
 function fallbackFormulaPlans(blockPlans) {

@@ -36,6 +36,7 @@ import {
   markdown,
   splitText,
   truncateCardText,
+  wrapCodeBlock,
 } from "./src/feishu/cards/primitives.mjs";
 import { createPendingAttachmentStore } from "./src/attachments/pending.mjs";
 import { createLogger } from "./src/logging/logger.mjs";
@@ -1361,9 +1362,7 @@ async function handleEvent(rawEvent, dispatchControl = {}) {
             "",
             failureShortText(failure),
             "",
-            "```",
-            truncateCardText(errorText(error), 1500),
-            "```",
+            wrapCodeBlock(truncateCardText(errorText(error), 1500)),
           ].join("\n"),
           "error-fallback",
           messageId,
@@ -1377,9 +1376,7 @@ async function handleEvent(rawEvent, dispatchControl = {}) {
           "",
           failureShortText(failure),
           "",
-          "```",
-          truncateCardText(errorText(error), 1500),
-          "```",
+          wrapCodeBlock(truncateCardText(errorText(error), 1500)),
         ].join("\n"),
         "error",
         messageId,

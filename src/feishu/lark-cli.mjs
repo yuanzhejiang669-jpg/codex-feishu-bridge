@@ -4,6 +4,7 @@ import path from "node:path";
 
 import { parseJsonLoose } from "../utils/json.mjs";
 import { buildLarkCliEnv } from "../config/env.mjs";
+import { cardMarkdownContent } from "./cards/primitives.mjs";
 
 export function createLarkClient({
   larkCli,
@@ -51,16 +52,17 @@ export function createLarkClient({
         "--chat-id",
         chatId,
         "--text",
-        chunks[i],
+        "-",
         "--idempotency-key",
         idempotencyKey(baseId, `${idempotencySuffix}-text-${i}`),
-      ]);
+      ], { stdin: chunks[i] });
       if (result.code !== 0) throw new Error(`lark-cli send failed (${result.code}): ${result.stderr || result.stdout}`);
     }
   }
 
   async function sendMarkdown(chatId, markdown, idempotencySuffix, baseId = chatId) {
-    const chunks = splitText(markdown, maxReplyChars);
+    const normalized = cardMarkdownContent(markdown);
+    const chunks = splitText(normalized, maxReplyChars);
     for (let i = 0; i < chunks.length; i += 1) {
       const result = await runLark([
         "im",
@@ -70,10 +72,10 @@ export function createLarkClient({
         "--chat-id",
         chatId,
         "--markdown",
-        chunks[i],
+        "-",
         "--idempotency-key",
         idempotencyKey(baseId, `${idempotencySuffix}-md-${i}`),
-      ]);
+      ], { stdin: chunks[i] });
       if (result.code !== 0) throw new Error(`lark-cli markdown send failed (${result.code}): ${result.stderr || result.stdout}`);
     }
   }
@@ -89,12 +91,12 @@ export function createLarkClient({
         "--message-id",
         messageId,
         "--text",
-        chunks[i],
+        "-",
         "--idempotency-key",
         idempotencyKey(messageId, `${idempotencySuffix}-${i}`),
       ];
       if (useThreadReply) args.push("--reply-in-thread");
-      const result = await runLark(args);
+      const result = await runLark(args, { stdin: chunks[i] });
       if (result.code !== 0) throw new Error(`lark-cli reply failed (${result.code}): ${result.stderr || result.stdout}`);
     }
   }

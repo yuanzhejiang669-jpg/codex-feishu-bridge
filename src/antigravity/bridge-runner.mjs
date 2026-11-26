@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { AntigravityAcpClient, antigravityContent } from './acp-client.mjs';
+import { wrapCodeBlock } from '../feishu/cards/primitives.mjs';
 import { formatAttachmentFailurePromptNote } from '../attachments/vision-guard.mjs';
 import configuration from './configuration.cjs';
 import accountLock from './account-lock.cjs';
@@ -408,7 +409,7 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
     try {
       const tool = request.toolCall || {};
       await sendMarkdown(event.chat_id, `Antigravity 申请执行 **${tool.title || tool.name || tool.kind || '工具'}**\n\n`
-        + `\`\`\`json\n${JSON.stringify(tool.rawInput || tool.args || {}, null, 2).slice(0, 4500)}\n\`\`\`\n\n`
+        + `${wrapCodeBlock(JSON.stringify(tool.rawInput || tool.args || {}, null, 2).slice(0, 4500), 'json')}\n\n`
         + `允许一次：\`/approve ${token}\`\n拒绝：\`/deny ${token}\``, `antigravity-permission-${token}`, event.message_id);
       return await answer;
     } finally { clearTimeout(timer); permissions.delete(token); }

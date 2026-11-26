@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { ClaudeCliClient } from './cli-client.mjs';
+import { wrapCodeBlock } from '../feishu/cards/primitives.mjs';
 import {
   formatAttachmentFailurePromptNote,
   formatDemotedVisionNotice,
@@ -305,7 +306,7 @@ export function createClaudeBridge({ config, getSession, getChatState, getChats,
     timer.unref?.(); permissionTimers.add(timer);
     try {
       await sendMarkdown(event.chat_id, `Claude Code 申请调用 **${request.toolName}**\n\n`
-        + `参数：\n\`\`\`json\n${JSON.stringify(request.input, null, 2).slice(0, 5000)}\n\`\`\`\n\n`
+        + `参数：\n${wrapCodeBlock(JSON.stringify(request.input, null, 2).slice(0, 5000), 'json')}\n\n`
         + `允许本次调用：\`/approve ${token}\`\n拒绝：\`/deny ${token}\``, `claude-permission-${token}`, event.message_id);
       return await answer;
     } finally {

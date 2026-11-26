@@ -2,9 +2,12 @@ import crypto from "node:crypto";
 import path from "node:path";
 import {
   cardMarkdownContent,
+  escapeInlineMarkdown,
   markdown,
   noteMd,
   truncateCardText,
+  truncateCardTextByBytes,
+  wrapCodeBlock,
 } from "./primitives.mjs";
 import {
   appServerToolStatus,
@@ -581,12 +584,12 @@ export function createRunCardRenderer(deps = {}) {
       const failure = state.failure || classifyCodexFailure(state.errorMsg);
       elements.push(noteMd(`${failure.label} · ${elapsed}`));
       elements.push(markdown(`**${failure.message}**${failure.suggestion ? `\n\n${failure.suggestion}` : ""}`));
-      if (state.errorMsg) elements.push(markdown(`\`\`\`\n${truncateCardText(state.errorMsg, 1500)}\n\`\`\``));
+      if (state.errorMsg) elements.push(markdown(wrapCodeBlock(truncateCardText(state.errorMsg, 1500))));
     } else {
       elements.push(noteMd(renderDoneMeta(state)));
     }
 
-    return {
+    return fitCardToByteBudget({
       schema: "2.0",
       config: {
         streaming_mode: state.terminal === "running",
@@ -597,7 +600,51 @@ export function createRunCardRenderer(deps = {}) {
         template: state.terminal === "error" ? "red" : state.terminal === "running" ? "blue" : "default",
       },
       body: { elements },
-    };
+    }, Number(CONFIG?.maxCardJsonBytes || 28_000));
+  }
+
+  function fitCardToByteBudget(card, maxBytes = 28_000) {
+    const budget = Math.max(4096, Number(maxBytes || 28_000));
+    if (Buffer.byteLength(JSON.stringify(card), "utf8") <= budget) return card;
+
+    const elements = Array.isArray(card?.body?.elements) ? card.body.elements : [];
+
+    // Phase 1: shrink secondary collapsible panels (tool details / latex source) first
+    for (const element of elements) {
+      if (element?.tag !== "collapsible_panel" || !Array.isArray(element.elements)) continue;
+      for (const child of element.elements) {
+        if (child?.tag === "markdown" && typeof child.content === "string" && Buffer.byteLength(child.content, "utf8") > 900) {
+          child.content = cardMarkdownContent(truncateCardTextByBytes(child.content, 800));
+        }
+      }
+      if (Buffer.byteLength(JSON.stringify(card), "utf8") <= budget) return card;
+    }
+
+    // Phase 2: drop excess non-summary collapsible panels if still over budget
+    for (let index = elements.length - 1; index >= 0; index -= 1) {
+      if (elements[index]?.tag === "collapsible_panel") {
+        const title = elements[index]?.header?.title?.content || "";
+        if (!title.includes("步骤已完成") && !title.includes("步骤已记录")) {
+          elements.splice(index, 1);
+          if (Buffer.byteLength(JSON.stringify(card), "utf8") <= budget) return card;
+        }
+      }
+    }
+
+    // Phase 3: shrink largest body markdown elements safely with fence closure
+    const mdElements = elements
+      .filter((element) => element?.tag === "markdown" && element.text_size !== "notation" && typeof element.content === "string")
+      .sort((a, b) => Buffer.byteLength(b.content, "utf8") - Buffer.byteLength(a.content, "utf8"));
+    for (const element of mdElements) {
+      const currentTotal = Buffer.byteLength(JSON.stringify(card), "utf8");
+      if (currentTotal <= budget) return card;
+      const excess = currentTotal - budget;
+      const elemBytes = Buffer.byteLength(element.content, "utf8");
+      const targetElemBytes = Math.max(128, elemBytes - excess - 64);
+      element.content = cardMarkdownContent(truncateCardTextByBytes(element.content, targetElemBytes));
+    }
+
+    return card;
   }
 
   function goalRunHeaderMarkdown(state, goal, elapsed) {
@@ -705,7 +752,7 @@ export function createRunCardRenderer(deps = {}) {
         } else if (block.kind === "formula_image") {
           elements.push(formulaImageElement(block));
         } else if (block.content.trim()) {
-          elements.push(markdown(truncateCardText(block.content, 18_000)));
+          elements.push(markdown(truncateCardText(block.content, 18_000), { streaming: false }));
         }
       }
       if ((CONFIG.debugCards || CONFIG.showFinalSteps) && tools.length > 0) {
@@ -739,7 +786,7 @@ export function createRunCardRenderer(deps = {}) {
         continue;
       }
       if (block.content.trim()) {
-        elements.push(markdown(truncateCardText(block.content, 18_000)));
+        elements.push(markdown(truncateCardText(block.content, 18_000), { streaming: !finalized }));
       }
     }
     flushTools();
@@ -783,20 +830,23 @@ export function createRunCardRenderer(deps = {}) {
       },
       elements: [{
         tag: "markdown",
-        content: cardMarkdownContent(`\`\`\`latex\n${truncateCardText(body, 8000)}\n\`\`\``),
+        content: cardMarkdownContent(wrapCodeBlock(truncateCardText(body, 8000), "latex")),
         text_size: "notation",
       }],
     };
   }
 
+  const MAX_FINAL_DETAIL_ERROR_TOOLS = 5;
+
   function renderToolGroup(tools, finalized) {
     const visibleTools = CONFIG.debugCards ? tools : tools.filter(shouldShowToolInCard);
     if (visibleTools.length === 0) return [];
     if (CONFIG.debugCards) {
-      return visibleTools.map((tool) => toolCardPanel(tool, tool.status === "running" || tool.status === "error"));
+      const capped = visibleTools.length > 20 ? visibleTools.slice(-20) : visibleTools;
+      return capped.map((tool) => toolCardPanel(tool, tool.status === "running" || tool.status === "error"));
     }
     if (finalized) {
-      const detailTools = visibleTools.filter((tool) => tool.status === "error");
+      const detailTools = visibleTools.filter((tool) => tool.status === "error").slice(-MAX_FINAL_DETAIL_ERROR_TOOLS);
       return [
         toolSummaryPanel(visibleTools, true),
         ...detailTools.map((tool) => toolCardPanel(tool, true)),
@@ -876,7 +926,9 @@ export function createRunCardRenderer(deps = {}) {
     const omitted = Math.max(0, tools.length - visibleTools.length);
     if (counts.error) {
       lines.push("");
-      lines.push("失败步骤已在下方展开；多数探索命令未命中不一定影响最终结论。");
+      lines.push(counts.error > MAX_FINAL_DETAIL_ERROR_TOOLS
+        ? `失败步骤较多（共 ${counts.error} 个），已在下方展开最近 ${MAX_FINAL_DETAIL_ERROR_TOOLS} 个失败详情；其余已保存在本机日志。`
+        : "失败步骤已在下方展开；多数探索命令未命中不一定影响最终结论。");
     } else {
       lines.push("");
       lines.push("成功步骤已折叠，保留最终结果和必要元信息。");
@@ -922,31 +974,32 @@ export function createRunCardRenderer(deps = {}) {
   function toolHeaderText(tool, includeSummary) {
     const status = tool.status === "done" ? "完成" : tool.status === "error" ? "失败" : "运行中";
     const summary = includeSummary ? summarizeToolInput(tool) : "";
+    const safeTool = escapeInlineMarkdown(displayToolName(tool));
     return summary
-      ? `**${displayToolName(tool)}** · ${status} · ${summary}`
-      : `**${displayToolName(tool)}** · ${status}`;
+      ? `**${safeTool}** · ${status} · ${escapeInlineMarkdown(summary)}`
+      : `**${safeTool}** · ${status}`;
   }
 
   function toolBodyMarkdown(tool, input) {
     if (!CONFIG.debugCards) {
       const summary = summarizeToolInput(tool);
       const visibleOutput = visibleToolOutput(tool);
-      const output = visibleOutput ? `\n\n**输出**\n\`\`\`\n${truncateCardText(visibleOutput, 1200)}\n\`\`\`` : "";
+      const output = visibleOutput ? `\n\n**输出**\n${wrapCodeBlock(truncateCardText(visibleOutput, 1200))}` : "";
       const emptyNote = tool.output ? "\n\n_输出已隐藏，以保持卡片简洁_" : "\n\n_无输出_";
       if (tool.status === "running") {
-        return summary ? `正在执行：\`${summary}\`` : "_正在执行_";
+        return summary ? `正在执行：\`${summary.replace(/`/g, "'")}\`` : "_正在执行_";
       }
       if (tool.status === "error") {
         return tool.output
-          ? `**错误**\n\`\`\`\n${truncateCardText(tool.output, 1200)}\n\`\`\``
+          ? `**错误**\n${wrapCodeBlock(truncateCardText(tool.output, 1200))}`
           : "_执行失败，详情已写入本机日志_";
       }
-      if (summary) return `已执行：\`${summary}\`${output || emptyNote}`;
+      if (summary) return `已执行：\`${summary.replace(/`/g, "'")}\`${output || emptyNote}`;
       return output ? `已完成${output}` : `已完成${emptyNote}`;
     }
 
-    const output = tool.output ? `\n\n**输出**\n\`\`\`\n${truncateCardText(tool.output, 1200)}\n\`\`\`` : "";
-    return input ? `**输入**\n\`\`\`\n${truncateCardText(input, 1200)}\n\`\`\`${output}` : (output || "_运行中_");
+    const output = tool.output ? `\n\n**输出**\n${wrapCodeBlock(truncateCardText(tool.output, 1200))}` : "";
+    return input ? `**输入**\n${wrapCodeBlock(truncateCardText(input, 1200))}${output}` : (output || "_运行中_");
   }
 
   function shouldShowToolInCard(tool) {

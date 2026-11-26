@@ -19,11 +19,12 @@ function createDeduplicatingLarkHarness() {
     idempotencyKey,
     maxReplyChars: 6000,
     delay: async () => {},
-    runTool: async (_cmd, args) => {
+    runTool: async (_cmd, args, options) => {
       const keyIndex = args.indexOf('--idempotency-key');
       const mdIndex = args.indexOf('--markdown');
       const key = keyIndex >= 0 ? args[keyIndex + 1] : '';
-      const markdown = mdIndex >= 0 ? args[mdIndex + 1] : '';
+      const mdArg = mdIndex >= 0 ? args[mdIndex + 1] : '';
+      const markdown = mdArg === '-' ? String(options?.stdin || '') : mdArg;
       const deduplicated = Boolean(key && seenKeys.has(key));
       attempts.push({ key, markdown, deduplicated });
       if (!deduplicated) {
