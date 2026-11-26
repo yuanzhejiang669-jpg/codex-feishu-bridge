@@ -65,7 +65,7 @@ test("v0.10.22 (P0-1): indented, quoted, same-line list, tilde, and nested code 
   ].join("\n");
 
   const out = cardMarkdownContent(input);
-  assert.match(out, /\n\n```powershell\nDisable-ScheduledTask -TaskPath '\\' -TaskName 'WpsUpdate'\nif \(\$true\) \{\n  Set-Service -Name 'LenovoPcManagerService' -StartupType Disabled\n\}\n```\n\n3\. 重启电脑/);
+  assert.match(out, /\n\n```powershell\nDisable-ScheduledTask -TaskPath '\\' -TaskName 'WpsUpdate'\nif \(\$true\) \{\n  Set-Service -Name 'LenovoPcManagerService' -StartupType Disabled\n\}\n```\n\n\*\*3\.\*\* 重启电脑/);
   assert.match(out, /\n\n```bash\necho hi\n```\n\n/);
   assert.match(out, /-\n\n```python\nprint\('tilde inside list'\)\n```/);
 });
@@ -129,8 +129,11 @@ test("v0.10.22 (P0-3): lark-cli sendText, sendMarkdown, and replyFallback use st
   assert.equal(calls[0].args[calls[0].args.indexOf("--text") + 1], "-");
   assert.equal(calls[0].stdin, "@echo off\n- item");
 
-  assert.equal(calls[1].args[calls[1].args.indexOf("--markdown") + 1], "-");
-  assert.match(calls[1].stdin, /^@decorator\n1\. step\n\n```sh\necho hi\n```$/);
+  assert.equal(calls[1].args[calls[1].args.indexOf("--msg-type") + 1], "interactive");
+  assert.equal(calls[1].args[calls[1].args.indexOf("--content") + 1], "-");
+  const cardPayload = JSON.parse(calls[1].stdin);
+  assert.equal(cardPayload.schema, "2.0");
+  assert.match(cardPayload.body.elements[0].content, /^@decorator\n1\. step\n\n```sh\necho hi\n```$/);
 
   assert.equal(calls[2].args[calls[2].args.indexOf("--text") + 1], "-");
   assert.equal(calls[2].stdin, "-");
@@ -193,7 +196,7 @@ test("v0.10.22 (P1-7 & P1-8): tables are unindented & padded, Setext --- is guar
 
   const out = cardMarkdownContent(input);
   assert.match(out, /\n\n\| 项目 \| 状态 \|\n\|---\|---\|\n\| 内存 \| 已释放 \|\n\n/);
-  assert.match(out, /2\. 接着看这段总结\n\n---/);
+  assert.match(out, /\*\*2\.\*\* 接着看这段总结\n\n---/);
   assert.match(out, /`C:\\Users\\a\\docs\\report_final\.docx`/);
   assert.match(out, /`架构说明` \(`C:\\Users\\a\\docs\\arch_note\.md`\)/);
   assert.match(out, /`\[图片: 预览图\] \(C:\\Users\\a\\out\\preview_1\.png\)`/);

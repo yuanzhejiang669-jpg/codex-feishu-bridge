@@ -48,6 +48,7 @@ function parseFenceOpenLine(rawLine) {
       listPrefix: "",
       blockquoteDepth,
       stripSpaces: spaces.length,
+      hoisted: blockquoteDepth > 0 || spaces.length > 0,
       markerChar: marker[0],
       markerLen: marker.length,
       info: info.trim(),
@@ -64,6 +65,7 @@ function parseFenceOpenLine(rawLine) {
       listPrefix: afterList[1].trimEnd(),
       blockquoteDepth: 0,
       stripSpaces: afterList[1].length,
+      hoisted: true,
       markerChar: marker[0],
       markerLen: marker.length,
       info: info.trim(),
@@ -119,12 +121,27 @@ function decodeFileUri(uri) {
   return pathname;
 }
 
+// Feishu Card 2.0 `![alt](...)` ONLY accepts uploaded Feishu image keys (`img_...`);
+// even external `https://...` URLs fail CardKit validation with code 200570.
 function isFeishuNativeImageTarget(target) {
   const trimmed = String(target || "").trim();
-  if (!trimmed) return false;
-  if (/^https?:\/\//i.test(trimmed)) return true;
-  if (/^img_[A-Za-z0-9_-]+$/.test(trimmed)) return true;
-  return false;
+  return /^img_[A-Za-z0-9_-]+$/.test(trimmed);
+}
+
+function fixBoldCjkFlanking(segment) {
+  if (!segment.includes("**")) return segment;
+  return segment.replace(/\*\*([^\r\n*]+?)\*\*/g, (full, inner, offset, source) => {
+    if (!inner || /^\s|\s$/.test(inner)) return full;
+    const prev = offset > 0 ? source[offset - 1] : "";
+    const next = offset + full.length < source.length ? source[offset + full.length] : "";
+    const chars = [...inner];
+    const firstInner = chars[0] || "";
+    const lastInner = chars[chars.length - 1] || "";
+    const needLeadSpace = Boolean(prev && /[\p{L}\p{N}]/u.test(prev) && /[\p{P}\p{S}]/u.test(firstInner));
+    const needTrailSpace = Boolean(next && /[\p{L}\p{N}]/u.test(next) && /[\p{P}\p{S}]/u.test(lastInner));
+    if (!needLeadSpace && !needTrailSpace) return full;
+    return `${needLeadSpace ? " " : ""}${full}${needTrailSpace ? " " : ""}`;
+  });
 }
 
 function escapeNonWhitelistAngleTags(segment) {
@@ -142,12 +159,18 @@ function escapeNonWhitelistAngleTags(segment) {
 function transformPlainProseSegment(segment) {
   if (!segment) return "";
 
-  // 1) Local / non-Feishu Markdown images: `![alt](C:\foo.png)` -> safe copyable inline code label
+  // 1) Non-Feishu Markdown images:
+  //    - `img_xxx`: keep native Feishu image syntax
+  //    - `https?://...`: convert to clickable link `[图片: alt](url)` so CardKit never fails with 200570
+  //    - local/file/other targets: convert to readable backtick text
   let out = segment.replace(/!\[([^\]\r\n]*)\]\(([^)\r\n]+)\)/g, (full, alt, target) => {
     const cleanTarget = String(target || "").trim();
     if (isFeishuNativeImageTarget(cleanTarget)) return full;
-    const readableTarget = /^file:\/\//i.test(cleanTarget) ? decodeFileUri(cleanTarget) : cleanTarget;
     const label = String(alt || "").trim();
+    if (/^https?:\/\//i.test(cleanTarget)) {
+      return `[${label ? `图片: ${label}` : "图片"}](${cleanTarget})`;
+    }
+    const readableTarget = /^file:\/\//i.test(cleanTarget) ? decodeFileUri(cleanTarget) : cleanTarget;
     return label ? `\`[图片: ${label}] (${readableTarget})\`` : `\`[图片] (${readableTarget})\``;
   });
 
@@ -161,13 +184,22 @@ function transformPlainProseSegment(segment) {
     return `\`${cleanLabel}\` (\`${decoded}\`)`;
   });
 
-  // 3) Escape non-whitelist `<tag>` / `<模型ID>` / `List<T>` so Feishu won't drop or reject them
+  // 3) Fix CommonMark flanking delimiter failures when `**...**` starts/ends with punctuation next to CJK/letters
+  out = fixBoldCjkFlanking(out);
+
+  // 4) Escape non-whitelist `<tag>` / `<模型ID>` / `List<T>` so Feishu won't drop or reject them
   return escapeNonWhitelistAngleTags(out);
 }
 
 function transformProsePreservingInlineCode(line) {
   const text = String(line || "");
-  if (!text.includes("`") && !text.includes("<") && !text.includes("![") && !/file:\/\/\//i.test(text)) {
+  if (
+    !text.includes("`")
+    && !text.includes("<")
+    && !text.includes("![")
+    && !text.includes("**")
+    && !/file:\/\/\//i.test(text)
+  ) {
     return text;
   }
 
@@ -188,7 +220,7 @@ function transformProsePreservingInlineCode(line) {
       continue;
     }
     result += transformPlainProseSegment(text.slice(cursor, index));
-    // Preserve inline code verbatim (fixes backtick stripping & protects `_`, `*`, `\`, `<...>`)
+    // Preserve inline code verbatim (protects `_`, `*`, `\`, `<...>`)
     result += text.slice(index, closeAt + run);
     index = closeAt + run;
     cursor = index;
@@ -213,32 +245,74 @@ function looksLikeTableRow(line) {
   return Boolean(expanded) && expanded.includes("|");
 }
 
-function normalizeTablesAndDividers(lines) {
-  // Runs on already fence-normalized lines (top-level code fences are unindented at col 0).
-  const output = [];
+export function containsMarkdownTable(text) {
+  const lines = String(text || "").split(/\r?\n/);
   let inFence = null;
-
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i];
     if (inFence) {
-      output.push(line);
       if (isFenceCloseLine(line, inFence)) inFence = null;
       continue;
     }
     const open = parseFenceOpenLine(line);
     if (open) {
       inFence = open;
+      continue;
+    }
+    if (i + 1 < lines.length && looksLikeTableRow(line) && isTableDelimiterLine(lines[i + 1])) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function hasFencedCodeBlock(text) {
+  const lines = String(text || "").split(/\r?\n/);
+  for (const line of lines) {
+    if (parseFenceOpenLine(line)) return true;
+  }
+  return false;
+}
+
+function normalizeTablesDividersAndLists(entries) {
+  // Each entry is { text: string, hoistedBlock?: boolean }.
+  const output = [];
+  let inFence = null;
+  let inOrderedList = false;
+  let orderedListInterrupted = false;
+  let sawBlankAfterList = false;
+
+  for (let i = 0; i < entries.length; i += 1) {
+    const entry = entries[i];
+    const line = entry.text;
+
+    if (inFence) {
       output.push(line);
+      if (isFenceCloseLine(line, inFence)) inFence = null;
+      continue;
+    }
+
+    const open = parseFenceOpenLine(line);
+    if (open) {
+      if (inOrderedList && entry.hoistedBlock) {
+        orderedListInterrupted = true;
+      } else if (inOrderedList) {
+        orderedListInterrupted = true;
+      }
+      inFence = open;
+      output.push(line);
+      sawBlankAfterList = false;
       continue;
     }
 
     // Detect GFM tables (possibly indented inside a list or missing blank lines)
-    if (i + 1 < lines.length && looksLikeTableRow(line) && isTableDelimiterLine(lines[i + 1])) {
+    if (i + 1 < entries.length && looksLikeTableRow(line) && isTableDelimiterLine(entries[i + 1].text)) {
       let end = i + 1;
-      while (end + 1 < lines.length && looksLikeTableRow(lines[end + 1]) && !parseFenceOpenLine(lines[end + 1])) {
+      while (end + 1 < entries.length && looksLikeTableRow(entries[end + 1].text) && !parseFenceOpenLine(entries[end + 1].text)) {
         end += 1;
       }
-      const tableLines = lines.slice(i, end + 1);
+      if (inOrderedList) orderedListInterrupted = true;
+      const tableLines = entries.slice(i, end + 1).map((item) => item.text);
       const cleanTableLines = tableLines.map((row) =>
         expandLeadingTabs(row).replace(/^[ ]*(?:>[ ]?)+/, "").replace(/^[ ]+/, "")
       );
@@ -246,10 +320,18 @@ function normalizeTablesAndDividers(lines) {
         output.push("");
       }
       output.push(...cleanTableLines.map((row) => transformProsePreservingInlineCode(row)));
-      if (end + 1 < lines.length && lines[end + 1].trim() !== "") {
+      if (end + 1 < entries.length && entries[end + 1].text.trim() !== "") {
         output.push("");
       }
       i = end;
+      sawBlankAfterList = false;
+      continue;
+    }
+
+    // Blank line
+    if (line.trim() === "") {
+      output.push(line);
+      if (inOrderedList) sawBlankAfterList = true;
       continue;
     }
 
@@ -260,7 +342,49 @@ function normalizeTablesAndDividers(lines) {
         output.push("");
       }
       output.push(line.trim());
+      inOrderedList = false;
+      orderedListInterrupted = false;
+      sawBlankAfterList = false;
       continue;
+    }
+
+    // Headings reset ordered list tracking
+    if (/^[ \t]*#{1,6}[ \t]+/.test(line)) {
+      inOrderedList = false;
+      orderedListInterrupted = false;
+      sawBlankAfterList = false;
+      output.push(transformProsePreservingInlineCode(line));
+      continue;
+    }
+
+    // Top-level ordered list item: lock numbering as `**N.** ` if a hoisted fence/table broke list continuity
+    const orderedMatch = line.match(/^([ ]{0,1})(\d{1,9})\.([ \t]+)(.*)$/);
+    if (orderedMatch) {
+      const lead = orderedMatch[1];
+      const num = Number(orderedMatch[2]);
+      const body = transformProsePreservingInlineCode(orderedMatch[4]);
+      if (num === 1) {
+        inOrderedList = true;
+        orderedListInterrupted = false;
+        sawBlankAfterList = false;
+        output.push(`${lead}1.${orderedMatch[3]}${body}`);
+      } else if (orderedListInterrupted && num > 1) {
+        inOrderedList = true;
+        sawBlankAfterList = false;
+        output.push(`${lead}**${num}.** ${body}`);
+      } else {
+        inOrderedList = true;
+        sawBlankAfterList = false;
+        output.push(`${lead}${num}.${orderedMatch[3]}${body}`);
+      }
+      continue;
+    }
+
+    // Non-indented prose paragraph after a blank line exits ordered list tracking
+    if (inOrderedList && sawBlankAfterList && !/^[ \t]+/.test(line) && !/^[ \t]*[-+*][ \t]+/.test(line)) {
+      inOrderedList = false;
+      orderedListInterrupted = false;
+      sawBlankAfterList = false;
     }
 
     output.push(transformProsePreservingInlineCode(line));
@@ -282,12 +406,14 @@ export function cardMarkdownContent(content, _options = {}) {
       ? "~".repeat(Math.max(3, fence.markerLen))
       : "`".repeat(Math.max(3, fence.markerLen, maxInner + 1));
 
-    if (fenceNormalized.length > 0 && fenceNormalized[fenceNormalized.length - 1].trim() !== "") {
-      fenceNormalized.push("");
+    if (fenceNormalized.length > 0 && fenceNormalized[fenceNormalized.length - 1].text.trim() !== "") {
+      fenceNormalized.push({ text: "" });
     }
-    fenceNormalized.push(`${outFence}${fence.info}`);
-    fenceNormalized.push(...fence.lines);
-    fenceNormalized.push(outFence);
+    fenceNormalized.push({ text: `${outFence}${fence.info}`, hoistedBlock: fence.hoisted });
+    for (const innerLine of fence.lines) {
+      fenceNormalized.push({ text: innerLine, hoistedBlock: fence.hoisted });
+    }
+    fenceNormalized.push({ text: outFence, hoistedBlock: fence.hoisted });
   };
 
   for (let i = 0; i < lines.length; i += 1) {
@@ -297,7 +423,7 @@ export function cardMarkdownContent(content, _options = {}) {
         emitFenceBlock(activeFence);
         activeFence = null;
         if (i + 1 < lines.length && lines[i + 1].trim() !== "") {
-          fenceNormalized.push("");
+          fenceNormalized.push({ text: "" });
         }
       } else {
         activeFence.lines.push(stripIndentFromLine(line, activeFence.stripSpaces, activeFence.blockquoteDepth));
@@ -308,7 +434,7 @@ export function cardMarkdownContent(content, _options = {}) {
     const open = parseFenceOpenLine(line);
     if (open) {
       if (open.listPrefix) {
-        fenceNormalized.push(open.listPrefix);
+        fenceNormalized.push({ text: open.listPrefix });
       }
       activeFence = {
         ...open,
@@ -317,14 +443,80 @@ export function cardMarkdownContent(content, _options = {}) {
       continue;
     }
 
-    fenceNormalized.push(line);
+    fenceNormalized.push({ text: line });
   }
 
   if (activeFence) {
     emitFenceBlock(activeFence);
   }
 
-  return normalizeTablesAndDividers(fenceNormalized).join("\n");
+  return normalizeTablesDividersAndLists(fenceNormalized).join("\n");
+}
+
+export function splitCardMarkdownSegments(normalizedText, { maxTablesPerElement = 3 } = {}) {
+  const text = String(normalizedText ?? "");
+  if (!text.trim()) return [];
+  const cap = Math.max(1, Number(maxTablesPerElement || 3));
+  const lines = text.split("\n");
+  const segments = [];
+  let buffer = [];
+  let tableCount = 0;
+  let inFence = null;
+
+  const flush = () => {
+    const joined = buffer.join("\n").trim();
+    if (joined) segments.push(joined);
+    buffer = [];
+    tableCount = 0;
+  };
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    if (inFence) {
+      buffer.push(line);
+      if (isFenceCloseLine(line, inFence)) inFence = null;
+      continue;
+    }
+    const open = parseFenceOpenLine(line);
+    if (open) {
+      inFence = open;
+      buffer.push(line);
+      continue;
+    }
+    if (i + 1 < lines.length && looksLikeTableRow(line) && isTableDelimiterLine(lines[i + 1])) {
+      if (tableCount >= cap && buffer.some((row) => row.trim() !== "")) {
+        const carry = [];
+        while (buffer.length > 0 && buffer[buffer.length - 1].trim() === "") {
+          carry.unshift(buffer.pop());
+        }
+        if (buffer.length > 0 && /^[ \t]*#{1,6}[ \t]+/.test(buffer[buffer.length - 1])) {
+          carry.unshift(buffer.pop());
+        } else {
+          buffer.push(...carry);
+          carry.length = 0;
+        }
+        flush();
+        if (carry.length > 0) buffer.push(...carry);
+      }
+      tableCount += 1;
+      let end = i + 1;
+      while (end + 1 < lines.length && looksLikeTableRow(lines[end + 1]) && !parseFenceOpenLine(lines[end + 1])) {
+        end += 1;
+      }
+      buffer.push(...lines.slice(i, end + 1));
+      i = end;
+      continue;
+    }
+    buffer.push(line);
+  }
+  flush();
+  return segments.length ? segments : [text];
+}
+
+export function markdownElements(content, options = {}) {
+  const normalized = cardMarkdownContent(content, options);
+  const segments = splitCardMarkdownSegments(normalized, options);
+  return segments.map((segment) => ({ tag: "markdown", content: segment }));
 }
 
 function fenceStateUpTo(lines) {
@@ -361,13 +553,15 @@ export function truncateCardText(text, max) {
   return `${sliced}${closer}\n\n...(已截断)`;
 }
 
-export function truncateCardTextByBytes(text, maxBytes, suffix = "\n\n...(内容过长已截断)") {
+export function truncateWithOverflowByBytes(text, maxBytes, suffix = "\n\n...(当前卡片已达体积上限，剩余内容续发在下方)") {
   const value = String(text ?? "");
-  const limit = Math.max(64, Number(maxBytes || 0));
-  if (Buffer.byteLength(value, "utf8") <= limit) return value;
+  const limit = Math.max(96, Number(maxBytes || 0));
+  if (Buffer.byteLength(value, "utf8") <= limit) {
+    return { text: value, overflow: "", truncated: false };
+  }
 
   const suffixBytes = Buffer.byteLength(suffix, "utf8");
-  const budget = Math.max(32, limit - suffixBytes - 16);
+  const budget = Math.max(32, limit - suffixBytes - 24);
 
   let low = 0;
   let high = value.length;
@@ -381,17 +575,36 @@ export function truncateCardTextByBytes(text, maxBytes, suffix = "\n\n...(内容
     }
   }
 
-  let cutText = sliceSafeUtf16(value, low);
-  const lastNewline = cutText.lastIndexOf("\n");
-  if (lastNewline > cutText.length * 0.6) {
-    cutText = cutText.slice(0, lastNewline);
+  let cutIndex = low;
+  let rawHead = sliceSafeUtf16(value, cutIndex);
+  const lastNewline = rawHead.lastIndexOf("\n");
+  if (lastNewline > rawHead.length * 0.6) {
+    cutIndex = lastNewline;
+    rawHead = value.slice(0, cutIndex);
   }
-  cutText = cutText.trimEnd();
-  const openFence = fenceStateUpTo(cutText.split(/\r?\n/));
-  const closer = openFence ? `\n${openFence.markerChar.repeat(openFence.markerLen)}` : "";
-  const combined = `${cutText}${closer}${suffix}`;
-  if (Buffer.byteLength(combined, "utf8") <= limit) return combined;
-  return `${sliceSafeUtf16(cutText, Math.max(0, cutText.length - 16)).trimEnd()}${closer}${suffix}`;
+  const headTrimmed = rawHead.trimEnd();
+  const rawTail = value.slice(cutIndex).trimStart();
+
+  const openFence = fenceStateUpTo(headTrimmed.split(/\r?\n/));
+  const fenceLine = openFence ? openFence.markerChar.repeat(openFence.markerLen) : "";
+  const closer = openFence ? `\n${fenceLine}` : "";
+  const reopen = openFence && rawTail ? `${fenceLine}${openFence.info}\n` : "";
+
+  let head = `${headTrimmed}${closer}${suffix}`;
+  if (Buffer.byteLength(head, "utf8") > limit) {
+    const trimmedShorter = sliceSafeUtf16(headTrimmed, Math.max(0, headTrimmed.length - 16)).trimEnd();
+    head = `${trimmedShorter}${closer}${suffix}`;
+  }
+
+  return {
+    text: head,
+    overflow: rawTail ? `${reopen}${rawTail}` : "",
+    truncated: true,
+  };
+}
+
+export function truncateCardTextByBytes(text, maxBytes, suffix = "\n\n...(内容过长已截断)") {
+  return truncateWithOverflowByBytes(text, maxBytes, suffix).text;
 }
 
 export function escapeInlineMarkdown(text) {

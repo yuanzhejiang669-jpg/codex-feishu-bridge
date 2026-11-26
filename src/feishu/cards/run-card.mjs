@@ -4,9 +4,11 @@ import {
   cardMarkdownContent,
   escapeInlineMarkdown,
   markdown,
+  markdownElements,
   noteMd,
   truncateCardText,
   truncateCardTextByBytes,
+  truncateWithOverflowByBytes,
   wrapCodeBlock,
 } from "./primitives.mjs";
 import {
@@ -589,6 +591,7 @@ export function createRunCardRenderer(deps = {}) {
       elements.push(noteMd(renderDoneMeta(state)));
     }
 
+    state.cardOverflowText = "";
     return fitCardToByteBudget({
       schema: "2.0",
       config: {
@@ -600,10 +603,33 @@ export function createRunCardRenderer(deps = {}) {
         template: state.terminal === "error" ? "red" : state.terminal === "running" ? "blue" : "default",
       },
       body: { elements },
-    }, Number(CONFIG?.maxCardJsonBytes || 28_000));
+    }, Number(CONFIG?.maxCardJsonBytes || 28_000), {
+      captureOverflow: state.terminal === "done",
+      onOverflow: (overflow) => { state.cardOverflowText = overflow; },
+    });
   }
 
-  function fitCardToByteBudget(card, maxBytes = 28_000) {
+  function renderSupersededCard(state) {
+    const engine = state?.meta?.engine === "antigravity" ? "Antigravity" : state?.meta?.engine === "claude" ? "Claude Code" : "Codex";
+    return {
+      schema: "2.0",
+      config: {
+        streaming_mode: false,
+        summary: { content: "完整回复已送达下方消息" },
+      },
+      header: {
+        title: { tag: "plain_text", content: `${engine} 已送达` },
+        template: "default",
+      },
+      body: {
+        elements: [
+          noteMd("完整回复已通过下方消息送达，此占位卡片已自动收起。"),
+        ],
+      },
+    };
+  }
+
+  function fitCardToByteBudget(card, maxBytes = 28_000, { captureOverflow = false, onOverflow = null } = {}) {
     const budget = Math.max(4096, Number(maxBytes || 28_000));
     if (Buffer.byteLength(JSON.stringify(card), "utf8") <= budget) return card;
 
@@ -631,17 +657,51 @@ export function createRunCardRenderer(deps = {}) {
       }
     }
 
-    // Phase 3: shrink largest body markdown elements safely with fence closure
-    const mdElements = elements
-      .filter((element) => element?.tag === "markdown" && element.text_size !== "notation" && typeof element.content === "string")
-      .sort((a, b) => Buffer.byteLength(b.content, "utf8") - Buffer.byteLength(a.content, "utf8"));
-    for (const element of mdElements) {
+    // Phase 3: trim body markdown elements in document order while capturing any overflow tail for continuation
+    const overflowParts = [];
+    const suffix = captureOverflow
+      ? "\n\n...(当前卡片已达体积上限，剩余内容续发在下方)"
+      : "\n\n...(内容过长已截断)";
+
+    const bodyMdIndices = [];
+    for (let idx = 0; idx < elements.length; idx += 1) {
+      const element = elements[idx];
+      if (element?.tag === "markdown" && element.text_size !== "notation" && typeof element.content === "string") {
+        bodyMdIndices.push(idx);
+      }
+    }
+
+    // Drop trailing body markdown segments first if multiple segments exist (e.g. multi-table split)
+    while (bodyMdIndices.length > 1 && Buffer.byteLength(JSON.stringify(card), "utf8") > budget) {
+      const lastIdx = bodyMdIndices.pop();
+      const [removed] = elements.splice(lastIdx, 1);
+      if (captureOverflow && removed?.content?.trim()) {
+        overflowParts.unshift(removed.content.trim());
+      }
+    }
+
+    // Shrink remaining body markdown element(s) cleanly with fence closure + overflow capture
+    for (let i = bodyMdIndices.length - 1; i >= 0; i -= 1) {
+      const element = elements[bodyMdIndices[i]];
       const currentTotal = Buffer.byteLength(JSON.stringify(card), "utf8");
-      if (currentTotal <= budget) return card;
+      if (currentTotal <= budget) break;
       const excess = currentTotal - budget;
       const elemBytes = Buffer.byteLength(element.content, "utf8");
-      const targetElemBytes = Math.max(128, elemBytes - excess - 64);
-      element.content = cardMarkdownContent(truncateCardTextByBytes(element.content, targetElemBytes));
+      const targetElemBytes = Math.max(128, elemBytes - excess - 128);
+      const cut = truncateWithOverflowByBytes(element.content, targetElemBytes, suffix);
+      element.content = cardMarkdownContent(cut.text);
+      if (captureOverflow && cut.overflow) {
+        overflowParts.unshift(cut.overflow);
+      }
+    }
+
+    // If trailing segments were dropped without modifying the last kept segment, append a clear pointer note
+    if (captureOverflow && overflowParts.length > 0 && bodyMdIndices.length > 0) {
+      const lastKept = elements[bodyMdIndices[bodyMdIndices.length - 1]];
+      if (lastKept && !lastKept.content.includes("剩余内容续发在下方")) {
+        lastKept.content = `${lastKept.content}${suffix}`;
+      }
+      onOverflow?.(overflowParts.join("\n\n"));
     }
 
     return card;
@@ -752,7 +812,7 @@ export function createRunCardRenderer(deps = {}) {
         } else if (block.kind === "formula_image") {
           elements.push(formulaImageElement(block));
         } else if (block.content.trim()) {
-          elements.push(markdown(truncateCardText(block.content, 18_000), { streaming: false }));
+          elements.push(...markdownElements(block.content, { streaming: false }));
         }
       }
       if ((CONFIG.debugCards || CONFIG.showFinalSteps) && tools.length > 0) {
@@ -786,7 +846,8 @@ export function createRunCardRenderer(deps = {}) {
         continue;
       }
       if (block.content.trim()) {
-        elements.push(markdown(truncateCardText(block.content, 18_000), { streaming: !finalized }));
+        const body = finalized ? block.content : truncateCardText(block.content, 18_000);
+        elements.push(...markdownElements(body, { streaming: !finalized }));
       }
     }
     flushTools();
@@ -1488,6 +1549,7 @@ export function createRunCardRenderer(deps = {}) {
     shouldRecoverCodexRun,
     recoveryEventFromFailure,
     renderRunCard,
+    renderSupersededCard,
     goalRunHeaderMarkdown,
     staleCardUpdateSequence,
     renderStaleRunCard,

@@ -4,7 +4,12 @@ import path from "node:path";
 
 import { parseJsonLoose } from "../utils/json.mjs";
 import { buildLarkCliEnv } from "../config/env.mjs";
-import { cardMarkdownContent } from "./cards/primitives.mjs";
+import {
+  cardMarkdownContent,
+  containsMarkdownTable,
+  hasFencedCodeBlock,
+  markdownElements,
+} from "./cards/primitives.mjs";
 
 export function createLarkClient({
   larkCli,
@@ -64,6 +69,53 @@ export function createLarkClient({
     const normalized = cardMarkdownContent(markdown);
     const chunks = splitText(normalized, maxReplyChars);
     for (let i = 0; i < chunks.length; i += 1) {
+      const chunk = chunks[i];
+      const preferCard = containsMarkdownTable(chunk) || hasFencedCodeBlock(chunk);
+      if (preferCard) {
+        const cardPayload = JSON.stringify({
+          schema: "2.0",
+          config: {},
+          body: { elements: markdownElements(chunk) },
+        });
+        if (Buffer.byteLength(cardPayload, "utf8") <= 28_000) {
+          const cardResult = await runLark([
+            "im",
+            "+messages-send",
+            "--as",
+            "bot",
+            "--chat-id",
+            chatId,
+            "--msg-type",
+            "interactive",
+            "--content",
+            "-",
+            "--idempotency-key",
+            idempotencyKey(baseId, `${idempotencySuffix}-md-${i}`),
+          ], { stdin: cardPayload });
+          if (cardResult.code === 0) continue;
+          log("WARN", "static Card 2.0 markdown send failed; falling back to post markdown", {
+            chatId,
+            chunk: i,
+            error: String(cardResult.stderr || cardResult.stdout || "").slice(0, 500),
+          });
+          const fallbackResult = await runLark([
+            "im",
+            "+messages-send",
+            "--as",
+            "bot",
+            "--chat-id",
+            chatId,
+            "--markdown",
+            "-",
+            "--idempotency-key",
+            idempotencyKey(baseId, `${idempotencySuffix}-md-fb-${i}`),
+          ], { stdin: chunk });
+          if (fallbackResult.code !== 0) {
+            throw new Error(`lark-cli markdown send failed (${fallbackResult.code}): ${fallbackResult.stderr || fallbackResult.stdout}`);
+          }
+          continue;
+        }
+      }
       const result = await runLark([
         "im",
         "+messages-send",
@@ -75,8 +127,25 @@ export function createLarkClient({
         "-",
         "--idempotency-key",
         idempotencyKey(baseId, `${idempotencySuffix}-md-${i}`),
-      ], { stdin: chunks[i] });
+      ], { stdin: chunk });
       if (result.code !== 0) throw new Error(`lark-cli markdown send failed (${result.code}): ${result.stderr || result.stdout}`);
+    }
+  }
+
+  async function recallMessage(messageId) {
+    const id = String(messageId || "").trim();
+    if (!id) return false;
+    try {
+      const result = await runLark([
+        "api",
+        "DELETE",
+        `/open-apis/im/v1/messages/${encodeURIComponent(id)}`,
+        "--as",
+        "bot",
+      ], { timeoutMs: 10_000, attempts: 1 });
+      return result.code === 0;
+    } catch {
+      return false;
     }
   }
 
@@ -251,6 +320,7 @@ export function createLarkClient({
     larkJson,
     larkJsonWithData,
     parseJsonLoose,
+    recallMessage,
     replyFallback,
     resolveUserUnionId,
     runLark,
@@ -263,7 +333,7 @@ export function createLarkClient({
 export function isTransientLarkError(result) {
   const text = `${result?.stderr || ""}\n${result?.stdout || ""}`;
   if (/\bHTTP\s*4(?:00|01|03|04|09|22)\b/i.test(text)) return false;
-  return /connectex|ECONN(?:RESET|REFUSED|ABORTED)|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|TLS|\b(?:unexpected\s+)?EOF\b|i\/o timeout|connection reset|broken pipe|HTTP\s*(?:429|50[234])|tenant_access_token|cardid is invalid|ErrCode:\s*11310/i.test(text);
+  return /connectex|ECONN(?:RESET|REFUSED|ABORTED)|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|TLS|\b(?:unexpected\s+)?EOF\b|i\/o timeout|connection reset|broken pipe|HTTP\s*(?:429|50[234])|tenant_access_token|cardid is invalid|ErrCode:\s*11310|"subtype"\s*:\s*"server_error"|"retryable"\s*:\s*true|"code"\s*:\s*2200\b/i.test(text);
 }
 
 function findNestedValue(value, key) {

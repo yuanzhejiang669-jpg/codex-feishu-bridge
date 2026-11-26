@@ -385,6 +385,7 @@ const larkClient = createLarkClient({
 const {
   larkJson,
   larkJsonWithData,
+  recallMessage,
   replyFallback,
   resolveUserUnionId,
   runLark,
@@ -720,7 +721,7 @@ const runCard = createRunCardRenderer(bridgeRuntime);
 Object.assign(bridgeRuntime, runCard);
 const {
   createRunState, appendRunText, reduceCodexJsonEvent, markRunError, markRunInterrupted,
-  ensureRunDone, renderRunCard, repairStaleActiveRunsOnStartup,
+  ensureRunDone, renderRunCard, renderSupersededCard, repairStaleActiveRunsOnStartup,
 } = runCard;
 
 const appServerProtocol = createAppServerProtocol({
@@ -1272,9 +1273,14 @@ async function handleEvent(rawEvent, dispatchControl = {}) {
           cardId: opened.cardId,
           cardOpenMs: Date.now() - cardOpenStartedAt,
         });
-        try {
-          await opened.flush(renderRunCard(latestCardState));
-        } catch {}
+        const recalled = opened.messageId
+          ? await recallMessage(opened.messageId).catch(() => false)
+          : false;
+        if (!recalled) {
+          try {
+            await opened.flush(renderSupersededCard(latestCardState));
+          } catch {}
+        }
         opened.close();
         return null;
       }
@@ -1327,6 +1333,13 @@ async function handleEvent(rawEvent, dispatchControl = {}) {
         chatId,
         formatAnswer(result, session),
         "answer",
+        messageId,
+      );
+    } else if (latestCardState?.cardOverflowText) {
+      await sendMarkdown(
+        chatId,
+        `**${ENGINE_LABEL} 续发内容**\n\n${latestCardState.cardOverflowText}`,
+        "answer-overflow",
         messageId,
       );
     }

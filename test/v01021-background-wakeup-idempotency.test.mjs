@@ -22,9 +22,21 @@ function createDeduplicatingLarkHarness() {
     runTool: async (_cmd, args, options) => {
       const keyIndex = args.indexOf('--idempotency-key');
       const mdIndex = args.indexOf('--markdown');
+      const contentIndex = args.indexOf('--content');
       const key = keyIndex >= 0 ? args[keyIndex + 1] : '';
-      const mdArg = mdIndex >= 0 ? args[mdIndex + 1] : '';
-      const markdown = mdArg === '-' ? String(options?.stdin || '') : mdArg;
+      let markdown = '';
+      if (mdIndex >= 0) {
+        const mdArg = args[mdIndex + 1];
+        markdown = mdArg === '-' ? String(options?.stdin || '') : mdArg;
+      } else if (contentIndex >= 0) {
+        const raw = args[contentIndex + 1] === '-' ? String(options?.stdin || '') : args[contentIndex + 1];
+        try {
+          const card = JSON.parse(raw);
+          markdown = (card?.body?.elements || []).map((e) => e.content || '').join('\n\n');
+        } catch {
+          markdown = raw;
+        }
+      }
       const deduplicated = Boolean(key && seenKeys.has(key));
       attempts.push({ key, markdown, deduplicated });
       if (!deduplicated) {
