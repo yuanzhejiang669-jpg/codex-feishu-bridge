@@ -29,8 +29,8 @@ import {
 const { readCatalog, readJson, atomicJson, readEngineDefaults, writeEngineDefaults, selectProvider, assertOfficialAccount, EFFORTS, NATIVE_MODES } = configuration;
 const EFFORT_ORDER = ['low', 'medium', 'high', 'xhigh', 'max'];
 const EFFORT_SUFFIX_RE = /-(low|medium|high|xhigh|max)$/i;
-const ANTIGRAVITY_RESULT_ERROR_RE = /^\s*⚠\s*(?:agent executor error:|UNAUTHENTICATED\b|PERMISSION_DENIED\b|RESOURCE_EXHAUSTED\b|INTERNAL\b|UNAVAILABLE\b|DEADLINE_EXCEEDED\b|INVALID_ARGUMENT\b|FAILED_PRECONDITION\b|CANCELLED\b|UNKNOWN\b|ABORTED\b|DATA_LOSS\b|[^\n]{0,80}\(code\s*(?:4\d\d|5\d\d)\))/iu;
-const ANTIGRAVITY_TRAILING_ERROR_LINE_RE = /^\s*⚠\s*(?:agent executor error:|(?:UNAUTHENTICATED|PERMISSION_DENIED|RESOURCE_EXHAUSTED|INTERNAL|UNAVAILABLE|DEADLINE_EXCEEDED|INVALID_ARGUMENT|FAILED_PRECONDITION)\s*(?:\(code\s*(?:4\d\d|5\d\d)\))?\s*:)/iu;
+const ANTIGRAVITY_RESULT_ERROR_RE = /^\s*⚠\uFE0F?\s*(?:agent executor error:|UNAUTHENTICATED\b|PERMISSION_DENIED\b|RESOURCE_EXHAUSTED\b|INTERNAL\b|UNAVAILABLE\b|DEADLINE_EXCEEDED\b|INVALID_ARGUMENT\b|FAILED_PRECONDITION\b|CANCELLED\b|UNKNOWN\b|ABORTED\b|DATA_LOSS\b|[^\n]{0,80}\(code\s*(?:4\d\d|5\d\d)\))/iu;
+const ANTIGRAVITY_TRAILING_ERROR_LINE_RE = /^\s*⚠\uFE0F?\s*(?:agent executor error:|(?:UNAUTHENTICATED|PERMISSION_DENIED|RESOURCE_EXHAUSTED|INTERNAL|UNAVAILABLE|DEADLINE_EXCEEDED|INVALID_ARGUMENT|FAILED_PRECONDITION)\s*(?:\(code\s*(?:4\d\d|5\d\d)\))?\s*:)/iu;
 const ANTIGRAVITY_AUTH_401_RE = /UNAUTHENTICATED|\(code\s*401\)|invalid authentication credentials/i;
 
 export function detectAntigravityResultError(text) {
@@ -205,6 +205,9 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
   const IDLE_TTL_MS = config.antigravityIdleTtlMs !== undefined
     ? Math.max(0, Number(config.antigravityIdleTtlMs) || 0)
     : 10 * 60_000;
+  const ERROR_STALL_MS = config.antigravityErrorStallMs !== undefined
+    ? Math.max(0, Number(config.antigravityErrorStallMs) || 0)
+    : 15_000;
   const BG_POLL_MS = Math.max(20, Number(config.antigravityBackgroundPollMs) || 3000);
   const BG_FLUSH_QUIET_MS = Math.max(20, Number(config.antigravityBackgroundFlushMs) || 2500);
   const BG_USAGE_FLUSH_MS = Math.max(10, Number(config.antigravityBackgroundUsageFlushMs) || 600);
@@ -803,6 +806,40 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
     const schedule = () => { if (!flushTimer) flushTimer = setTimeout(() => { void flush().catch(() => {}); }, 150); };
     let initialized = reusedClient;
     let attemptToolCalls = 0;
+    let activeAttempt = null;
+    const clearAttemptWatchdog = (attemptCtx = activeAttempt) => {
+      if (!attemptCtx?.watchdogTimer) return;
+      clearTimeout(attemptCtx.watchdogTimer);
+      attemptCtx.watchdogTimer = null;
+    };
+    const armAttemptWatchdog = (attemptCtx, detectedErr) => {
+      if (!attemptCtx || ERROR_STALL_MS <= 0) return;
+      attemptCtx.detectedError = detectedErr;
+      if (attemptCtx.watchdogTimer) return;
+      attemptCtx.watchdogTimer = setTimeout(() => {
+        attemptCtx.watchdogTimer = null;
+        if (activeAttempt !== attemptCtx || attemptCtx.settled) return;
+        const activeClient = attemptCtx.client;
+        if (activeClient?.stopped) {
+          const stopErr = Object.assign(new Error('Antigravity 已停止'), { code: 'USER_STOP' });
+          try { activeClient.fail?.(stopErr); } catch {}
+          try { if (!activeClient.closed) void activeClient.close?.().catch?.(() => {}); } catch {}
+          attemptCtx.triggerStall?.({ userStopped: true });
+          return;
+        }
+        const currentErr = attemptCtx.detectedError || detectedErr;
+        attemptCtx.watchdogFired = true;
+        const stallErr = Object.assign(new Error(currentErr.message), {
+          engine: 'antigravity',
+          code: 'ANTIGRAVITY_ERROR_STALL',
+          antigravityResultError: currentErr,
+        });
+        try { activeClient?.fail?.(stallErr); } catch {}
+        try { if (!activeClient?.closed) void activeClient?.close?.().catch?.(() => {}); } catch {}
+        attemptCtx.triggerStall?.({ stalledError: currentErr });
+      }, ERROR_STALL_MS);
+      attemptCtx.watchdogTimer.unref?.();
+    };
     const foregroundOnEvent = (item) => {
       const update = item.update;
       if (item.type === 'session_info_update' && update.title && !session.userRenamed) { session.title = update.title; saveSessions(); }
@@ -813,6 +850,39 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
         saveSessions();
       }
       if (item.type === 'tool_call') attemptToolCalls += 1;
+      if (activeAttempt && !activeAttempt.settled) {
+        if (item.type === 'agent_message_chunk' && update.content?.type === 'text') {
+          const chunkText = String(update.content.text || '');
+          if (chunkText) {
+            activeAttempt.segmentText += chunkText;
+            const detected = detectAntigravityResultError(activeAttempt.segmentText);
+            if (activeAttempt.detectedError) {
+              const paragraphs = activeAttempt.segmentText.split(/\r?\n\s*\r?\n/).filter((p) => p.trim());
+              if (paragraphs.length >= 2 && !detectAntigravityResultError(paragraphs.at(-1))) {
+                clearAttemptWatchdog(activeAttempt);
+                activeAttempt.detectedError = null;
+                activeAttempt.recoveredAfterError = true;
+                activeAttempt.segmentText = paragraphs.at(-1) || '';
+              } else if (detected) {
+                armAttemptWatchdog(activeAttempt, detected);
+              } else if (!/^\s*(?:See\s+https?:|https?:\/\/)/i.test(chunkText)) {
+                clearAttemptWatchdog(activeAttempt);
+                activeAttempt.detectedError = null;
+                activeAttempt.recoveredAfterError = true;
+              }
+            } else if (detected) {
+              armAttemptWatchdog(activeAttempt, detected);
+            }
+          }
+        } else if (item.type === 'agent_thought_chunk' || item.type === 'tool_call' || item.type === 'tool_call_update') {
+          if (activeAttempt.detectedError || activeAttempt.watchdogTimer) {
+            clearAttemptWatchdog(activeAttempt);
+            activeAttempt.detectedError = null;
+            activeAttempt.recoveredAfterError = true;
+          }
+          activeAttempt.segmentText = '';
+        }
+      }
       if (!state) return;
       if (item.type === 'agent_message_chunk' && update.content?.type === 'text') { appendText(state, update.content.text); markPhase(state, 'model_streaming', { connection: 'connected' }); }
       else if (item.type === 'agent_thought_chunk') markPhase(state, 'model_thinking', { connection: 'connected' });
@@ -894,8 +964,52 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
         const promptInput = attempt === 1 && attemptToolCalls > 0 && session.antigravitySessionId
           ? antigravityContent('上一轮因认证凭证刷新中断（HTTP 401），已自动重连。请基于上述已完成的步骤继续回复用户，不要重复执行已完成的操作。', [])
           : antigravityContent(fullUserText, event.attachments);
-        const turnResult = await client.prompt(promptInput);
-        const resultErr = detectAntigravityResultError(turnResult?.text);
+        let triggerStall = null;
+        const stallPromise = new Promise((resolve) => { triggerStall = resolve; });
+        const attemptCtx = {
+          client,
+          segmentText: '',
+          detectedError: null,
+          recoveredAfterError: false,
+          watchdogTimer: null,
+          watchdogFired: false,
+          settled: false,
+          triggerStall,
+        };
+        activeAttempt = attemptCtx;
+        let turnResult = null;
+        let resultErr = null;
+        const promptPromise = Promise.resolve().then(() => client.prompt(promptInput));
+        promptPromise.catch(() => {});
+        try {
+          const raced = await Promise.race([
+            promptPromise.then((value) => ({ ok: true, value }), (error) => ({ ok: false, error })),
+            stallPromise.then((stalled) => ({ ok: false, stalled })),
+          ]);
+          attemptCtx.settled = true;
+          clearAttemptWatchdog(attemptCtx);
+          if (raced.stalled?.userStopped) {
+            throw Object.assign(new Error('Antigravity 已停止'), { code: 'USER_STOP' });
+          }
+          if (raced.stalled?.stalledError) {
+            resultErr = raced.stalled.stalledError;
+          } else if (!raced.ok) {
+            if (raced.error?.code === 'ANTIGRAVITY_ERROR_STALL' && raced.error.antigravityResultError) {
+              resultErr = raced.error.antigravityResultError;
+            } else {
+              throw raced.error;
+            }
+          } else {
+            turnResult = raced.value;
+            resultErr = attemptCtx.recoveredAfterError
+              ? detectAntigravityResultError(attemptCtx.segmentText)
+              : detectAntigravityResultError(turnResult?.text);
+          }
+        } finally {
+          attemptCtx.settled = true;
+          clearAttemptWatchdog(attemptCtx);
+          if (activeAttempt === attemptCtx) activeAttempt = null;
+        }
         if (!resultErr) {
           if (state?.meta?.upstreamRetry) delete state.meta.upstreamRetry;
           result = turnResult;
@@ -967,6 +1081,8 @@ export function createAntigravityBridge({ config, getSession, getChatState, getC
       if (state) { if (error.code === 'USER_STOP') markInterrupted(state); else markError(state, error); await flush(); }
       throw error;
     } finally {
+      clearAttemptWatchdog();
+      activeAttempt = null;
       for (const [token, pending] of permissions) if (pending.event === event) { clearTimeout(pending.timer); pending.resolve(false); permissions.delete(token); }
       clearTimeout(flushTimer);
       if (activeJobs.get(event.chat_id)?.client === client) activeJobs.delete(event.chat_id);

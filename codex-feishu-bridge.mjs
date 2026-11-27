@@ -156,6 +156,7 @@ const CONFIG = {
   codexIdleTimeoutMs: parseDurationMs(process.env.CODEX_FEISHU_CODEX_IDLE_TIMEOUT_MS, 60 * 60_000),
   appServerIdleTtlMs: parseDurationMs(process.env.CODEX_FEISHU_APP_SERVER_IDLE_TTL_MS, 15 * 60_000),
   antigravityIdleTtlMs: parseDurationMs(process.env.ANTIGRAVITY_IDLE_TTL_MS, 10 * 60_000),
+  antigravityErrorStallMs: parseDurationMs(process.env.CODEX_FEISHU_ANTIGRAVITY_ERROR_STALL_MS, 15_000),
   claudeIdleTtlMs: parseDurationMs(process.env.CLAUDE_IDLE_TTL_MS, 10 * 60_000),
   appServerPoolSize: Number(process.env.CODEX_FEISHU_APP_SERVER_POOL_SIZE || process.env.CODEX_FEISHU_MAX_CONCURRENT || "1"),
   disableMcp: (process.env.CODEX_FEISHU_DISABLE_MCP || "0") !== "0",
@@ -1322,6 +1323,18 @@ async function handleEvent(rawEvent, dispatchControl = {}) {
     : null;
   heartbeatTimer?.unref?.();
 
+  const recallStuckCard = async (reason) => {
+    if (!card?.messageId) return false;
+    const recalled = await recallMessage(card.messageId).catch(() => false);
+    log(recalled ? "INFO" : "WARN", recalled ? "recalled stuck card after fallback delivery" : "failed to recall stuck card after fallback delivery", {
+      messageId,
+      cardId: card.cardId,
+      cardMessageId: card.messageId,
+      reason,
+    });
+    return recalled;
+  };
+
   try {
     appendHistory(session, "user", userContent || `${event.attachments?.length || 0} attachment(s)`);
     const result = await runCodex(event, session, cardState, updateCard);
@@ -1335,6 +1348,7 @@ async function handleEvent(rawEvent, dispatchControl = {}) {
         "answer",
         messageId,
       );
+      if (card && !finalCardFlushOk) await recallStuckCard("answer-fallback");
     } else if (latestCardState?.cardOverflowText) {
       await sendMarkdown(
         chatId,
@@ -1380,6 +1394,7 @@ async function handleEvent(rawEvent, dispatchControl = {}) {
           "error-fallback",
           messageId,
         );
+        await recallStuckCard("error-fallback");
       }
     } else {
       await sendMarkdown(
