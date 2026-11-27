@@ -22,7 +22,7 @@
     "node": ">=22.5.0"
   },
   "dependencies": {
-    "@larksuiteoapi/node-sdk": "^1.66.1",
+    "@larksuiteoapi/node-sdk": "^1.77.0",
     "katex": "^0.16.22",
     "markdown-it": "^15.0.0",
     "playwright-core": "^1.55.0",
@@ -30,6 +30,6 @@
     "smol-toml": "1.7.0"
   },
   "overrides": {
-    "axios": "^1.17.0"
+    "axios": "^1.21.1"
   }
 }

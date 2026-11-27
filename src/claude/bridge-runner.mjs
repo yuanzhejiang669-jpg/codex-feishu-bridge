@@ -234,7 +234,27 @@ export function createClaudeBridge({ config, getSession, getChatState, getChats,
     const resolved = resolveBridgeOrNativeTarget(event, target);
     return resolved?.kind === 'bridge' ? resolved.session : null;
   }
-  const sessionDeletion = createClaudeSessionDeletion({ config, getChatState, getChats, saveSessions, activeJobs, sharedSessions, accessContextFor });
+  async function retireWarmMatching({ sessionIds = [], nativeIds = [] } = {}) {
+    const sessionSet = new Set(sessionIds.filter(Boolean));
+    const nativeSet = new Set(nativeIds.filter(Boolean));
+    for (const [chatId, entry] of [...warmSessions.entries()]) {
+      if ((entry.sessionId && sessionSet.has(entry.sessionId))
+        || (entry.nativeSessionId && nativeSet.has(entry.nativeSessionId))) {
+        await retireWarmSession(chatId, 'session-deleted');
+      }
+    }
+  }
+  const sessionDeletion = createClaudeSessionDeletion({
+    config,
+    getChatState,
+    getChats,
+    saveSessions,
+    activeJobs,
+    sharedSessions,
+    accessContextFor,
+    collectNativeSessions: collectNativeClaudeSessions,
+    onBeforeDelete: retireWarmMatching,
+  });
   const commands = createClaudeCommands({ config, settings, botConfiguration, providers, saveSessions,
     activeJobs, getChatState, getSession, queueSummary, refreshModels, sharedSessions, resolveSession, accessContextFor,
     hasWarm,
@@ -590,6 +610,7 @@ export function createClaudeBridge({ config, getSession, getChatState, getChats,
         ...chat.sessions.map((item) => ({
           kind: 'bridge',
           id: item.id,
+          session: item,
           updatedAt: Number(item.updatedAt || item.createdAt || 0),
           current: item.id === chat.currentSessionId,
           label: `${item.id === chat.currentSessionId ? '当前 · ' : ''}${item.title} (${item.id})${sharedSessions ? ` · 来自 ${item.claudeOriginBot || 'Claude'}` : ''}`,
@@ -606,7 +627,7 @@ export function createClaudeBridge({ config, getSession, getChatState, getChats,
         }),
       ];
       listViews.set(viewKey(event), { ids: chat.sessions.map((s) => s.id), items: merged, at: Date.now() });
-      sessionDeletion.rememberList(event, chat.sessions);
+      sessionDeletion.rememberList(event, merged);
       const heading = showAll
         ? '**Claude 全部会话（共享库 + 本机原生 CLI）**\n\n'
         : (sharedSessions ? '**Claude 共享会话库 · 所有 Claude Bot 可切换续接**\n\n' : '');

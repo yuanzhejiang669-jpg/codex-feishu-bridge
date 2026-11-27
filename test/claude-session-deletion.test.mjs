@@ -211,3 +211,118 @@ test('Claude Bridge exposes delete help/list controls and creates a fresh sessio
   assert.match(fresh.id, /^new-/); assert.equal(fresh.claudeSessionId, '');
   assert.equal(JSON.parse(fs.readFileSync(f.sessionsPath)).chats.chat.currentSessionId, fresh.id);
 });
+
+test('Claude /list all supports direct /delete and /confirm delete for native CLI sessions (owner DM only, mixed batches, workspace preserved)', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cfb-claude-native-del-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }));
+
+  const botHome = path.join(root, 'bot-home');
+  const desktopHome = path.join(root, 'desktop-home');
+  const botProject = path.join(botHome, 'projects', 'ws-bot');
+  const desktopProject = path.join(desktopHome, 'projects', 'ws-cli');
+  const stateDir = path.join(root, 'state');
+  const workspace = path.join(root, 'workspace');
+  const workspaceFile = path.join(workspace, 'keep-me.txt');
+  for (const dir of [botProject, desktopProject, stateDir, workspace]) fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(workspaceFile, 'important project file');
+
+  const bridgeNativeId = crypto.randomUUID();
+  const nativeId1 = crypto.randomUUID();
+  const nativeId2 = crypto.randomUUID();
+  const bridgeFile = path.join(botProject, `${bridgeNativeId}.jsonl`);
+  const nativeFile1 = path.join(desktopProject, `${nativeId1}.jsonl`);
+  const nativeDir1 = path.join(desktopProject, nativeId1, 'subagents');
+  const nativeEnv1 = path.join(desktopHome, 'session-env', nativeId1);
+  const nativeFile2 = path.join(desktopProject, `${nativeId2}.jsonl`);
+  fs.mkdirSync(nativeDir1, { recursive: true });
+  fs.mkdirSync(nativeEnv1, { recursive: true });
+  fs.writeFileSync(bridgeFile, JSON.stringify({ type: 'user', cwd: workspace, message: { role: 'user', content: 'bridge task' } }) + '\n');
+  fs.writeFileSync(nativeFile1, JSON.stringify({ type: 'user', cwd: workspace, message: { role: 'user', content: 'cli old chat 1' } }) + '\n');
+  fs.writeFileSync(path.join(nativeDir1, 'sub.jsonl'), 'sub');
+  fs.writeFileSync(path.join(nativeEnv1, 'env'), 'env');
+  fs.writeFileSync(nativeFile2, JSON.stringify({ type: 'user', cwd: workspace, message: { role: 'user', content: 'cli old chat 2' } }) + '\n');
+
+  const sessionsPath = path.join(stateDir, 'sessions.json');
+  const store = createSessionStore({
+    sessionsPath,
+    preserveSessionIdentity: true,
+    createSessionData: (title) => ({ id: 's-new', title, engine: 'claude', claudeSessionId: '' }),
+    normalizeSessionData: (item) => ({ ...item }),
+    dedupeSessions: (items) => items,
+    sessionListLimit: () => 100,
+  });
+  store.sessions.chats.oc_dm = {
+    currentSessionId: 's-1',
+    sessions: [{ id: 's-1', title: 'Feishu Chat 1', engine: 'claude', claudeSessionId: bridgeNativeId }],
+  };
+  store.sessions.chats.oc_group = { currentSessionId: '', sessions: [] };
+  store.saveSessions();
+
+  const replies = [];
+  const bridge = createClaudeBridge({
+    config: {
+      claudeHome: botHome,
+      claudeDesktopHome: desktopHome,
+      stateDir,
+      workspace,
+      ownerOpenId: 'ou_owner',
+      deleteConfirmTtlMs: 60_000,
+    },
+    ...store,
+    getChats: () => store.sessions.chats,
+    activeJobs: new Map(),
+    sendMarkdown: async (_chat, text) => replies.push(text),
+  });
+  t.after(() => bridge.close());
+
+  const ownerDm = { chat_id: 'oc_dm', chat_type: 'p2p', sender_id: 'ou_owner', message_id: 'm1' };
+  const groupEvent = { chat_id: 'oc_group', chat_type: 'group', sender_id: 'ou_owner', message_id: 'm2' };
+  const otherDm = { chat_id: 'oc_dm', chat_type: 'p2p', sender_id: 'ou_stranger', message_id: 'm3' };
+
+  // Group chat and non-owner cannot preview/delete native CLI sessions even by exact UUID
+  await bridge.handleCommand(groupEvent, { name: '/delete', rest: nativeId1 });
+  assert.match(replies.at(-1), /未找到可访问的会话/);
+  await bridge.handleCommand(otherDm, { name: '/delete', rest: nativeId1 });
+  assert.match(replies.at(-1), /未找到可访问的会话/);
+  assert.equal(fs.existsSync(nativeFile1), true);
+
+  // Owner DM /list all displays bridge session #1 + native CLI sessions #2 and #3
+  await bridge.handleCommand(ownerDm, { name: '/list', rest: 'all' });
+  const listText = replies.at(-1);
+  assert.match(listText, /1\. 当前 · Feishu Chat 1/);
+  assert.match(listText, /原生 CLI/);
+
+  // Direct mixed batch delete: bridge #1 + one native CLI session #2
+  await bridge.handleCommand(ownerDm, { name: '/delete', rest: '1 2' });
+  const preview = replies.at(-1);
+  assert.match(preview, /待删除：2 条/);
+  assert.match(preview, /原生 CLI/);
+  assert.match(preview, /\/confirm delete 1-2/);
+  // Read-only preview must not touch files yet
+  assert.equal(fs.existsSync(bridgeFile), true);
+  assert.equal(fs.existsSync(nativeFile1), true);
+  assert.equal(fs.existsSync(nativeFile2), true);
+
+  await bridge.handleCommand(ownerDm, { name: '/confirm', rest: 'delete 1-2' });
+  assert.match(replies.at(-1), /已删除 2 条 Claude 会话（共享会话 1 条，原生 CLI 会话 1 条）/);
+  assert.equal(fs.existsSync(bridgeFile), false);
+  const removedFirst = !fs.existsSync(nativeFile1);
+  const removedSecond = !fs.existsSync(nativeFile2);
+  assert.notEqual(removedFirst, removedSecond, 'Exactly one native session (#2) should be deleted');
+  const remainingNativeId = removedFirst ? nativeId2 : nativeId1;
+  const remainingNativeFile = removedFirst ? nativeFile2 : nativeFile1;
+  if (removedFirst) {
+    assert.equal(fs.existsSync(path.dirname(nativeDir1)), false);
+    assert.equal(fs.existsSync(nativeEnv1), false);
+  }
+
+  // Delete remaining native CLI session directly by UUID prefix (without /list all first!)
+  await bridge.handleCommand(ownerDm, { name: '/delete', rest: remainingNativeId.slice(0, 8) });
+  assert.match(replies.at(-1), /待删除：1 条/);
+  const confirmMatch = replies.at(-1).match(/\/confirm delete (\d+)/);
+  assert.ok(confirmMatch, 'Expected confirm delete index in preview');
+  await bridge.handleCommand(ownerDm, { name: '/confirm', rest: `delete ${confirmMatch[1]}` });
+  assert.match(replies.at(-1), /已删除 1 条 Claude 会话（原生 CLI 会话，本地记录已清理）/);
+  assert.equal(fs.existsSync(remainingNativeFile), false);
+  assert.equal(fs.readFileSync(workspaceFile, 'utf8'), 'important project file');
+});
