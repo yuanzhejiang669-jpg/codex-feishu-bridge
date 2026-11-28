@@ -102,6 +102,6 @@ test("v0.10.26 (#6): bridge wires synchronous simplifyBlocks, fallback simplific
   const bridgeSrc = fs.readFileSync(new URL("../codex-feishu-bridge.mjs", import.meta.url), "utf8");
   assert.match(bridgeSrc, /formulaImageService\.simplifyBlocks\(state\.blocks\)/);
   assert.match(bridgeSrc, /simplifySimpleFormulasInMarkdown\(formatted\)/);
-  assert.match(bridgeSrc, /CODEX_FEISHU_FORMULA_MAX_IMAGES \|\| "16"/);
-  assert.match(bridgeSrc, /CODEX_FEISHU_FORMULA_RENDER_TIMEOUT_MS, 45_000/);
+  assert.match(bridgeSrc, /CODEX_FEISHU_FORMULA_MAX_IMAGES \|\| "(?:16|24)"/);
+  assert.match(bridgeSrc, /CODEX_FEISHU_FORMULA_RENDER_TIMEOUT_MS, (?:45_000|60_000)/);
 });

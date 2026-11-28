@@ -227,9 +227,11 @@ export function planFormulaRendering(markdownText, {
 }
 
 export function planDenseFormulaRendering(markdownText, {
-  maxGroupChars = 4000,
-  maxGroupFormulas = 20,
+  maxGroupChars = 900,
+  maxGroupFormulas = 6,
 } = {}) {
+  const charLimit = Math.max(500, Number(maxGroupChars || 900));
+  const formulaLimit = Math.max(1, Number(maxGroupFormulas || 6));
   const planned = [];
   for (const chunk of splitProtectedMarkdown(markdownText)) {
     if (chunk.protected) {
@@ -242,13 +244,16 @@ export function planDenseFormulaRendering(markdownText, {
     const flush = () => {
       if (!content) return;
       if (formulas.length > 0) {
-        planned.push({
-          kind: "image",
-          mode: "mixed",
-          original: content,
-          content,
-          formulas,
-        });
+        const trimmed = content.trim();
+        if (trimmed) {
+          planned.push({
+            kind: "image",
+            mode: "mixed",
+            original: trimmed,
+            content: trimmed,
+            formulas,
+          });
+        }
       } else {
         pushTextPlan(planned, content);
       }
@@ -256,10 +261,27 @@ export function planDenseFormulaRendering(markdownText, {
       formulas = [];
     };
     for (const unit of units) {
+      const isSeparator = /^\r?\n\s*\r?\n+$/.test(unit);
+      if (isSeparator) {
+        if (content) content += unit;
+        else pushTextPlan(planned, unit);
+        continue;
+      }
       const unitFormulas = scanLatexFormulas(unit);
-      const exceedsChars = content && content.length + unit.length > Math.max(500, Number(maxGroupChars || 4000));
+      if (unitFormulas.length === 0) {
+        if (formulas.length === 0) {
+          pushTextPlan(planned, unit);
+          continue;
+        }
+        if (isSectionBoundaryUnit(unit)) {
+          flush();
+          pushTextPlan(planned, unit);
+          continue;
+        }
+      }
+      const exceedsChars = content && content.length + unit.length > charLimit;
       const exceedsFormulas = formulas.length > 0
-        && formulas.length + unitFormulas.length > Math.max(1, Number(maxGroupFormulas || 20));
+        && formulas.length + unitFormulas.length > formulaLimit;
       if (exceedsChars || exceedsFormulas) flush();
       content += unit;
       formulas.push(...unitFormulas);
@@ -267,6 +289,168 @@ export function planDenseFormulaRendering(markdownText, {
     flush();
   }
   return planned;
+}
+
+function isSectionBoundaryUnit(unit) {
+  const trimmed = String(unit || "").trim();
+  if (!trimmed) return false;
+  return /^(?:#{1,6}\s|[-*_]{3,}\s*$)/.test(trimmed);
+}
+
+export function splitFormulaPlan(plan) {
+  if (!plan || plan.kind !== "image" || plan.mode === "block") return null;
+  const source = String(plan.content || "").trim();
+  if (!source) return null;
+  const segments = tokenizeVerticalSegments(source);
+  if (segments.length < 2) return null;
+
+  const weights = segments.map((seg) => segmentVisualWeight(seg.text));
+  const totalWeight = weights.reduce((sum, w) => sum + w, 0);
+  if (totalWeight <= 0) return null;
+
+  const prefix = [];
+  let running = 0;
+  for (const w of weights) {
+    running += w;
+    prefix.push(running);
+  }
+
+  const pickSplitIndex = (maxTier, minRatio, maxRatio) => {
+    let bestIndex = -1;
+    let bestDistance = Infinity;
+    for (let i = 1; i < segments.length; i += 1) {
+      const tier = segments[i].breakTier;
+      if (tier > maxTier) continue;
+      const ratio = prefix[i - 1] / totalWeight;
+      if (ratio < minRatio || ratio > maxRatio) continue;
+      const distance = Math.abs(ratio - 0.5);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        bestIndex = i;
+      }
+    }
+    return bestIndex;
+  };
+
+  let splitIndex = pickSplitIndex(1, 0.2, 0.8);
+  if (splitIndex < 0) splitIndex = pickSplitIndex(2, 0.15, 0.85);
+  if (splitIndex < 0) splitIndex = pickSplitIndex(3, 0.15, 0.85);
+  if (splitIndex < 0) return null;
+
+  const leftText = segments.slice(0, splitIndex).map((s) => s.text).join("").trim();
+  const rightText = segments.slice(splitIndex).map((s) => s.text).join("").trim();
+  if (!leftText || !rightText) return null;
+
+  const nextDepth = (plan.splitDepth || 0) + 1;
+  return [
+    classifySplitHalf(leftText, plan.mode, nextDepth),
+    classifySplitHalf(rightText, plan.mode, nextDepth),
+  ];
+}
+
+function classifySplitHalf(text, fallbackMode, splitDepth) {
+  const formulas = scanLatexFormulas(text);
+  if (formulas.length === 0) {
+    return { kind: "text", content: text, splitText: true };
+  }
+  const hasDisplay = formulas.some((formula) => formula.display);
+  const hasComplex = formulas.some((formula) => isComplexLatex(formula.latex));
+  if (!hasDisplay && !hasComplex) {
+    return { kind: "text", content: simplifyFormulaRange(text), splitText: true };
+  }
+  if (formulas.length === 1 && formulas[0].display && text.trim() === formulas[0].raw.trim()) {
+    return {
+      kind: "image",
+      mode: "block",
+      original: formulas[0].raw,
+      content: formulas[0].raw,
+      formulas,
+      splitDepth,
+    };
+  }
+  return {
+    kind: "image",
+    mode: fallbackMode,
+    original: text,
+    content: text,
+    formulas,
+    splitDepth,
+  };
+}
+
+function segmentVisualWeight(text) {
+  const formulas = scanLatexFormulas(text);
+  const displayCount = formulas.filter((formula) => formula.display).length;
+  return text.length + displayCount * 260;
+}
+
+function tokenizeVerticalSegments(content) {
+  const lines = String(content || "").split(/(?<=\n)/);
+  const segments = [];
+  let i = 0;
+  let pendingBlank = false;
+  let prevEndedDisplay = false;
+
+  const isTableDelimiter = (line) => {
+    const trimmed = String(line || "").trim().replace(/^\|/, "").replace(/\|$/, "");
+    if (!trimmed.includes("|") && !/^:?-{3,}:?$/.test(trimmed)) return false;
+    const cells = trimmed.split("|").map((cell) => cell.trim());
+    return cells.length >= 2 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
+  };
+
+  while (i < lines.length) {
+    const line = lines[i];
+    const trimmed = line.trim();
+    if (!trimmed) {
+      if (segments.length > 0) segments[segments.length - 1].text += line;
+      pendingBlank = true;
+      i += 1;
+      continue;
+    }
+
+    // Keep Markdown tables as indivisible atomic blocks.
+    if (line.includes("|") && i + 1 < lines.length && isTableDelimiter(lines[i + 1])) {
+      let block = line + lines[i + 1];
+      i += 2;
+      while (i < lines.length && lines[i].trim() && lines[i].includes("|")) {
+        block += lines[i];
+        i += 1;
+      }
+      segments.push({ text: block, breakTier: pendingBlank ? 1 : 2 });
+      pendingBlank = false;
+      prevEndedDisplay = false;
+      continue;
+    }
+
+    // Keep multi-line $$...$$ or \[...\] display math blocks indivisible.
+    if ((trimmed.startsWith("$$") && !trimmed.slice(2).includes("$$"))
+      || (trimmed.startsWith("\\[") && !trimmed.slice(2).includes("\\]"))) {
+      const closeMarker = trimmed.startsWith("$$") ? "$$" : "\\]";
+      let block = line;
+      i += 1;
+      while (i < lines.length) {
+        block += lines[i];
+        const foundClose = lines[i].includes(closeMarker);
+        i += 1;
+        if (foundClose) break;
+      }
+      segments.push({ text: block, breakTier: pendingBlank ? 1 : 2 });
+      pendingBlank = false;
+      prevEndedDisplay = true;
+      continue;
+    }
+
+    const isSingleLineDisplay = (trimmed.startsWith("$$") && trimmed.endsWith("$$") && trimmed.length > 4)
+      || (trimmed.startsWith("\\[") && trimmed.endsWith("\\]") && trimmed.length > 4);
+    const isStructuralStart = /^(?:#{1,6}\s|[-*_]{3,}\s*$|\d+[.)]\s|[-*+]\s)/.test(line);
+    const breakTier = pendingBlank ? 1 : (prevEndedDisplay || isStructuralStart ? 2 : 3);
+    segments.push({ text: line, breakTier });
+    pendingBlank = false;
+    prevEndedDisplay = isSingleLineDisplay;
+    i += 1;
+  }
+
+  return segments;
 }
 
 export function resolveFormulaBrowserExecutable(explicitPath = "") {
@@ -301,9 +485,11 @@ export function createFormulaImageService({
   uploadImage,
   maxImages = 24,
   maxParagraphChars = 1400,
-  denseFormulaThreshold = 6,
-  maxGroupChars = 4000,
-  maxGroupFormulas = 20,
+  denseFormulaThreshold = 12,
+  maxGroupChars = 900,
+  maxGroupFormulas = 6,
+  maxImageHeight = 950,
+  maxImageAspectRatio = 1.2,
   renderTimeoutMs = 20_000,
   idleCloseMs = 5 * 60_000,
   loadDeps = loadFormulaDependencies,
@@ -397,9 +583,25 @@ export function createFormulaImageService({
     }
   }
 
+  function planDenseWithinBudget(content, imageBudget) {
+    const budget = Math.max(1, Number(imageBudget || maxImages || 24));
+    let chars = Math.max(500, Number(maxGroupChars || 900));
+    let formulas = Math.max(1, Number(maxGroupFormulas || 6));
+    let plans = planDenseFormulaRendering(content, { maxGroupChars: chars, maxGroupFormulas: formulas });
+    for (let step = 0; step < 4; step += 1) {
+      const imageCount = plans.filter((plan) => plan.kind === "image").length;
+      if (imageCount <= budget) return plans;
+      chars = Math.min(4000, Math.round(chars * 1.6));
+      formulas = Math.min(24, Math.ceil(formulas * 1.6));
+      plans = planDenseFormulaRendering(content, { maxGroupChars: chars, maxGroupFormulas: formulas });
+    }
+    return plans;
+  }
+
   function planBlocks(blocks) {
     const blockPlans = [];
     let plannedCount = 0;
+    const denseLimit = Math.max(1, Number(denseFormulaThreshold || 12));
     for (const block of Array.isArray(blocks) ? blocks : []) {
       if (block?.kind !== "text" || !String(block.content || "").trim()) {
         blockPlans.push([{ ...block }]);
@@ -407,8 +609,8 @@ export function createFormulaImageService({
       }
       const normalPlans = planFormulaRendering(block.content, { maxParagraphChars });
       const normalImageCount = normalPlans.filter((plan) => plan.kind === "image").length;
-      const plans = normalImageCount > Math.max(1, Number(denseFormulaThreshold || 6))
-        ? planDenseFormulaRendering(block.content, { maxGroupChars, maxGroupFormulas })
+      const plans = normalImageCount > denseLimit
+        ? planDenseWithinBudget(block.content, Math.max(1, Number(maxImages || 24) - plannedCount))
         : normalPlans;
       plannedCount += plans.filter((plan) => plan.kind === "image").length;
       blockPlans.push(plans);
@@ -439,7 +641,7 @@ export function createFormulaImageService({
       };
     }
 
-    const { blockPlans, plannedCount } = planBlocks(blocks);
+    let { blockPlans, plannedCount } = planBlocks(blocks);
     if (plannedCount === 0) {
       const simplifiedBlocks = [];
       for (const plans of blockPlans) {
@@ -481,68 +683,96 @@ export function createFormulaImageService({
       page = await browser.newPage({ viewport: { width: 1200, height: 900 }, deviceScaleFactor: 2 });
       page.setDefaultTimeout?.(renderTimeoutMs);
 
-      for (const plans of blockPlans) {
-        for (const plan of plans) {
-          if (plan.kind !== "image") {
-            pushOutputBlock(output, plan);
-            continue;
+      const imageLimit = Math.max(1, Number(maxImages || 1));
+      const heightBase = Math.max(400, Number(maxImageHeight || 950));
+      const aspectCap = Math.max(0.8, Number(maxImageAspectRatio || 1.2));
+      const queue = blockPlans.flat();
+      let plannedTotal = plannedCount;
+
+      while (queue.length > 0) {
+        const plan = queue.shift();
+        if (plan.kind !== "image") {
+          pushOutputBlock(output, plan);
+          continue;
+        }
+        if (rendered >= imageLimit) {
+          failed += 1;
+          sources.push(...formulaSources(plan));
+          pushOutputBlock(output, { kind: "text", content: formulaFallbackText(plan) });
+          continue;
+        }
+        const remainingMs = deadline - Date.now();
+        if (remainingMs < 1_000) {
+          failed += 1;
+          sources.push(...formulaSources(plan));
+          pushOutputBlock(output, { kind: "text", content: formulaFallbackText(plan) });
+          log("WARN", "formula rendering deadline reached; using readable fallback", {
+            planned: plannedTotal,
+            rendered,
+            failed,
+          });
+          continue;
+        }
+        const fileName = `formula-${process.pid}-${Date.now()}-${crypto.randomUUID()}.png`;
+        const imagePath = path.join(tempDir, fileName);
+        try {
+          const html = formulaCaptureHtml(plan, katex, markdown);
+          await page.setContent(html, { waitUntil: "load", timeout: Math.max(1_000, deadline - Date.now()) });
+          const metrics = await prepareFormulaCapture(page, {
+            timeoutMs: Math.max(1_000, deadline - Date.now()),
+            maxHeight: Infinity,
+          });
+          const heightLimit = Math.max(heightBase, Math.round(metrics.width * aspectCap));
+          const remainingImages = queue.filter((item) => item.kind === "image").length;
+          const canSplitForSharpness = plan.mode !== "block"
+            && metrics.height > heightLimit
+            && (plan.splitDepth || 0) < 4
+            && (deadline - Date.now()) > 3_000
+            && (rendered + remainingImages + 2 <= imageLimit || metrics.height > 6000);
+          if (canSplitForSharpness) {
+            const parts = splitFormulaPlan(plan);
+            if (parts) {
+              const addedImages = parts.filter((part) => part.kind === "image").length - 1;
+              plannedTotal = Math.max(1, plannedTotal + addedImages);
+              queue.unshift(...parts);
+              continue;
+            }
           }
-          if (rendered >= Math.max(1, Number(maxImages || 1))) {
-            failed += 1;
-            sources.push(...formulaSources(plan));
-            pushOutputBlock(output, { kind: "text", content: formulaFallbackText(plan) });
-            continue;
+          if (metrics.height > 6000) {
+            throw new Error("Formula image exceeds safe height");
           }
-          const remainingMs = deadline - Date.now();
-          if (remainingMs < 1_000) {
-            failed += 1;
-            sources.push(...formulaSources(plan));
-            pushOutputBlock(output, { kind: "text", content: formulaFallbackText(plan) });
-            log("WARN", "formula rendering deadline reached; using readable fallback", {
-              planned: plannedCount,
-              rendered,
-              failed,
-            });
-            continue;
-          }
-          const fileName = `formula-${process.pid}-${Date.now()}-${crypto.randomUUID()}.png`;
-          const imagePath = path.join(tempDir, fileName);
-          try {
-            const html = formulaCaptureHtml(plan, katex, markdown);
-            await page.setContent(html, { waitUntil: "load", timeout: Math.max(1_000, deadline - Date.now()) });
-            await prepareFormulaCapture(page, { timeoutMs: Math.max(1_000, deadline - Date.now()) });
-            await page.locator(".cf-formula-capture").screenshot({
-              path: imagePath,
-              type: "png",
-              timeout: Math.max(1_000, deadline - Date.now()),
-            });
-            const imageKey = await uploadImage(imagePath, {
-              timeoutMs: Math.max(1_000, deadline - Date.now()),
-              attempts: 1,
-            });
-            if (!imageKey) throw new Error("Feishu image upload returned no image_key");
-            output.push({
-              kind: "formula_image",
-              imgKey: imageKey,
-              alt: plan.mode === "block" ? "复杂数学公式" : "包含复杂行内公式的正文段落",
-              title: plan.mode === "block" ? "公式" : "公式密集段落",
-              source: plan.formulas.map((item) => item.latex.trim()).filter(Boolean).join("\n\n"),
-            });
-            sources.push(...plan.formulas.map((item) => item.latex.trim()).filter(Boolean));
-            rendered += 1;
-          } catch (error) {
-            failed += 1;
-            sources.push(...formulaSources(plan));
-            pushOutputBlock(output, { kind: "text", content: formulaFallbackText(plan) });
-            log("WARN", "formula rendering failed; using readable fallback", {
-              mode: plan.mode,
-              error: String(error?.message || error).slice(0, 1000),
-            });
-          } finally {
-            await fs.promises.rm(imagePath, { force: true }).catch(() => {});
-          }
+          await page.locator(".cf-formula-capture").screenshot({
+            path: imagePath,
+            type: "png",
+            timeout: Math.max(1_000, deadline - Date.now()),
+          });
+          const imageKey = await uploadImage(imagePath, {
+            timeoutMs: Math.max(1_000, deadline - Date.now()),
+            attempts: 1,
+          });
+          if (!imageKey) throw new Error("Feishu image upload returned no image_key");
+          output.push({
+            kind: "formula_image",
+            imgKey: imageKey,
+            alt: plan.mode === "block" ? "复杂数学公式" : "包含复杂行内公式的正文段落",
+            title: plan.mode === "block" ? "公式" : "公式密集段落",
+            source: plan.formulas.map((item) => item.latex.trim()).filter(Boolean).join("\n\n"),
+          });
+          sources.push(...plan.formulas.map((item) => item.latex.trim()).filter(Boolean));
+          rendered += 1;
+        } catch (error) {
+          failed += 1;
+          sources.push(...formulaSources(plan));
+          pushOutputBlock(output, { kind: "text", content: formulaFallbackText(plan) });
+          log("WARN", "formula rendering failed; using readable fallback", {
+            mode: plan.mode,
+            error: String(error?.message || error).slice(0, 1000),
+          });
+        } finally {
+          await fs.promises.rm(imagePath, { force: true }).catch(() => {});
         }
       }
+      plannedCount = plannedTotal;
     } catch (error) {
       log("WARN", "formula renderer unavailable; using readable fallback", {
         browser: resolvedBrowser,
@@ -811,8 +1041,12 @@ function pushOutputBlock(output, plan) {
   const content = String(plan?.content || "");
   if (!content) return;
   const last = output[output.length - 1];
-  if (last?.kind === "text") last.content += content;
-  else output.push({ kind: "text", content, streaming: false });
+  if (last?.kind === "text") {
+    const needsBreak = plan?.splitText && !last.content.endsWith("\n") && !content.startsWith("\n");
+    last.content += needsBreak ? `\n\n${content}` : content;
+  } else {
+    output.push({ kind: "text", content, streaming: false });
+  }
 }
 
 export function formulaCaptureHtml(plan, katex, markdown) {
@@ -831,7 +1065,7 @@ ${css}
 html,body{margin:0;padding:0;background:transparent}
 body{font-family:"Microsoft YaHei","PingFang SC","Segoe UI",sans-serif;color:#1f2329}
 .cf-formula-capture{box-sizing:border-box;width:${width}px;padding:16px;background:#f5f8ff}
-.cf-formula-card{box-sizing:border-box;width:100%;padding:${compact ? "16px 24px" : "24px"};background:#fff;border:1px solid #d9e2ff;border-left:5px solid #4e83fd;border-radius:14px;font-size:${compact ? "28px" : "23px"};line-height:1.8}
+.cf-formula-card{box-sizing:border-box;width:100%;padding:${compact ? "16px 24px" : "24px"};background:#fff;border:1px solid #d9e2ff;border-left:5px solid #4e83fd;border-radius:14px;font-size:${compact ? "28px" : "24px"};line-height:1.75}
 .cf-formula-block{display:flex;align-items:center;justify-content:center}
 .cf-formula-paragraph{white-space:normal;overflow-wrap:anywhere}
 .cf-formula-paragraph p{margin:.25em 0}.cf-formula-paragraph p:first-child{margin-top:0}.cf-formula-paragraph p:last-child{margin-bottom:0}
@@ -856,7 +1090,7 @@ body{font-family:"Microsoft YaHei","PingFang SC","Segoe UI",sans-serif;color:#1f
 }
 
 // Reject unusable images rather than uploading a successful but clipped PNG.
-export async function prepareFormulaCapture(page, { timeoutMs = 20_000 } = {}) {
+export async function prepareFormulaCapture(page, { timeoutMs = 20_000, maxHeight = 6000 } = {}) {
   const deadline = Date.now() + timeoutMs;
   for (let attempt = 0; attempt < 5; attempt += 1) {
     // Force layout first so fonts used by the formula are requested.
@@ -864,6 +1098,24 @@ export async function prepareFormulaCapture(page, { timeoutMs = 20_000 } = {}) {
     await page.waitForFunction(() => document.fonts.status === "loaded", null, {
       timeout: Math.max(1, deadline - Date.now()),
     });
+    if (attempt === 0) {
+      // Gently shrink slightly wide display equations inside mixed cards so one wide equation
+      // doesn't widen the entire card and shrink all surrounding prose text.
+      await page.evaluate(() => {
+        for (const box of document.querySelectorAll(".cf-formula-paragraph .cf-display-formula")) {
+          const katexNode = box.querySelector(".katex");
+          if (!katexNode) continue;
+          const avail = box.getBoundingClientRect().width - 16;
+          const actual = katexNode.getBoundingClientRect().width;
+          if (avail > 0 && actual > avail + 1) {
+            const ratio = (avail / actual) * 0.96;
+            if (ratio >= 0.74) {
+              katexNode.style.fontSize = `${ratio.toFixed(3)}em`;
+            }
+          }
+        }
+      });
+    }
     const result = await page.evaluate(() => {
       if (document.querySelector(".katex-error")) throw new Error("Formula parse error");
       if ([...document.fonts].some((font) => font.status === "error")) {
@@ -880,7 +1132,9 @@ export async function prepareFormulaCapture(page, { timeoutMs = 20_000 } = {}) {
       });
       return { width: box.width, height: box.height, overflow };
     });
-    if (result.height > 6000) throw new Error("Formula image exceeds safe height");
+    if (Number.isFinite(maxHeight) && result.height > maxHeight) {
+      throw new Error("Formula image exceeds safe height");
+    }
     if (!result.overflow) return result;
     if (result.width >= 1600 || Date.now() >= deadline) break;
     await page.locator(".cf-formula-capture").evaluate((element, width) => {
@@ -888,6 +1142,23 @@ export async function prepareFormulaCapture(page, { timeoutMs = 20_000 } = {}) {
     }, Math.min(1600, Math.ceil(result.width * 1.35)));
   }
   throw new Error("Formula exceeds safe image width; retaining source instead");
+}
+
+function stripFileProtocolLinks(text) {
+  const source = String(text || "");
+  const protectedRanges = inlineCodeRanges(source);
+  if (!protectedRanges.length) {
+    return source.replace(/\[([^\]\r\n]+)\]\(file:\/\/\/[^)\r\n]+\)/gi, "$1");
+  }
+  let out = "";
+  let cursor = 0;
+  for (const range of protectedRanges) {
+    out += source.slice(cursor, range.start).replace(/\[([^\]\r\n]+)\]\(file:\/\/\/[^)\r\n]+\)/gi, "$1");
+    out += source.slice(range.start, range.end);
+    cursor = range.end;
+  }
+  out += source.slice(cursor).replace(/\[([^\]\r\n]+)\]\(file:\/\/\/[^)\r\n]+\)/gi, "$1");
+  return out;
 }
 
 export function renderMixedHtml(content, katex, markdown) {
@@ -908,6 +1179,7 @@ export function renderMixedHtml(content, katex, markdown) {
     cursor = formula.end;
   }
   protectedMarkdown += content.slice(cursor);
+  protectedMarkdown = stripFileProtocolLinks(protectedMarkdown);
 
   let html = markdown
     ? markdown.render(protectedMarkdown)
