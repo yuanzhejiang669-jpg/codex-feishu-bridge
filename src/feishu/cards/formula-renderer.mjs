@@ -12,12 +12,30 @@ const SIMPLE_COMMANDS = new Set([
   "Gamma", "Delta", "Theta", "Lambda", "Pi", "Sigma", "Phi", "Psi", "Omega",
   "cdot", "times", "pm", "mp", "le", "leq", "ge", "geq", "ne", "neq", "approx",
   "in", "notin", "subset", "subseteq", "supset", "supseteq", "to", "rightarrow",
-  "leftarrow", "infty", "partial", "nabla", "ell", "hbar", "mid", "Vert", "vert",
-  "left", "right",
+  "leftarrow", "leftrightarrow", "Rightarrow", "Leftarrow", "Leftrightarrow",
+  "implies", "iff", "mapsto", "infty", "partial", "nabla", "ell", "hbar", "mid",
+  "Vert", "vert", "left", "right", "big", "Big", "bigg", "Bigg", "bigl", "bigr",
+  "Bigl", "Bigr", "quad", "qquad", "enspace", "thinspace",
+  "otimes", "oplus", "odot", "circ", "ast", "star", "top", "perp", "parallel",
+  "sim", "simeq", "cong", "equiv", "propto", "ll", "gg", "prec", "succ", "preceq",
+  "succeq", "dots", "ldots", "cdots", "cup", "cap", "setminus", "emptyset",
+  "varnothing", "forall", "exists", "neg", "lnot", "land", "wedge", "lor", "vee",
+  "langle", "rangle", "lfloor", "rfloor", "lceil", "rceil", "angle", "triangle",
+  "deg", "prime",
 ]);
-const COMPLEX_COMMAND_PATTERN = /\\(?:frac|dfrac|tfrac|sqrt|sum|prod|int|iint|iiint|oint|begin|end|matrix|pmatrix|bmatrix|cases|aligned|substack|operatorname|overset|underset|underbrace|overbrace|lim|mathbb|mathcal|boldsymbol|text)\b/;
-const SUPERSCRIPTS = { 0: "⁰", 1: "¹", 2: "²", 3: "³", 4: "⁴", 5: "⁵", 6: "⁶", 7: "⁷", 8: "⁸", 9: "⁹", "+": "⁺", "-": "⁻", n: "ⁿ", i: "ⁱ", T: "ᵀ" };
-const SUBSCRIPTS = { 0: "₀", 1: "₁", 2: "₂", 3: "₃", 4: "₄", 5: "₅", 6: "₆", 7: "₇", 8: "₈", 9: "₉", "+": "₊", "-": "₋", i: "ᵢ", j: "ⱼ", k: "ₖ", n: "ₙ", x: "ₓ" };
+const COMPLEX_COMMAND_PATTERN = /\\(?:frac|dfrac|tfrac|sqrt|sum|prod|int|iint|iiint|oint|begin|end|matrix|pmatrix|bmatrix|vmatrix|Vmatrix|cases|aligned|substack|operatorname|overset|underset|underbrace|overbrace|xrightarrow|xleftarrow|lim|mathbb|mathcal|mathbf|mathrm|mathit|mathsf|mathtt|boldsymbol|text|textrm|textbf|textit|overline|underline|widehat|widetilde|hat|bar|tilde|vec|dot|ddot)\b/;
+const SUPERSCRIPTS = {
+  0: "⁰", 1: "¹", 2: "²", 3: "³", 4: "⁴", 5: "⁵", 6: "⁶", 7: "⁷", 8: "⁸", 9: "⁹",
+  "+": "⁺", "-": "⁻", "(": "⁽", ")": "⁾", "*": "∗", "⊤": "ᵀ", "′": "′",
+  a: "ᵃ", b: "ᵇ", c: "ᶜ", d: "ᵈ", e: "ᵉ", i: "ⁱ", k: "ᵏ", m: "ᵐ", n: "ⁿ",
+  p: "ᵖ", r: "ʳ", s: "ˢ", t: "ᵗ", x: "ˣ", y: "ʸ", z: "ᶻ", H: "ᴴ", T: "ᵀ",
+};
+const SUBSCRIPTS = {
+  0: "₀", 1: "₁", 2: "₂", 3: "₃", 4: "₄", 5: "₅", 6: "₆", 7: "₇", 8: "₈", 9: "₉",
+  "+": "₊", "-": "₋", "(": "₍", ")": "₎",
+  a: "ₐ", e: "ₑ", h: "ₕ", i: "ᵢ", j: "ⱼ", k: "ₖ", l: "ₗ", m: "ₘ", n: "ₙ",
+  o: "ₒ", p: "ₚ", r: "ᵣ", s: "ₛ", t: "ₜ", u: "ᵤ", v: "ᵥ", x: "ₓ",
+};
 const COMMAND_REPLACEMENTS = new Map([
   ["alpha", "α"], ["beta", "β"], ["gamma", "γ"], ["delta", "δ"], ["epsilon", "ε"],
   ["varepsilon", "ε"], ["theta", "θ"], ["lambda", "λ"], ["mu", "μ"], ["nu", "ν"],
@@ -28,10 +46,28 @@ const COMMAND_REPLACEMENTS = new Map([
   ["pm", "±"], ["mp", "∓"], ["le", "≤"], ["leq", "≤"], ["ge", "≥"], ["geq", "≥"],
   ["ne", "≠"], ["neq", "≠"], ["approx", "≈"], ["in", "∈"], ["notin", "∉"],
   ["subset", "⊂"], ["subseteq", "⊆"], ["supset", "⊃"], ["supseteq", "⊇"],
-  ["to", "→"], ["rightarrow", "→"], ["leftarrow", "←"], ["infty", "∞"],
-  ["partial", "∂"], ["nabla", "∇"], ["ell", "ℓ"], ["hbar", "ℏ"], ["mid", "|"],
-  ["Vert", "‖"], ["vert", "|"], ["left", ""], ["right", ""],
+  ["to", "→"], ["rightarrow", "→"], ["leftarrow", "←"], ["leftrightarrow", "↔"],
+  ["Rightarrow", "⇒"], ["Leftarrow", "⇐"], ["Leftrightarrow", "⇔"],
+  ["implies", "⇒"], ["iff", "⇔"], ["mapsto", "↦"],
+  ["infty", "∞"], ["partial", "∂"], ["nabla", "∇"], ["ell", "ℓ"], ["hbar", "ℏ"],
+  ["mid", "|"], ["Vert", "‖"], ["vert", "|"], ["left", ""], ["right", ""],
+  ["big", ""], ["Big", ""], ["bigg", ""], ["Bigg", ""], ["bigl", ""], ["bigr", ""],
+  ["Bigl", ""], ["Bigr", ""], ["quad", "  "], ["qquad", "    "], ["enspace", " "],
+  ["thinspace", " "], ["otimes", "⊗"], ["oplus", "⊕"], ["odot", "⊙"], ["circ", "∘"],
+  ["ast", "∗"], ["star", "⋆"], ["top", "⊤"], ["perp", "⊥"], ["parallel", "∥"],
+  ["sim", "∼"], ["simeq", "≃"], ["cong", "≅"], ["equiv", "≡"], ["propto", "∝"],
+  ["ll", "≪"], ["gg", "≫"], ["prec", "≺"], ["succ", "≻"], ["preceq", "≼"],
+  ["succeq", "≽"], ["dots", "…"], ["ldots", "…"], ["cdots", "…"], ["cup", "∪"],
+  ["cap", "∩"], ["setminus", "∖"], ["emptyset", "∅"], ["varnothing", "∅"],
+  ["forall", "∀"], ["exists", "∃"], ["neg", "¬"], ["lnot", "¬"], ["land", "∧"],
+  ["wedge", "∧"], ["lor", "∨"], ["vee", "∨"], ["langle", "⟨"], ["rangle", "⟩"],
+  ["lfloor", "⌊"], ["rfloor", "⌋"], ["lceil", "⌈"], ["rceil", "⌉"],
+  ["angle", "∠"], ["triangle", "△"], ["deg", "°"], ["prime", "′"],
 ]);
+const NUMERIC_TUPLE_PATTERN = /^-?\d+(?:\.\d+)?(?:\s*,\s*-?\d+(?:\.\d+)?)+$/;
+const LITERAL_LBRACE = "\uE001";
+const LITERAL_RBRACE = "\uE002";
+const LITERAL_UNDERSCORE = "\uE003";
 
 export function scanLatexFormulas(input) {
   const text = String(input || "");
@@ -72,39 +108,99 @@ export function scanLatexFormulas(input) {
   return formulas;
 }
 
-export function isComplexLatex(latex) {
-  const value = String(latex || "").trim();
-  if (!value) return false;
-  if (COMPLEX_COMMAND_PATTERN.test(value)) return true;
-  if (value.length > 48) return true;
-  if ((value.match(/[{}]/g) || []).length >= 6) return true;
-  if (/\^\s*\{[^}]{2,}\}|_\s*\{[^}]{2,}\}/.test(value)) return true;
-  const commands = [...value.matchAll(/\\([A-Za-z]+)/g)].map((match) => match[1]);
-  return commands.some((command) => !SIMPLE_COMMANDS.has(command));
-}
-
-export function simplifyInlineLatex(latex) {
-  let value = String(latex || "").trim();
-  if (!value || isComplexLatex(value)) return null;
-  value = value.replace(/\\([A-Za-z]+)/g, (match, command) => COMMAND_REPLACEMENTS.get(command) ?? match);
-  if (/\\[A-Za-z]+/.test(value)) return null;
-  value = value
-    .replace(/\\([{}_$%&#])/g, "$1")
-    .replace(/\\left|\\right/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-  value = value.replace(/\^(\{([^{}]+)\}|([0-9+\-niT]))/g, (match, _group, braced, single) => {
+function convertSimpleScripts(value) {
+  let out = value.replace(/\^\s*(?:\{([^{}]+)\}|([^\s{}^_]))/g, (match, braced, single) => {
     const source = braced ?? single;
     const converted = [...source].map((char) => SUPERSCRIPTS[char] || "").join("");
     return converted.length === source.length ? converted : match;
   });
-  value = value.replace(/_(\{([^{}]+)\}|([0-9+\-ijknx]))/g, (match, _group, braced, single) => {
+  out = out.replace(/_\s*(?:\{([^{}]+)\}|([^\s{}^_]))/g, (match, braced, single) => {
     const source = braced ?? single;
     const converted = [...source].map((char) => SUBSCRIPTS[char] || "").join("");
     return converted.length === source.length ? converted : match;
   });
-  value = value.replace(/[{}]/g, "");
-  return value;
+  return out;
+}
+
+function trySimplifySimpleLatex(latex) {
+  let value = String(latex || "").trim();
+  if (!value) return null;
+  if (/\\\\/.test(value)) return null;
+  value = value
+    .replace(/\\\|/g, "‖")
+    .replace(/\\\{/g, LITERAL_LBRACE)
+    .replace(/\\\}/g, LITERAL_RBRACE)
+    .replace(/\\_/g, LITERAL_UNDERSCORE)
+    .replace(/\\([A-Za-z]+)/g, (match, command) => COMMAND_REPLACEMENTS.get(command) ?? match)
+    .replace(/\\!/g, "")
+    .replace(/\\[,;: ]/g, " ")
+    .replace(/\\([$%&#])/g, "$1");
+  if (/\\/.test(value)) return null;
+  value = convertSimpleScripts(value);
+  if (/[\^_]/.test(value)) return null;
+  value = value
+    .replace(/[{}]/g, "")
+    .replaceAll(LITERAL_LBRACE, "{")
+    .replaceAll(LITERAL_RBRACE, "}")
+    .replaceAll(LITERAL_UNDERSCORE, "_")
+    .replace(/\s+/g, " ")
+    .trim();
+  return value || null;
+}
+
+export function isComplexLatex(latex) {
+  const value = String(latex || "").trim();
+  if (!value) return false;
+  if (COMPLEX_COMMAND_PATTERN.test(value)) return true;
+  if (/\\\\/.test(value)) return true;
+  if (value.length > 48) return true;
+  if ((value.match(/[{}]/g) || []).length >= 6) return true;
+  if (/\^\s*\{[^}]{2,}\}|_\s*\{[^}]{2,}\}/.test(value)) return true;
+  const commands = [...value.matchAll(/\\([A-Za-z]+)/g)].map((match) => match[1]);
+  if (commands.some((command) => !SIMPLE_COMMANDS.has(command))) return true;
+  return trySimplifySimpleLatex(value) === null;
+}
+
+export function simplifyInlineLatex(latex) {
+  const value = String(latex || "").trim();
+  if (!value || isComplexLatex(value)) return null;
+  return trySimplifySimpleLatex(value);
+}
+
+export function simplifySimpleFormulasInMarkdown(markdownText) {
+  const chunks = splitProtectedMarkdown(markdownText);
+  let out = "";
+  for (const chunk of chunks) {
+    if (chunk.protected) {
+      out += chunk.content;
+      continue;
+    }
+    const paragraphs = chunk.content.split(/(\r?\n\s*\r?\n+)/);
+    for (const paragraph of paragraphs) {
+      if (!paragraph || /^\r?\n\s*\r?\n+$/.test(paragraph)) {
+        out += paragraph;
+        continue;
+      }
+      const formulas = scanLatexFormulas(paragraph);
+      if (!formulas.length) {
+        out += paragraph;
+        continue;
+      }
+      let cursor = 0;
+      for (const formula of formulas) {
+        out += paragraph.slice(cursor, formula.start);
+        if (!formula.display) {
+          const simplified = simplifyInlineLatex(formula.latex);
+          out += simplified !== null ? simplified : formula.raw;
+        } else {
+          out += formula.raw;
+        }
+        cursor = formula.end;
+      }
+      out += paragraph.slice(cursor);
+    }
+  }
+  return out;
 }
 
 export function planFormulaRendering(markdownText, {
@@ -325,6 +421,15 @@ export function createFormulaImageService({
     return planBlocks(blocks).plannedCount > 0;
   }
 
+  function simplifyBlocks(blocks) {
+    if (!enabled) return blocks;
+    return (Array.isArray(blocks) ? blocks : []).map((block) => {
+      if (block?.kind !== "text" || !String(block.content || "").trim()) return block;
+      const simplified = simplifySimpleFormulasInMarkdown(block.content);
+      return simplified === block.content ? block : { ...block, content: simplified };
+    });
+  }
+
   async function enrichBlocks(blocks) {
     if (!enabled) {
       return {
@@ -336,7 +441,15 @@ export function createFormulaImageService({
 
     const { blockPlans, plannedCount } = planBlocks(blocks);
     if (plannedCount === 0) {
-      return { blocks, sources: [], stats: { enabled: true, browser: Boolean(resolvedBrowser), planned: 0, rendered: 0, failed: 0 } };
+      const simplifiedBlocks = [];
+      for (const plans of blockPlans) {
+        for (const plan of plans) pushOutputBlock(simplifiedBlocks, plan);
+      }
+      return {
+        blocks: simplifiedBlocks,
+        sources: [],
+        stats: { enabled: true, browser: Boolean(resolvedBrowser), planned: 0, rendered: 0, failed: 0 },
+      };
     }
     if (!resolvedBrowser || typeof uploadImage !== "function") {
       const fallback = fallbackFormulaPlans(blockPlans);
@@ -362,8 +475,9 @@ export function createFormulaImageService({
     inUseCount += 1;
     try {
       const { katex, chromium, markdown } = await loadDeps();
-      const deadline = Date.now() + Math.max(2_000, Number(renderTimeoutMs || 20_000));
       const browser = await ensureBrowser(chromium);
+      // Start per-batch render deadline after cold browser launch so launch time never drops trailing formulas.
+      const deadline = Date.now() + Math.max(2_000, Number(renderTimeoutMs || 45_000));
       page = await browser.newPage({ viewport: { width: 1200, height: 900 }, deviceScaleFactor: 2 });
       page.setDefaultTimeout?.(renderTimeoutMs);
 
@@ -458,6 +572,7 @@ export function createFormulaImageService({
     close,
     enrichBlocks,
     hasPlannedFormulas,
+    simplifyBlocks,
     warmup,
     isBrowserActive: () => Boolean(activeBrowser),
   };
@@ -467,10 +582,30 @@ function formulaOpenerAt(text, index) {
   if (text.startsWith("$$", index) && !isEscaped(text, index)) return { open: "$$", close: "$$", display: true };
   if (text.startsWith("\\[", index) && !isEscaped(text, index)) return { open: "\\[", close: "\\]", display: true };
   if (text.startsWith("\\(", index) && !isEscaped(text, index)) return { open: "\\(", close: "\\)", display: false };
-  if (text[index] === "$" && !isEscaped(text, index) && !currencyDollarAt(text, index)) {
+  if (text[index] === "$" && !isEscaped(text, index) && !templateDollarAt(text, index) && !currencyDollarAt(text, index)) {
     return { open: "$", close: "$", display: false };
   }
   return null;
+}
+
+function templateDollarAt(text, index) {
+  if (text[index] !== "$") return false;
+  const match = text.slice(index).match(/^\$\{([A-Za-z_][A-Za-z0-9_.:-]*)\}/);
+  if (!match) return false;
+  const name = match[1];
+  const after = text[index + match[0].length] || "";
+  if (/^[A-Za-z]$/.test(name) && (after === "^" || after === "_")) return false;
+  return name.includes(".") || name.includes("_") || name.length >= 2 || after === "/";
+}
+
+function stripLatexTextCommands(latex) {
+  let out = String(latex || "");
+  for (let pass = 0; pass < 3; pass += 1) {
+    const next = out.replace(/\\(?:text|textrm|textbf|textit|textsf|texttt|mathrm|mathbf|mathit|operatorname|mbox|hbox)\s*\{[^{}]*\}/g, "");
+    if (next === out) break;
+    out = next;
+  }
+  return out;
 }
 
 function currencyDollarAt(text, index) {
@@ -480,7 +615,20 @@ function currencyDollarAt(text, index) {
   if (!amount) return false;
   const following = tail[amount[0].length] || "";
   if (following === "$") return false;
-  return !following || /[\s,.;:!?，。；：！？、]/.test(following);
+  if (!following || /[\s,.;:!?，。；：！？、]/.test(following)) {
+    const closeAt = findFormulaClose(text, index + 1, "$");
+    if (closeAt < 0) return true;
+    const body = text.slice(index + 1, closeAt);
+    if (!body || /[\r\n]/.test(body) || /^\s|\s$/.test(body)) return true;
+    const afterClose = text[closeAt + 1] || "";
+    if (/\d/.test(afterClose)) return true;
+    const outsideText = stripLatexTextCommands(body);
+    if (/[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]/.test(outsideText)) return true;
+    const hasLatexOrOperator = /\\(?:[A-Za-z]+|[,;:! |{}])|[=<>+\-*/^_]/.test(outsideText);
+    if (hasLatexOrOperator || NUMERIC_TUPLE_PATTERN.test(outsideText.trim())) return false;
+    return true;
+  }
+  return false;
 }
 
 function findFormulaClose(text, start, close) {
@@ -523,7 +671,7 @@ function validFormulaCandidate(text, start, end, latex, display) {
   if (!body.trim()) return false;
   if (!display && /[\r\n]/.test(body)) return false;
   if (!display && (/^\s|\s$/.test(body))) return false;
-  if (!display && /\s/.test(body) && !/[\\^_={}|<>+\-*/]/.test(body)) return false;
+  if (!display && /\s/.test(body) && !/[\\^_={}|<>+\-*/]/.test(body) && !NUMERIC_TUPLE_PATTERN.test(body.trim())) return false;
   const previous = text[start - 1] || "";
   const next = text[end] || "";
   if (!display && /\d/.test(previous) && /\d/.test(body[0] || "")) return false;

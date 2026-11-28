@@ -30,7 +30,7 @@ import {
   prepareCardEvent,
 } from "./src/feishu/card-content.mjs";
 import { createManagedCardClass } from "./src/feishu/cards/managed-card.mjs";
-import { createFormulaImageService } from "./src/feishu/cards/formula-renderer.mjs";
+import { createFormulaImageService, simplifySimpleFormulasInMarkdown } from "./src/feishu/cards/formula-renderer.mjs";
 import {
   idempotencyKey,
   markdown,
@@ -171,9 +171,9 @@ const CONFIG = {
   maxRunningToolDetails: Number(process.env.CODEX_FEISHU_CARD_MAX_RUNNING_TOOL_DETAILS || "20"),
   formulaRendering: (process.env.CODEX_FEISHU_FORMULA_RENDERING || "1") !== "0",
   formulaBrowserBin: process.env.CODEX_FEISHU_FORMULA_BROWSER_BIN || "",
-  formulaMaxImages: Number(process.env.CODEX_FEISHU_FORMULA_MAX_IMAGES || "8"),
+  formulaMaxImages: Number(process.env.CODEX_FEISHU_FORMULA_MAX_IMAGES || "16"),
   formulaMaxParagraphChars: Number(process.env.CODEX_FEISHU_FORMULA_MAX_PARAGRAPH_CHARS || "1400"),
-  formulaRenderTimeoutMs: parseDurationMs(process.env.CODEX_FEISHU_FORMULA_RENDER_TIMEOUT_MS, 15_000),
+  formulaRenderTimeoutMs: parseDurationMs(process.env.CODEX_FEISHU_FORMULA_RENDER_TIMEOUT_MS, 45_000),
   larkDataFileThreshold: Number(process.env.CODEX_FEISHU_LARK_DATA_FILE_THRESHOLD || "8000"),
   replyToMessage: (process.env.CODEX_FEISHU_REPLY_TO_MESSAGE || "0") === "1",
   useThreadReply: (process.env.CODEX_FEISHU_REPLY_IN_THREAD || "0") === "1",
@@ -1174,21 +1174,25 @@ async function handleEvent(rawEvent, dispatchControl = {}) {
     if (state.terminal === "done" && state.formulaRenderPromise && !state.formulaRenderComplete) {
       return;
     }
-    const rendered = renderRunCard(state);
     if (state.terminal === "running") {
       lastCardTickAt = Date.now();
-      card.update(rendered);
+      card.update(renderRunCard(state));
       return;
     }
     if (state.terminal === "done") {
       const shouldRenderFormulas = !state.formulaRenderComplete
         && !state.formulaRenderPromise
         && Boolean(formulaImageService.hasPlannedFormulas?.(state.blocks));
-      const ok = await card.flush(rendered);
+      const snapshotBlocks = shouldRenderFormulas
+        ? state.blocks.map((block) => ({ ...block }))
+        : null;
+      if (!state.formulaRenderComplete && !state.formulaRenderPromise && typeof formulaImageService.simplifyBlocks === "function") {
+        state.blocks = formulaImageService.simplifyBlocks(state.blocks);
+      }
+      const ok = await card.flush(renderRunCard(state));
       finalCardFlushOk = ok !== false;
       if (shouldRenderFormulas && finalCardFlushOk && !card.closed) {
         const targetCard = card;
-        const snapshotBlocks = state.blocks.map((block) => ({ ...block }));
         state.formulaRenderPromise = (async () => {
           const formulaStartedAt = Date.now();
           try {
@@ -1203,7 +1207,7 @@ async function handleEvent(rawEvent, dispatchControl = {}) {
               durationMs: Date.now() - formulaStartedAt,
               ...result.stats,
             });
-            if (!targetCard.closed && Number(result.stats?.rendered || 0) > 0) {
+            if (!targetCard.closed && (Number(result.stats?.rendered || 0) > 0 || Number(result.stats?.failed || 0) > 0)) {
               const upgradedOk = await targetCard.flush(renderRunCard(state));
               log("INFO", "formula card upgraded asynchronously", {
                 messageId,
@@ -1230,7 +1234,7 @@ async function handleEvent(rawEvent, dispatchControl = {}) {
       }
       return;
     }
-    const ok = await card.flush(rendered);
+    const ok = await card.flush(renderRunCard(state));
     finalCardFlushOk = ok !== false;
     card.close();
   };
@@ -1342,9 +1346,10 @@ async function handleEvent(rawEvent, dispatchControl = {}) {
     appendHistory(session, "assistant", result.text);
     stats.answered += 1;
     if (!card || !finalCardFlushOk) {
+      const formatted = formatAnswer(result, session);
       await sendMarkdown(
         chatId,
-        formatAnswer(result, session),
+        CONFIG.formulaRendering ? simplifySimpleFormulasInMarkdown(formatted) : formatted,
         "answer",
         messageId,
       );
