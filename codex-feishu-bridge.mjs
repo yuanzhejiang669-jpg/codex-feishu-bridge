@@ -1036,7 +1036,9 @@ async function handleEvent(rawEvent, dispatchControl = {}) {
     return;
   }
 
-  const downloadedAttachments = event.cardReference ? [] : await downloadAllAttachments(event);
+  const downloadedAttachments = event.cardReference
+    ? (event.cardImageKeys?.length ? await downloadImageAttachments(event, { keys: event.cardImageKeys }) : [])
+    : await downloadAllAttachments(event);
   const attachmentFailures = Array.isArray(event.attachmentFailures) ? event.attachmentFailures : [];
   if (dispatchControl.commit && !dispatchControl.commit()) {
     cleanupClearedDownloads(downloadedAttachments);

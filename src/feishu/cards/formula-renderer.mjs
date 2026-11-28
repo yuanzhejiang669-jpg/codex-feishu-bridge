@@ -896,12 +896,50 @@ function inlineCodeRanges(text) {
   return ranges;
 }
 
+const MATH_SPACE_KEYWORDS = new Set([
+  "sin", "cos", "tan", "cot", "sec", "csc",
+  "arcsin", "arccos", "arctan", "sinh", "cosh", "tanh",
+  "log", "ln", "lg", "exp", "det", "tr", "rank", "dim",
+  "ker", "im", "Im", "Re", "span", "diag", "min", "max",
+  "sup", "inf", "arg", "mod", "gcd", "lcm", "adj", "sgn",
+  "cov", "var", "Var", "Cov", "Corr", "Pr", "deg", "lim",
+]);
+
+function isValidSpaceMathExpression(outsideText) {
+  const trimmed = String(outsideText || "").trim();
+  if (!trimmed || trimmed.length > 64) return false;
+  if (/[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]/.test(trimmed)) return false;
+  if (!/^[A-Za-z0-9()[\],.;:'!\s-]+$/.test(trimmed)) return false;
+  const tokens = trimmed.match(/[A-Za-z0-9.]+/g);
+  if (!tokens || tokens.length === 0) return false;
+  if (!tokens.some((token) => /[A-Za-z0-9]/.test(token))) return false;
+  return tokens.every((token) => (
+    /^-?\d+(?:\.\d+)?$/.test(token)
+    || /^[A-Za-z]\d*$/.test(token)
+    || MATH_SPACE_KEYWORDS.has(token)
+  ));
+}
+
 function validFormulaCandidate(text, start, end, latex, display) {
   const body = String(latex || "");
   if (!body.trim()) return false;
   if (!display && /[\r\n]/.test(body)) return false;
   if (!display && (/^\s|\s$/.test(body))) return false;
-  if (!display && /\s/.test(body) && !/[\\^_={}|<>+\-*/]/.test(body) && !NUMERIC_TUPLE_PATTERN.test(body.trim())) return false;
+  if (!display) {
+    const outsideText = stripLatexTextCommands(body);
+    // Reject CJK prose or CJK punctuation outside \text{...} (blocks `$、$` parity desync and prose between prices).
+    if (/[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]/.test(outsideText)) return false;
+    // Reject pure ASCII punctuation with no math symbols/identifiers.
+    if (/^[,.;:!?'"`~\s]+$/.test(outsideText)) return false;
+    if (
+      /\s/.test(body)
+      && !/[\\^_={}|<>+\-*/]/.test(body)
+      && !NUMERIC_TUPLE_PATTERN.test(body.trim())
+      && !isValidSpaceMathExpression(outsideText)
+    ) {
+      return false;
+    }
+  }
   const previous = text[start - 1] || "";
   const next = text[end] || "";
   if (!display && /\d/.test(previous) && /\d/.test(body[0] || "")) return false;

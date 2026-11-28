@@ -258,10 +258,15 @@ export function createAttachmentManager(deps = {}) {
     event.attachmentFailures.push(failure);
   }
 
-  async function downloadImageAttachments(event) {
+  async function downloadImageAttachments(event, options = {}) {
     const messageId = event.message_id || event.id;
-    const keys = imageKeysFromContent(event.content);
+    const keys = Array.isArray(options?.keys)
+      ? [...new Set(options.keys.map((key) => String(key || "").trim()).filter((key) => /^img_[A-Za-z0-9_:-]+$/.test(key)))]
+      : imageKeysFromContent(event.content);
     if (!messageId || !keys.length) return [];
+    if (event && typeof event === "object" && !Array.isArray(event.attachmentFailures)) {
+      event.attachmentFailures = [];
+    }
 
     const limiter = limiterForEvent(event);
     const settled = await mapWithLimiter(keys, limiter, async (fileKey, index) => {
