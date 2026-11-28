@@ -60,10 +60,11 @@ try {
       streaming: false,
     },
   ]);
-  assert.equal(result.stats.rendered, 4);
+  assert.ok(result.stats.rendered >= 5 && result.stats.rendered <= 12, `Expected crisp split image count (5..12), got ${result.stats.rendered}`);
   assert.equal(result.stats.failed, 0);
-  assert.equal(uploads.length, 4);
-  assert.equal(result.blocks.filter((block) => block.kind === "formula_image").length, 4);
+  assert.equal(uploads.length, result.stats.rendered);
+  assert.equal(result.blocks.filter((block) => block.kind === "formula_image").length, result.stats.rendered);
+  assert.equal(uploads.every((upload) => upload.height / upload.width <= 1.35), true, "All smoke formula images must stay compact enough to avoid Feishu thumbnail blur");
   assert.equal(result.sources.includes("1"), true);
   assert.match(result.blocks.find((block) => block.kind === "text")?.content || "", /x²\+y²=1/);
   assert.match(result.blocks.find((block) => block.kind === "text")?.content || "", /数字公式 1/);
