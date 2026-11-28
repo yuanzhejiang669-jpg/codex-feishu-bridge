@@ -1,6 +1,6 @@
 {
   "name": "codex-feishu-bridge-desktop",
-  "version": "0.10.28",
+  "version": "0.10.29",
   "private": true,
   "description": "Windows, macOS, and Linux desktop client for Codex Feishu Bridge",
   "desktopName": "codex-feishu-bridge.desktop",
